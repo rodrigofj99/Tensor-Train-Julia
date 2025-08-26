@@ -121,7 +121,7 @@ end
 returns a TT representation where the singular values lower than tol are discarded
 """
 function tt_rounding(x_tt::TTvector{T,N};tol=1e-12,rmax=2^14) where {T<:Number,N}
-	y_tt = orthogonalize(x_tt;i=x_tt.N)
+	is_leftorthogonal(x_tt) ? y_tt = copy(x_tt) :	y_tt = orthogonalize(x_tt;i=x_tt.N)
 	for j in x_tt.N:-1:2
 		u,s,v = svd(reshape(permutedims(y_tt.ttv_vec[j],[2 1 3]),y_tt.ttv_rks[j],:),full=false)
 		_,k = floor(s[s.>0],tol)

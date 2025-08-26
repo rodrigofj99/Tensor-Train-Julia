@@ -223,6 +223,11 @@ function Base.copy(x_tt::TTvector{T,N}) where {T<:Number,N}
 	return y_tt
 end
 
+function is_leftorthogonal(x_tt::TTvector{T,N}) where {T<:Number,N}
+	ot = ones(Int64,N)
+	return ot[1:N-1] == x_tt.ttv_ot[1:N-1]
+end
+
 """
 TT decomposition by the Hierarchical SVD algorithm 
 	* Oseledets, I. V. (2011). Tensor-train decomposition. *SIAM Journal on Scientific Computing*, 33(5), 2295-2317.

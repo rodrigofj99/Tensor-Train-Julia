@@ -106,6 +106,20 @@ function qtt_sin(d;a=0.0,b=1.0,λ=1.0)
   return out
 end
 
+function qtt_extension(x::TTvector{T,N},d) where {T<:Number,N}
+  @assert N<=d 
+  rks = vcat(x.ttv_rks,ones(Int64,d-N))
+  out = ones_tt(2,d,rks)
+  for k in 1:N 
+    out.ttv_vec[k] = x.ttv_vec[k]
+  end
+  return out
+end
+
+function qtt_restriction(x::TTvector{T,N},d) where {T<:Number,N}
+  @assert N>=d
+end
+
 function toeplitz_to_qtto(α,β,γ,d)
   out = zeros_tto(2,d,3)
   id = Matrix{Float64}(I,2,2)

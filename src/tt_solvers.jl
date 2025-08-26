@@ -2,44 +2,38 @@
 Gradient descent with fixed step and periodic TT rounding
 """
 
-function gradient_fixed_step(A,b,α;x0=copy(b), Imax=100, tol_gd=1e-6, i_trunc = 5, eps_tt = 1e-4, r_tt = 512, rand_rounding=false, verbose=false)
+function gradient_fixed_step(A,b,α;x0=copy(b), Imax=100, tol_gd=1e-6, i_trunc = 5, eps_tt = 1e-4, r_tt = 512, rand_rounding=false, verbose=false, ℓ=0)
     i=1
     x=copy(x0)
-    p = A*x-b
+    x_rks = x.ttv_rks
+    rmax = min(r_tt,maximum(A.tto_rks .* x.ttv_rks))
+    p_rks = x_rks
+    rand_rounding ? p = ttrand_rounding(A,x,b;rks=x_rks,rmax=r_tt,ℓ) : p = A*x-b
     resid = zeros(Imax)
     resid[1] = norm(p)
     it_trunc = 1
-    x_rks = x.ttv_rks
-    p_rks = x.ttv_rks
     while i<Imax && resid[i] > (tol_gd+eps_tt)*resid[1]
-       i+=1
-       x = x - α*p
-       p = A*x-b
-       if verbose
-        println("Iteration: "*string(i))
-        println("TT rank p: "*string(maximum(p.ttv_rks)))
-        println("TT rank x: "*string(maximum(x.ttv_rks))*"\n")
-       end
-       if (it_trunc == i_trunc) || (max(maximum(p.ttv_rks),maximum(x.ttv_rks)) > r_tt)
-          if rand_rounding
-            x = ttrand_rounding(x,rks=2*x_rks,rmax=r_tt)
-            p = ttrand_rounding(p,rks=2*p_rks,rmax=r_tt)
-          end
+        i+=1
+        x = x - α*p
+        rand_rounding ? p = ttrand_rounding(A,x,b;rks=p_rks,rmax=r_tt,ℓ) : p = A*x-b
+        if verbose
+            println("Iteration: "*string(i))
+            println("TT rank p: "*string(maximum(p.ttv_rks)))
+            println("TT rank x: "*string(maximum(x.ttv_rks))*"\n")
+        end
+        if (it_trunc == i_trunc) || (max(maximum(p.ttv_rks),maximum(x.ttv_rks)) > r_tt)
+            if rand_rounding
+                x = ttrand_rounding(x;rks=x_rks,rmax=r_tt,ℓ)
+            end
             x = tt_rounding(x;tol = eps_tt,rmax=r_tt)
             p = tt_rounding(p;tol = eps_tt,rmax=r_tt)
+            x_rks = x.ttv_rks
+            p_rks = p.ttv_rks
             it_trunc = 1
-            if rand_rounding
-                if maximum(x.ttv_rks) ≥ 2maximum(x_rks)
-                    x_rks = x.ttv_rks
-                end
-                if maximum(p.ttv_rks) ≥ 2maximum(p_rks)
-                    p_rks = p.ttv_rks
-                end
-            end
-       else 
-          it_trunc +=1 
-       end
-       resid[i] = norm(p)
+        else 
+            it_trunc +=1 
+        end
+        resid[i] = norm(p)
     end
     return x, resid[1:i]
  end
