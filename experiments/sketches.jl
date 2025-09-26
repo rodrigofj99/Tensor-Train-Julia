@@ -3,8 +3,8 @@ import LinearAlgebra.norm
 include("utilities.jl")
 
 
-function TTR(rng::AbstractRNG,::Type{T}, dims:: NTuple{M,Int64}, rks::Int) where {T,M}
-    N = length(dims)
+function TTR(rng::AbstractRNG,::Type{T}, dims:: NTuple{N,Int64}, rks::Int) where {T,N}
+    #N = length(dims)
     #X = Array{T,3}[]
     X = Vector{Array{T,3}}(undef, N)
     rks = vcat(1, fill(rks, N-1), 1)
@@ -32,5 +32,5 @@ function TTR(rng::AbstractRNG,::Type{T}, dims:: NTuple{M,Int64}, rks::Int) where
         # X{n} = (1 / (R(n)*R(n+1))^(0.25)) .* randn(R(n), I(n), R(n + 1), like=1i);
     end
 
-    return TTvector{T,M}(N, X, dims, rks, zeros(Int64, N))
+    return TTvector{T,N}(N, X, dims, rks, zeros(Int64, N))
 end

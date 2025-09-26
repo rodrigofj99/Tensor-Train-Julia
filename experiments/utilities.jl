@@ -70,7 +70,7 @@ function tt_dot(A::TTvector{T1,N}, B::TTvector{T2,N}) where {T1<:Number,T2<:Numb
     end
 end
 
-function tt_randn(rng::AbstractRNG,dims::NTuple{N,Int64},rks::Vector{Int64};orthogonal=false,right=true,T::Type{<:Number}=Float64) where {N<:Int64}
+function tt_randn(rng::AbstractRNG,dims::NTuple{N,Int64},rks::Vector{Int64};orthogonal=false,right=true,T::Type{<:Number}=Float64) where {N}
 
     #= println(rks)
     println(r_and_d_to_rks(rks,dims;rmax = maximum(rks))) =#
