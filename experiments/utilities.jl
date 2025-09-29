@@ -48,17 +48,14 @@ function tt_dot(A::TTvector{T1,N}, B::TTvector{T2,N}) where {T1<:Number,T2<:Numb
     C = ones(T, A_rks[end], B_rks[end])
 
     
-
     # Backward recursion: process cores from N down to 1
     @inbounds for k in N:-1:1
-        # allocate next contracted matrix of size (rA[k], rB[k])
         Cnew = zeros(T, A_rks[k], B_rks[k])
 
         # perform the local contraction for site k:
         #   Cnew[α, β] = Σ_{z, αp, βp} A_k[z, α, αp] * B_k[z, β, βp] * C[αp, βp]
         @tensor Cnew[a, b] = A.ttv_vec[k][z, a, ap] * (B.ttv_vec[k][z, b, bp] * C[ap, bp])
 
-        # advance the recursion
         C = Cnew
     end
 
@@ -70,26 +67,38 @@ function tt_dot(A::TTvector{T1,N}, B::TTvector{T2,N}) where {T1<:Number,T2<:Numb
     end
 end
 
-function tt_randn(rng::AbstractRNG,dims::NTuple{N,Int64},rks::Vector{Int64};orthogonal=false,right=true,T::Type{<:Number}=Float64) where {N}
+function ortho_randn(rng::AbstractRNG, dim:: Int64, rk_l::Int64, rk_r::Int64; right=true,T::Type{<:Number}=Float64)
+    y = randn(rng, T, dim, rk_l, rk_r)
+    if right
+        Q,_ = qr(reshape(permutedims(y, (1,3,2)), dim * rk_r, rk_l))
+        y = permutedims(reshape(Matrix(Q), dim, rk_r, rk_l), (1,3,2))
+    else
+        Q,_ = qr(reshape(y, dim * rk_l, rk_r))
+        y = reshape(Matrix(Q), dim, rk_l, rk_r)
+    end
+end
 
-    #= println(rks)
-    println(r_and_d_to_rks(rks,dims;rmax = maximum(rks))) =#
 
+function tt_randn(rng::AbstractRNG,dims::NTuple{N,Int64},rks::Vector{Int64}; normalize = true, orthogonal=false,right=true,T::Type{<:Number}=Float64) where {N}
 	y = zeros_tt(T,dims,rks)
 	@simd for i in eachindex(y.ttv_vec)
-		y.ttv_vec[i] = randn(rng, T,dims[i], rks[i], rks[i+1])
-		if orthogonal
-			if right
-                q,_ = qr(reshape(permutedims(y.ttv_vec[i],(1,3,2)),dims[i]*rks[i+1],rks[i]))
-                y.ttv_vec[i] = permutedims(reshape(Matrix(q),dims[i],rks[i+1],rks[i]),(1,3,2))
-			else
-                q,_ = qr(reshape(y.ttv_vec[i],dims[i]*rks[i],rks[i+1]))
-                y.ttv_vec[i] = reshape(Matrix(q),dims[i],rks[i],rks[i+1])
-			end
-            y.ttv_vec[i] *= sqrt(dims[i]*rks[i+1]/rks[i])
+        if orthogonal
+            y.ttv_vec[i] = ortho_randn(rng, dims[i], rks[i], rks[i+1]; right=right, T=T)
+            if normalize  y.ttv_vec[i] *= sqrt(dims[i]*rks[i+1]/rks[i]) end
         else
-            y.ttv_vec[i] /= sqrt(rks[i]) 
+		    y.ttv_vec[i] = randn(rng, T, dims[i], rks[i], rks[i+1])            
+            if normalize y.ttv_vec[i] /= sqrt(rks[i]) end
 		end
 	end
 	return y
+end
+
+function injectivity_dilation(X::Array{T,3}, num_realizations::Int64; stats::Function = x->x) where {T<:Number}
+    α = zeros(T, num_realizations)
+    β = zeros(T, num_realizations)
+    for t = 1:num_realizations
+        α[t] = svdvals(X[:,:,t])[end]^2
+        β[t] = svdvals(X[:,:,t])[1]^2
+    end
+    return stats(α),stats(β)
 end

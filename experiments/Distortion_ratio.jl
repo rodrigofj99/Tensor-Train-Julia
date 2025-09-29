@@ -14,21 +14,21 @@ rng = MersenneTwister(2);
 # Ranks and physical dimensions of tensors
 ranks = [1, 2, 5, 10]
 rank_X = 10
-ds = [10, 7, 2] # dimensions
-Ns = [3, 7, 10] # cores
+ds = 2#[10, 7, 2] # dimensions
+Ns = 10#[3, 7, 10] # cores
 
-K_max = 1000
-Ks = round.(Int, logrange(1, K_max, length=300))
-#Ks = range(1, K_max)
+K_max = 10
+#Ks = round.(Int, logrange(1, K_max, length=300))
+Ks = range(1, K_max)
 #dr_gaussian = zeros(length(ds), num_realizations, length(Ks))
 dr_ttr = zeros(length(ds), num_realizations, length(Ks), length(ranks))
-dr_gttr = zeros(length(ds), num_realizations, length(Ks))
-dr_ogttr = zeros(length(ds), num_realizations, length(Ks))
+dr_gtt = zeros(length(ds), num_realizations, length(Ks))
+dr_ogtt = zeros(length(ds), num_realizations, length(Ks))
 
 #time_gaussian = zeros(length(ds), num_realizations, length(Ks))
 time_ttr = zeros(length(ds), num_realizations, length(Ks), length(ranks))
-time_gttr = zeros(length(ds), num_realizations, length(Ks))
-time_ogttr = zeros(length(ds), num_realizations, length(Ks))
+time_gtt = zeros(length(ds), num_realizations, length(Ks))
+time_ogtt = zeros(length(ds), num_realizations, length(Ks))
 
 
 for p in eachindex(ds)
@@ -45,12 +45,8 @@ for p in eachindex(ds)
     for T in 1:num_realizations
         for k in eachindex(Ks)
             for r in eachindex(ranks)
-                ttr = zeros(ComplexF64, Ks[k])
                 time = @elapsed begin
-                    for i in 1:Ks[k]
-                        sketch = TTR(rng, ComplexF64, I, ranks[r])
-                        ttr[i] = tt_dot(X, sketch)/sqrt(Ks[k])
-                    end
+                    ttr,_ = TTR(rng, [X], I, [ranks[r]], Ks[k], orthogonal=false, normalization="spherical", T=ComplexF64)
                 end
                 time_ttr[p,T,k,r] = time
                 dr_ttr[p,T,k,r] = abs(norm(ttr)^2/norm_X^2 - 1)
@@ -63,50 +59,46 @@ for p in eachindex(ds)
             dr_gaussian[p,T,k] = abs(norm(gaussian_rp)^2/norm_X^2 - 1)     =#
     
             time = @elapsed begin
-                R = vcat(fill(Ks[k], N), 1)
-                sketch = tt_randn(rng, I, R)
-                gttr = tt_dot(X, sketch)
+                gtt,_ = GTT(rng, [X], I, Ks[k])
             end
-            time_gttr[p,T,k] = time
-            dr_gttr[p,T,k] = abs(norm(gttr)^2/norm_X^2 - 1)
+            time_gtt[p,T,k] = time
+            dr_gtt[p,T,k] = abs(norm(gtt)^2/norm_X^2 - 1)
     
             time = @elapsed begin
-                R = [min(Ks[k], i) for i in [reverse(cumprod(reverse(I)))..., 1]]
-                sketch = tt_randn(rng, I, R, orthogonal=true)
-                ogttr = tt_dot(X, sketch)
+                ogtt,_ = GTT(rng, [X], I, Ks[k], orthogonal=true)
             end
-            time_ogttr[p,T,k] = time
-            dr_ogttr[p,T,k] = abs(norm(ogttr)^2/norm_X^2 - 1)
+            time_ogtt[p,T,k] = time
+            dr_ogtt[p,T,k] = abs(norm(ogtt)^2/norm_X^2 - 1)
             
         end
     end
 end
 
 
-for i in eachindex(ds)
-    #p = plot(Ks, transpose(mean(time_gaussian[i,:,:], dims=1)), label="Gaussian RP", linestyle=:dash, yscale=:log10) #mean gives a 1xK_max array
-    p = plot(Ks, transpose(mean(time_gttr[i,:,:], dims=1)),label="GTT", linestyle=:dot, yscale=:log10)
-    plot!(Ks, transpose(mean(time_ogttr[i,:,:], dims=1)),label="OGTT", linestyle=:dashdot, yscale=:log10)
+#= for i in eachindex(ds)
+    #p = plot(Ks, transpose(median(time_gaussian[i,:,:], dims=1)), label="Gaussian RP", linestyle=:dash, yscale=:log10) #mean gives a 1xK_max array
+    p = plot(Ks, transpose(median(time_gtt[i,:,:], dims=1)),label="GTT", linestyle=:dot, yscale=:log10)
+    plot!(Ks, transpose(median(time_ogtt[i,:,:], dims=1)),label="OGTT", linestyle=:dashdot, yscale=:log10)
 
     for r in eachindex(ranks)
-        plot!(Ks, transpose(mean(time_ttr[i,:,:,r], dims=1)),label="TT($(ranks[r]))", yscale=:log10)
+        plot!(Ks, transpose(median(time_ttr[i,:,:,r], dims=1)),label="TT($(ranks[r]))", yscale=:log10)
     end
     
     title!("Distortions (d = $(ds[i]), N = $(Ns[i]))")
     xlabel!("Embedding Dimension")
     ylabel!("Time")
     display(p)
-end
+end =#
 
 
 
 for i in eachindex(ds)
-    #p = plot(Ks, transpose(mean(dr_gaussian[i,:,:], dims=1)), label="Gaussian RP", linestyle=:dash, yscale=:log10) #mean gives a 1xK_max array
-    p = plot(Ks, transpose(mean(dr_gttr[i,:,:], dims=1)),label="GTT", linestyle=:dot, yscale=:log10)
-    plot!(Ks, transpose(mean(dr_ogttr[i,:,:], dims=1)),label="OGTT", linestyle=:dashdot, yscale=:log10)
+    #p = plot(Ks, transpose(median(dr_gaussian[i,:,:], dims=1)), label="Gaussian RP", linestyle=:dash, yscale=:log10) #mean gives a 1xK_max array
+    p = plot(Ks, transpose(median(dr_gtt[i,:,:], dims=1)),label="GTT", linestyle=:dot, yscale=:log10)
+    plot!(Ks, transpose(median(dr_ogtt[i,:,:], dims=1)),label="OGTT", linestyle=:dashdot, yscale=:log10)
 
     for r in eachindex(ranks)
-        plot!(Ks, transpose(mean(dr_ttr[i,:,:,r], dims=1)),label="TT($(ranks[r]))", yscale=:log10)
+        plot!(Ks, transpose(median(dr_ttr[i,:,:,r], dims=1)),label="TT($(ranks[r]))", yscale=:log10)
     end
     
     title!("Distortions (d = $(ds[i]), N = $(Ns[i]))")

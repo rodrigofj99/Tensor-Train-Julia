@@ -1,36 +1,67 @@
 using TensorTrains
 import LinearAlgebra.norm
+using StaticArrays
 include("utilities.jl")
 
 
-function TTR(rng::AbstractRNG,::Type{T}, dims:: NTuple{N,Int64}, rks::Int) where {T,N}
-    #N = length(dims)
-    #X = Array{T,3}[]
-    X = Vector{Array{T,3}}(undef, N)
-    rks = vcat(1, fill(rks, N-1), 1)
+function TTR(rng::AbstractRNG, X::SVector{M,TTvector{T0,N}}, dims::NTuple{N,Int64}, rk::Vector{Int64}, k::Int64; batch::Int64=M, orthogonal=false, normalization::AbstractString, T::Type{<:Number}=Float64) where {T0,N,M}
+    Ω = Vector{TTvector{T,N}}(undef, k)
+    ttr = zeros(T, k, batch)
+
+    rks = length(rk)==1 ? vcat(1, fill(rk[1], N-1), 1) : rk
+
+    for i in 1:k
+        cores = Vector{Array{T,3}}(undef, N)
+        for j = 1 : N
+            if orthogonal
+                tmp = [reverse(cumprod(reverse(dims)))..., 1]
+                rks = [min(rks[i], tmp[i]) for i in eachindex(tmp)]
+                core_j = ortho_randn(rng, dims[j], rks[j], rks[j+1], right=true, T=T)
+            else
+                core_j = randn(rng, T, dims[j], rks[j], rks[j+1])
+            end
+
+            if normalization == "spherical"
+                core_j = (sqrt(dims[j]) / (rks[j]*rks[j+1])^(0.25)) ./ vecnorm(core_j,2,1) .* core_j
+            elseif normalization == "gaussian"
+                core_j = (1 / (rks[j]*rks[j+1])^(0.25)) .* core_j
+            elseif normalization == "orthogonal"
+                core_j *= sqrt(dims[j]*rks[j+1]/rks[j])
+            else
+                error("Normalization not recognized")
+            end
     
-    # If using orthogonal cores, implement upper bound on the ranks
-    #R = [min(R, i) for i in [reverse(cumprod(reverse(I)))..., 1]];
-    for n = 1 : N
-        # # Try spherical distribution normalization - amazing for Khatri-Rao!
-        Xn = randn(rng, T, dims[n], rks[n], rks[n + 1])
-        Xn = (sqrt(dims[n]) / (rks[n]*rks[n+1])^(0.25)) ./ vecnorm(Xn,2,1) .* Xn
-        #push!(X, Xn)
-        X[n] = Xn    
-        #TODO: Port code below to Julia
-        # Orthogonal version of the spherical distribution?
-        # [Xn,~] = qr(randn(R(n+1)*I(n), R(n), like=1i), 'econ');
-        # Xn = reshape(Xn', [R(n),I(n),R(n+1)]);
+            cores[j] = core_j    
+        end
 
-        # # Normalizations: do they make a difference?
-        # s = sqrt(I(n)*R(n+1)/R(n)); 
-        # X{n} = reshape(s * Xn,[R(n),I(n),R(n+1)]);
+        ω = TTvector{T,N}(N, cores, dims, rks, zeros(Int64, N))
+        Ω[i] = ω
 
-        # X{n} = (sqrt(I(n)) / (R(n)*R(n+1))^(0.25)) ./ vecnorm(Xn,2,2) .* Xn;
+        for j = 1:batch
+            ttr[i,j] = tt_dot(X[j], ω)/sqrt(k)
+        end       
+    end
+    return ttr, Ω
+end
 
-        # Or pure Gaussian
-        # X{n} = (1 / (R(n)*R(n+1))^(0.25)) .* randn(R(n), I(n), R(n + 1), like=1i);
+
+function GTT(rng::AbstractRNG, X::SVector{M,TTvector{T0,N}}, dims::NTuple{N,Int64}, k::Int64; batch::Int64=M, orthogonal=false, T::Type{<:Number}=Float64) where {T0,N,M}
+    rks = vcat(fill(k, N), 1)
+    gtt = zeros(T, k, batch)
+    if orthogonal
+        rks = [min(k, i) for i in [reverse(cumprod(reverse(dims)))..., 1]]
+        Ω = tt_randn(rng, dims, rks, orthogonal=true, right=true, T=T)
+    else
+        Ω = tt_randn(rng, dims, rks, T=T)
+    end
+    
+    for i in 1:batch
+        if batch == 1 # Julia doesn't like assignments like gtt[:,1] = scalar
+            gtt = tt_dot(X[1], Ω)
+        else
+            gtt[:,i] = tt_dot(X[i], Ω)
+        end
     end
 
-    return TTvector{T,N}(N, X, dims, rks, zeros(Int64, N))
+    return gtt, Ω
 end
