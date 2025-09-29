@@ -39,6 +39,7 @@ for p in eachindex(ds)
     Rs = vcat(1, fill(10, N-1), 1)
     X = tt_randn(rng, I, Rs)
     X = X/norm(X)
+    X_s = SizedArray{Tuple{1},TTvector{Float64,N}}(X) # wrap in SizedArray for batch size 1 (Improves performance)
     norm_X = norm(X)
     Xfull = vec(full(X))
 
@@ -46,7 +47,7 @@ for p in eachindex(ds)
         for k in eachindex(Ks)
             for r in eachindex(ranks)
                 time = @elapsed begin
-                    ttr,_ = TTR(rng, [X], I, [ranks[r]], Ks[k], orthogonal=false, normalization="spherical", T=ComplexF64)
+                    ttr,_ = TTR(rng, X_s, I, [ranks[r]], Ks[k], orthogonal=false, normalization="spherical", T=ComplexF64)
                 end
                 time_ttr[p,T,k,r] = time
                 dr_ttr[p,T,k,r] = abs(norm(ttr)^2/norm_X^2 - 1)
@@ -59,13 +60,13 @@ for p in eachindex(ds)
             dr_gaussian[p,T,k] = abs(norm(gaussian_rp)^2/norm_X^2 - 1)     =#
     
             time = @elapsed begin
-                gtt,_ = GTT(rng, [X], I, Ks[k])
+                gtt,_ = GTT(rng, X_s, I, Ks[k])
             end
             time_gtt[p,T,k] = time
             dr_gtt[p,T,k] = abs(norm(gtt)^2/norm_X^2 - 1)
     
             time = @elapsed begin
-                ogtt,_ = GTT(rng, [X], I, Ks[k], orthogonal=true)
+                ogtt,_ = GTT(rng, X_s, I, Ks[k], orthogonal=true)
             end
             time_ogtt[p,T,k] = time
             dr_ogtt[p,T,k] = abs(norm(ogtt)^2/norm_X^2 - 1)
