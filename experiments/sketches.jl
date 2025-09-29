@@ -4,7 +4,7 @@ using StaticArrays
 include("utilities.jl")
 
 
-function TTR(rng::AbstractRNG, X::SVector{M,TTvector{T0,N}}, dims::NTuple{N,Int64}, rk::Vector{Int64}, k::Int64; batch::Int64=M, orthogonal=false, normalization::AbstractString, T::Type{<:Number}=Float64) where {T0,N,M}
+function TTR(rng::AbstractRNG, X::SizedArray{Tuple{M},TTvector{T0,N}}, dims::NTuple{N,Int64}, rk::Vector{Int64}, k::Int64; batch::Int64=M, orthogonal=false, normalization::AbstractString, T::Type{<:Number}=Float64) where {T0,N,M}
     Ω = Vector{TTvector{T,N}}(undef, k)
     ttr = zeros(T, k, batch)
 
@@ -45,7 +45,7 @@ function TTR(rng::AbstractRNG, X::SVector{M,TTvector{T0,N}}, dims::NTuple{N,Int6
 end
 
 
-function GTT(rng::AbstractRNG, X::SVector{M,TTvector{T0,N}}, dims::NTuple{N,Int64}, k::Int64; batch::Int64=M, orthogonal=false, T::Type{<:Number}=Float64) where {T0,N,M}
+function GTT(rng::AbstractRNG, X::SizedArray{Tuple{M},TTvector{T0,N}}, dims::NTuple{N,Int64}, k::Int64; batch::Int64=M, orthogonal=false, T::Type{<:Number}=Float64) where {T0,N,M}
     rks = vcat(fill(k, N), 1)
     gtt = zeros(T, k, batch)
     if orthogonal

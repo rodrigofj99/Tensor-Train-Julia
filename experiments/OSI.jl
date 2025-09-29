@@ -29,7 +29,7 @@ I = ntuple(i -> d, N)
 
 ### Need to find a better sample subspace
 #X = cell(λ_max,1)
-X = Vector{TTvector{Float64,N}}(undef, λ_max)
+X = SizedArray{Tuple{λ_max}, TTvector{Float64,N}}(undef)
 
 
 # [V,~] = qr(randn([prod(I),lambda_max]), "econ")
