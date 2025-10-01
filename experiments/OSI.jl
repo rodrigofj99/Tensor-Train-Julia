@@ -44,7 +44,7 @@ for λ = 1:λ_max
     tmp1 = vcat(1, fill(rank_X, N-1), 1)
     tmp2 = [reverse(cumprod(reverse(I)))..., 1]
     R = [min(tmp1[i], tmp2[i]) for i in eachindex(tmp1)]
-    X_λ = tt_randn(rng, I, R, orthogonal=true)
+    X_λ = tt_randn(rng, I, R, "orthogonal", orthogonal=true)
     X[λ] = X_λ/norm(X_λ)
 end
 
@@ -71,10 +71,9 @@ for λ = 1:λ_max
     ogtt[λ] = zeros(k(λ), λ, num_realizations)
 
     for T = 1:num_realizations
-        gtt[λ][:,:,T],_ = GTT(rng, X, I, k(λ), batch=λ)
-        gtt[λ][:,:,T] = gtt[λ][:,:,T]*C[1:λ, 1:λ]
-
-        ogtt[λ][:,:,T],_ = GTT(rng, X, I, k(λ), batch=λ, orthogonal=true)
+        gtt[λ][:,:,T],_ = GTT(rng, X, I, k(λ), "gaussian", batch=λ)
+        gtt[λ][:,:,T] = gtt[λ][:,:,T]*C[1:λ, 1:λ]/sqrt(k(λ))
+        ogtt[λ][:,:,T],_ = GTT(rng, X, I, k(λ), "orthogonal", batch=λ, orthogonal=true, right=true)
         ogtt[λ][:,:,T] = ogtt[λ][:,:,T]*C[1:λ, 1:λ]
     end
 end
@@ -84,7 +83,7 @@ end
 for R in eachindex(ranks)
     ftt[R] = zeros(ComplexF64, k_max, λ_max, num_realizations)
     for T = 1:num_realizations
-        ftt[R][:,:,T],_ = TTR(rng, X, I, [ranks[R]], k_max, normalization="spherical", T=ComplexF64)
+        ftt[R][:,:,T],_ = TTR(rng, X, I, [ranks[R]], k_max, "spherical", T=ComplexF64)
         ftt[R][:,:,T] = sqrt(k_max)*ftt[R][:,:,T]*C # correct for 1/sqrt(k) in TTR
     end
 end

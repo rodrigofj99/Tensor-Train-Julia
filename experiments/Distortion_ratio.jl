@@ -41,7 +41,7 @@ for p in eachindex(ds)
     X = X/norm(X)
     X_s = SizedArray{Tuple{1},TTvector{Float64,N}}(X) # wrap in SizedArray for batch size 1 (Improves performance)
     norm_X = norm(X)
-    Xfull = vec(full(X))
+    #Xfull = vec(full(X))
 
     for T in 1:num_realizations
         for k in eachindex(Ks)

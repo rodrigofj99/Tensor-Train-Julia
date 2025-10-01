@@ -79,16 +79,28 @@ function ortho_randn(rng::AbstractRNG, dim:: Int64, rk_l::Int64, rk_r::Int64; ri
 end
 
 
-function tt_randn(rng::AbstractRNG,dims::NTuple{N,Int64},rks::Vector{Int64}; normalize = true, orthogonal=false,right=true,T::Type{<:Number}=Float64) where {N}
+function tt_randn(rng::AbstractRNG, dims::NTuple{N,Int64}, rks::Vector{Int64}; normalization::AbstractString="none", orthogonal=false, right=true, T::Type{<:Number}=Float64) where {N}
 	y = zeros_tt(T,dims,rks)
-	@simd for i in eachindex(y.ttv_vec)
+	@simd for i = 1:N
         if orthogonal
             y.ttv_vec[i] = ortho_randn(rng, dims[i], rks[i], rks[i+1]; right=right, T=T)
-            if normalize  y.ttv_vec[i] *= sqrt(dims[i]*rks[i+1]/rks[i]) end
         else
 		    y.ttv_vec[i] = randn(rng, T, dims[i], rks[i], rks[i+1])            
-            if normalize y.ttv_vec[i] /= sqrt(rks[i]) end
 		end
+
+        if normalization == "spherical"
+            y.ttv_vec[i] = (sqrt(dims[i]) / (rks[i]*rks[i+1])^(0.25)) ./ vecnorm(y.ttv_vec[i],2,1) .* y.ttv_vec[i]
+        elseif normalization == "gaussian"
+            y.ttv_vec[i] /= sqrt(rks[i])
+        elseif normalization == "orthogonal"
+            y.ttv_vec[i] *= sqrt(dims[i]*rks[i+1]/rks[i])
+        elseif normalization == "TTR"
+            y.ttv_vec[i] = (1 / (rks[i]*rks[i+1])^(0.25)) .* y.ttv_vec[i]
+        elseif normalization == "none"
+            # do nothing
+        else
+            error("Normalization not recognized")
+        end
 	end
 	return y
 end
