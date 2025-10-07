@@ -70,7 +70,10 @@ end
 function ortho_randn(rng::AbstractRNG, dim:: Int64, rk_l::Int64, rk_r::Int64; right=true,T::Type{<:Number}=Float64)
     y = randn(rng, T, dim, rk_l, rk_r)
     if right
+        #println(dim, "-", rk_l, "-", rk_r)
         Q,_ = qr(reshape(permutedims(y, (1,3,2)), dim * rk_r, rk_l))
+        #println(size(Q))
+        #println(size(Matrix(Q)))
         y = permutedims(reshape(Matrix(Q), dim, rk_r, rk_l), (1,3,2))
     else
         Q,_ = qr(reshape(y, dim * rk_l, rk_r))
@@ -83,21 +86,15 @@ function tt_randn(rng::AbstractRNG, dims::NTuple{N,Int64}, rks::Vector{Int64}; n
 	y = zeros_tt(T,dims,rks)
 	@simd for i = 1:N
         if orthogonal
+            #println(i)
             y.ttv_vec[i] = ortho_randn(rng, dims[i], rks[i], rks[i+1]; right=right, T=T)
         else
 		    y.ttv_vec[i] = randn(rng, T, dims[i], rks[i], rks[i+1])            
 		end
 
         if normalization == "spherical"
-            y.ttv_vec[i] = (sqrt(dims[i]) / (rks[i]*rks[i+1])^(0.25)) ./ vecnorm(y.ttv_vec[i],2,1) .* y.ttv_vec[i]
-        elseif normalization == "gaussian"
-            y.ttv_vec[i] /= sqrt(rks[i])
-        elseif normalization == "orthogonal"
-            y.ttv_vec[i] *= sqrt(dims[i]*rks[i+1]/rks[i])
-        elseif normalization == "TTR"
-            y.ttv_vec[i] = (1 / (rks[i]*rks[i+1])^(0.25)) .* y.ttv_vec[i]
+            y.ttv_vec[i] = (sqrt(dims[i]) ./ vecnorm(y.ttv_vec[i],2,1)) .* y.ttv_vec[i] #  uniform on the ball with radius sqrt(d_i)
         elseif normalization == "none"
-            # do nothing
         else
             error("Normalization not recognized")
         end
@@ -106,8 +103,8 @@ function tt_randn(rng::AbstractRNG, dims::NTuple{N,Int64}, rks::Vector{Int64}; n
 end
 
 function injectivity_dilation(X::Array{T,3}, num_realizations::Int64; stats::Function = x->x) where {T<:Number}
-    α = zeros(T, num_realizations)
-    β = zeros(T, num_realizations)
+    α = zeros(num_realizations)
+    β = zeros(num_realizations)
     for t = 1:num_realizations
         α[t] = svdvals(X[:,:,t])[end]^2
         β[t] = svdvals(X[:,:,t])[1]^2
