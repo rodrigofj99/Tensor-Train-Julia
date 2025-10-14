@@ -19,13 +19,13 @@ k = r -> 3*r+8 # embedding dimension as a linear function of rank
 k_max = k(λ_max) #Embedding dimension
 
 # Ranks and physical dimensions of tensors
-ranks = [1, 2, 11, 22] #divisors of k_max
+ranks = [1, 2, 14] #divisors of k_max
 rank_X = 10
 d = 2 # dimensions
 N = 10 # cores
 
 # Tensor train and embedding dimension
-I = ntuple(i -> d, N)
+dims = ntuple(i -> d, N)
 
 
 ### Need to find a better sample subspace
@@ -33,19 +33,19 @@ I = ntuple(i -> d, N)
 X = SizedArray{Tuple{λ_max}, TTvector{Float64,N}}(undef)
 
 
-# [V,~] = qr(randn([prod(I),lambda_max]), "econ")
+# [V,~] = qr(randn([prod(dims),lambda_max]), "econ")
 # 
 # for r=1:λ_max
-#     Xr = tt_tensor(reshape(V(:,r), I))
+#     Xr = tt_tensor(reshape(V(:,r), dims))
 #     X[r] = Xr/norm(Xr)
 #     X[r] = core2cell(X[r])
 # end
 
 for λ = 1:λ_max
     tmp1 = vcat(1, fill(rank_X, N-1), 1)
-    tmp2 = [reverse(cumprod(reverse(I)))..., 1]
+    tmp2 = [reverse(cumprod(reverse(dims)))..., 1]
     R = [min(tmp1[i], tmp2[i]) for i in eachindex(tmp1)]
-    X_λ = tt_randn(rng, I, R, normalization="none", orthogonal=true)
+    X_λ = tt_randn(rng, dims, R, normalization="none", orthogonal=true)
     X[λ] = X_λ/norm(X_λ)
 end
 
@@ -82,9 +82,9 @@ for λ = 1:λ_max
     ogtt[λ] = zeros(ogtt_type, k(λ), λ, num_realizations)
 
     for T = 1:num_realizations
-        #gtt[λ][:,:,T],_ = GTT(rng, X, I, k(λ), normalization="none", batch=λ, T=gtt_type)
+        #gtt[λ][:,:,T],_ = GTT(rng, X, dims, k(λ), normalization="none", batch=λ, T=gtt_type)
         #gtt[λ][:,:,T] = gtt[λ][:,:,T]*C[1:λ, 1:λ]
-        ogtt[λ][:,:,T],_ = GTT(rng, X, I, k(λ), normalization="none", batch=λ, orthogonal=true, right=true, T=ogtt_type)
+        ogtt[λ][:,:,T],_ = GTT(rng, X, dims, k(λ), normalization="none", batch=λ, orthogonal=true, right=true, T=ogtt_type)
         ogtt[λ][:,:,T] = ogtt[λ][:,:,T]*C[1:λ, 1:λ]
     end
 end
@@ -98,17 +98,17 @@ for R in eachindex(ranks)
     ottpr[R] = zeros(ottpr_type, k_max, λ_max, num_realizations)
 
     for T = 1:num_realizations
-        #ftt[R][:,:,T],_ = TTR(rng, X, I, [ranks[R]], k_max, normalization="spherical", T=ftt_type)
+        #ftt[R][:,:,T],_ = TTR(rng, X, dims, [ranks[R]], k_max, normalization="spherical", T=ftt_type)
         #ftt[R][:,:,T] = sqrt(k_max)*ftt[R][:,:,T]*C # correct for 1/sqrt(k) in TTR
 
-        oftt[R][:,:,T],_ = TTR(rng, X, I, [ranks[R]], k_max, normalization="spherical", orthogonal=true, T=oftt_type)
+        oftt[R][:,:,T],_ = TTR(rng, X, dims, [ranks[R]], k_max, normalization="spherical", orthogonal=true, T=oftt_type)
         oftt[R][:,:,T] = sqrt(k_max)*oftt[R][:,:,T]*C # correct for 1/sqrt(k) in TTR
 
-        ttpr[R][:,:,T],_ = TTPR(rng, X, I, [ranks[R]], k_max ÷ ranks[R], 0, normalization="spherical", T=ttpr_type)
-        ttpr[R][:,:,T] = sqrt(k_max)*ttpr[R][:,:,T]*C # correct for 1/sqrt(k) in TTPR
+        #ttpr[R][:,:,T],_ = TTPR(rng, X, dims, [ranks[R]], k_max ÷ ranks[R], ranks[R], normalization="spherical", T=ttpr_type)
+        #ttpr[R][:,:,T] = sqrt(k_max ÷ ranks[R])*ttpr[R][:,:,T]*C # correct for 1/sqrt(k) in TTPR
 
-        ottpr[R][:,:,T],_ = TTPR(rng, X, I, [ranks[R]], k_max ÷ ranks[R], 0, normalization="spherical", orthogonal=true, T=ottpr_type)
-        ottpr[R][:,:,T] = sqrt(k_max)*ottpr[R][:,:,T]*C # correct for 1/sqrt(k) in TTPR
+        ottpr[R][:,:,T],_ = TTPR(rng, X, dims, [ranks[R]], k_max ÷ ranks[R], ranks[R], normalization="spherical", orthogonal=true, T=ottpr_type)
+        ottpr[R][:,:,T] = sqrt(k_max ÷ ranks[R])*ottpr[R][:,:,T]*C # correct for 1/sqrt(k) in TTPR
     end
 end
 
@@ -129,16 +129,16 @@ end
 
 for λ = 1:λ_max
     #α_gtt[λ], β_gtt[λ] = injectivity_dilation(gtt[λ], num_realizations, stats=median)
-    α_ogtt[λ], β_ogtt[λ] = injectivity_dilation(ogtt[λ], num_realizations, stats=median)
+    #α_ogtt[λ], β_ogtt[λ] = injectivity_dilation(ogtt[λ], num_realizations, stats=median)
 end
 
-for R = 1:length(ranks)
+for R in eachindex(ranks)
     for λ = 1:λ_max
         #α_ftt[R,λ,:], β_ftt[R,λ,:] = injectivity_dilation(ftt[R][1:k(λ), 1:λ, :]/sqrt(k(λ)), num_realizations) #Median is computed when plotting because of memory layout
         α_oftt[R,λ,:], β_oftt[R,λ,:] = injectivity_dilation(oftt[R][1:k(λ), 1:λ, :]/sqrt(k(λ)), num_realizations) #Median is computed when plotting because of memory layout
 
-        α_ttpr[R,λ,:], β_ttpr[R,λ,:] = injectivity_dilation(ttpr[R][1:k(λ), 1:λ, :]/sqrt(k(λ)), num_realizations) #Median is computed when plotting because of memory layout
-        α_ottpr[R,λ,:], β_ottpr[R,λ,:] = injectivity_dilation(ottpr[R][1:k(λ), 1:λ, :]/sqrt(k(λ)), num_realizations) #Median is computed when plotting because of memory layout
+        #α_ttpr[R,λ,:], β_ttpr[R,λ,:] = injectivity_dilation(ttpr[R][1:k(λ), 1:λ, :]/sqrt(k(λ) ÷ ranks[R]), num_realizations) #Median is computed when plotting because of memory layout
+        α_ottpr[R,λ,:], β_ottpr[R,λ,:] = injectivity_dilation(ottpr[R][1:k(λ), 1:λ, :]/sqrt(k(λ) ÷ ranks[R]), num_realizations) #Median is computed when plotting because of memory layout
     end
 end
 
@@ -151,7 +151,7 @@ for R in eachindex(ranks)
     #plot!(p1, range(1,λ_max), median(α_ftt[R,:,:],dims=2), label="TT($(ranks[R]))", yscale=:log10, linestyle=:dash)
     plot!(p1, range(1,λ_max), median(α_oftt[R,:,:],dims=2), label="OTT($(ranks[R]))", yscale=:log10, linestyle=:dashdot)
 
-    plot!(p1, range(1,λ_max), median(α_ttpr[R,:,:],dims=2), label="TTPR($(k_max/ranks[R]), $(ranks[R]))", yscale=:log10, linestyle=:dash)
+    #plot!(p1, range(1,λ_max), median(α_ttpr[R,:,:],dims=2), label="TTPR($(k_max/ranks[R]), $(ranks[R]))", yscale=:log10, linestyle=:dash)
     plot!(p1, range(1,λ_max), median(α_ottpr[R,:,:],dims=2), label="OTTPR($(k_max/ranks[R]), $(ranks[R]))", yscale=:log10, linestyle=:dash)
 end
 
@@ -169,7 +169,7 @@ for R in eachindex(ranks)
     #plot!(p2, range(1,λ_max), median(β_ftt[R,:,:],dims=2), label="TT($(ranks[R]))", yscale=:log10, linestyle=:dash)
     plot!(p2, range(1,λ_max), median(β_oftt[R,:,:],dims=2), label="OTT($(ranks[R]))", yscale=:log10, linestyle=:dashdot)
 
-    plot!(p2, range(1,λ_max), median(β_ttpr[R,:,:],dims=2), label="TT($(k_max/ranks[R]), $(ranks[R]))", yscale=:log10, linestyle=:dash)
+    #plot!(p2, range(1,λ_max), median(β_ttpr[R,:,:],dims=2), label="TT($(k_max/ranks[R]), $(ranks[R]))", yscale=:log10, linestyle=:dash)
     plot!(p2, range(1,λ_max), median(β_ottpr[R,:,:],dims=2), label="OTT($(k_max/ranks[R]), $(ranks[R]))", yscale=:log10, linestyle=:dash)
 end
 
