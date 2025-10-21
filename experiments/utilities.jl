@@ -124,3 +124,8 @@ function injectivity_dilation(X::Array{T,3}, num_realizations::Int64; stats::Fun
     end
     return stats(α),stats(β)
 end
+
+#= function randomized_SVD_TTPR(A::Matrix{T}, k, rng) where T
+    m, n = size(A)
+    Ω = TTPR(rng, A, )
+end =#

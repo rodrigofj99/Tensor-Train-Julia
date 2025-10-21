@@ -7,7 +7,7 @@ include("sketches.jl")
 
 
 # Number of independent runs
-num_realizations = 100
+num_realizations = 10
 #Random.seed!(2)
 rng = MersenneTwister(2);
 

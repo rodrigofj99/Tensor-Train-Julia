@@ -3,7 +3,6 @@ using LinearAlgebra
 using Plots
 using Statistics
 include("utilities.jl")
-include("utilities.jl")
 include("sketches.jl")
 
 # Number of independent runs
