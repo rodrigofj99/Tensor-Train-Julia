@@ -516,6 +516,39 @@ function rand_tto(dims,rmax::Int;T=Float64)
 	return TToperator{T,d}(d,tt_vec,dims,rks,zeros(Int,d))
 end
 
+"""
+    sv_trunc(s::Array{Float64}, tol) -> Array{Float64}
+
+Truncate singular values based on a tolerance threshold.
+
+# Arguments
+- `s::Array{Float64}`: Array of singular values (assumed to be in descending order)
+- `tol`: Tolerance parameter. If `tol == 0.0`, returns all singular values.
+  Otherwise, truncates smallest singular values whose cumulative squared norm
+  is less than `tol * ||s||²`.
+
+# Returns
+- Truncated array of singular values
+
+# Algorithm
+Finds the smallest `i` such that `∑_{j=d-i+1}^d s[j]² ≥ tol * ||s||²`,
+and returns `s[1:(d-i+1)]`.
+"""
+function sv_trunc(s::Array{Float64},tol)
+	if tol==0.0
+		return s
+	else
+		d = length(s)
+		i=0
+		weight = 0.0
+		norm2 = dot(s,s)
+		while (i<d) && weight<tol*norm2
+			weight+=s[d-i]^2
+			i+=1
+		end
+		return s[1:(d-i+1)]
+	end
+end
 
 function json_to_mps(x)
 	dims = Tuple(convert(Vector{Int64},x[:ttv_dims]))

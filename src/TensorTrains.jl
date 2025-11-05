@@ -37,7 +37,10 @@ include("pde_models.jl")
 export Δ, Δ_tto, perturbed_Δ_tto, potential
 
 include("tt_randtools.jl")
-export ttrand_rounding, stta, tt_hmt
+export ttrand_rounding, stta, tt_hmt, default_rank_heuristic
+
+include("sketches.jl")
+export tt_recursive_sketch, stta_sketch, partial_contraction
 
 include("FCIDUMP.jl")
 export read_electron_integral_tensors,read_electron_integral_tensors_nosymmetry
