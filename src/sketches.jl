@@ -15,14 +15,13 @@ Generate random sketch tensor blocks for tensor train sketching with proper norm
 - `T::Type`: Element type for the sketch tensor
 - `dim::Int`: Physical dimension at this mode
 - `left_rank::Int`: Left block rank
-- `right_rank::Int`: Right block rank (will be updated if identity optimization applies)
+- `right_rank::Int`: Right block rank
 - `p::Int`: Number of sketch blocks
 - `orthogonal::Bool`: Whether to use orthogonal sketches (QR decomposition)
 - `buffer::Union{Nothing,AbstractVector}`: Optional preallocated buffer
 
 # Returns
 - `B_sketch::Array{T,4}`: Sketch tensor of size (left_rank, dim, right_rank, p)
-- `right_rank::Int`: Updated right block rank (may change with identity optimization)
 
 # Algorithm
 Three cases with optimized normalization:
@@ -43,10 +42,8 @@ Three cases with optimized normalization:
 The normalization ensures consistent spectral properties across different sketching modes.
 """
 function generate_sketch_blocks(rng, ::Type{T}, left_rank, dim, right_rank, p, orthogonal; buffer=nothing, timer::TimerOutput = TimerOutput()) where T
-  use_identity = orthogonal && (right_rank >= dim * left_rank)
-  if use_identity
-    right_rank = dim * left_rank
-  end
+  @assert (!orthogonal) || right_rank <= dim * left_rank
+  use_identity = orthogonal && (right_rank == dim * left_rank)
 
   @timeit timer "Block allocation" begin
     if buffer === nothing
@@ -83,7 +80,7 @@ function generate_sketch_blocks(rng, ::Type{T}, left_rank, dim, right_rank, p, o
       @timeit timer "normalization" block .*= 1/sqrt(right_rank)
     end
   end
-  return reshape(block, left_rank, dim, right_rank, p), right_rank
+  return reshape(block, left_rank, dim, right_rank, p)
 end
 
 """
@@ -188,6 +185,9 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
         @assert rks[N+1] == 1 && A.ttv_rks[N+1] == 1
         block_rks_vec = ones(Int, N+1)
         block_rks_vec[1:N] .= block_rks
+        for k=N:-1:1
+          block_rks_vec[k] = min(block_rks_vec[k], dims[k]*block_rks_vec[k+1])
+        end
 
         p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
 
@@ -203,8 +203,8 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
           z = dims[k]
           a = A.ttv_rks[k]
           α = A.ttv_rks[k+1]
-          β = block_rks_vec[k+1]
           b = block_rks_vec[k]
+          β = block_rks_vec[k+1]
           buf1_size, buf2_size = contract_sketch_core_backwards_buffers_size(z, a, α, β, b)
           max_contract_buffer1_size = max(max_contract_buffer1_size, buf1_size)
           max_contract_buffer2_size = max(max_contract_buffer2_size, buf2_size)
@@ -215,15 +215,15 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
       @timeit timer "contraction_reverse" begin
         @inbounds for k in N:-1:1
           @timeit timer "sketch_generation" begin
-            B_sketch, block_rks_vec[k] = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; buffer=sketch_buffer, timer=timer)
+            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; buffer=sketch_buffer, timer=timer)
           end
 
           @timeit timer "W_allocation" begin
             W[k] = zeros(TW, A.ttv_rks[k], block_rks_vec[k], p[k])
           end
 
-          @timeit timer "tensor_contraction" begin
             for j=1:p[k]
+          @timeit timer "tensor_contraction" begin
               W_next_j = view(W[k+1],:,:,(k<N ? j : 1))
               B_j = view(B_sketch,:,:,:,j)
               W_k_j = view(W[k],:,:,j)
@@ -237,6 +237,9 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
         @assert rks[1] == 1 && A.ttv_rks[1] == 1
         block_rks_vec = ones(Int, N+1)
         block_rks_vec[2:N+1] .= block_rks
+        for k=1:N
+          block_rks_vec[k+1] = min(block_rks_vec[k+1], dims[k]*block_rks_vec[k])
+        end
 
         p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
 
@@ -264,15 +267,15 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
       @timeit timer "contraction_forward" begin
         @inbounds for k in 1:N
           @timeit timer "sketch_generation" begin
-            B_sketch, block_rks_vec[k+1] = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; buffer=sketch_buffer, timer=timer)
+            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; buffer=sketch_buffer, timer=timer)
           end
 
           @timeit timer "W_allocation" begin
             W[k+1] = zeros(TW, A.ttv_rks[k+1], block_rks_vec[k+1], p[k+1])
           end
 
-          @timeit timer "tensor_contraction" begin
             for j=1:p[k+1]
+          @timeit timer "tensor_contraction" begin
               W_k_j = view(W[k],:,:,(k>1 ? j : 1))
               B_j = view(B_sketch,:,:,:,j)
               W_next_j = view(W[k+1],:,:,j)
@@ -316,6 +319,9 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
         block_rks_vec[1:N] .= block_rks
 
         p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
+        for k=N:-1:1
+          block_rks_vec[k] = min(block_rks_vec[k], dims[k]*block_rks_vec[k+1])
+        end
 
         W[N+1] = ones(TW,1,1,1,1)
 
@@ -348,7 +354,7 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
       @timeit timer "contraction_reverse" begin
         @inbounds for k in N:-1:1
           @timeit timer "sketch_generation" begin
-            B_sketch, block_rks_vec[k] = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; timer=timer, buffer=sketch_buffer)
+            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; timer=timer, buffer=sketch_buffer)
           end
 
           @timeit timer "W_allocation" begin
@@ -372,6 +378,9 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
         block_rks_vec[2:N+1] .= block_rks
 
         p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
+        for k=1:N
+          block_rks_vec[k+1] = min(block_rks_vec[k+1], dims[k]*block_rks_vec[k])
+        end
 
         W[1] = ones(TW,1,1,1,1)
 
@@ -404,7 +413,7 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
       @timeit timer "contraction_forward" begin
         @inbounds for k in 1:N
           @timeit timer "sketch_generation" begin
-            B_sketch, block_rks_vec[k+1] = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; timer=timer)
+            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; timer=timer)
           end
 
           @timeit timer "W_allocation" begin
@@ -601,8 +610,8 @@ Uses adaptive contraction ordering based on rank sizes to minimize overall cost:
 - `timer::TimerOutput`: Optional timer for performance profiling
 
 """
-function contract_sketch_core_forwards!(W::Matrix{T}, A::Array{T,3}, S::Array{T,3}, V::Matrix{T};
-                                buffer=(nothing,nothing), timer=TimerOutput()) where T
+function contract_sketch_core_forwards!(W::AbstractMatrix{T}, A::AbstractArray{T,3}, S::AbstractArray{T,3}, V::AbstractMatrix{T};
+                                buffer=(nothing,nothing)) where T
 
   a,b = size(W)
   α,β = size(V)
@@ -610,46 +619,32 @@ function contract_sketch_core_forwards!(W::Matrix{T}, A::Array{T,3}, S::Array{T,
   @assert size(A) === (z,α,a) "Factor A has the wrong dimensions: need $((z,α,a)), got $(size(A))"
   @assert size(S) === (β,z,b) "Factor S has the wrong dimensions: need $((β,z,b)), got $(size(S))"
 
-  @timeit timer "contract_sketch_core" begin
-    if a*(β+1)*(α+b) < α*b*(a+β+1)
-      # Order 1: ((V'×A)×S)
-      # Cost: a*β*z*(α+a+b) for: permute A, mul V'×A, mul VA'×S
-      # Permute dimensions: A_permuted[α,z,a] = A[z,α,a]
-      @timeit timer "permutedims" begin
-        A_permuted = permutedims!!(A, (2,1,3), buffer=buffer[1])
-        A_permuted = reshape(A_permuted, α, z*a)
-      end
+  if a*(β+1)*(α+b) < α*b*(a+β+1)
+    # Order 1: ((V'×A)×S)
+    # Cost: a*β*z*(α+a+b) for: permute A, mul V'×A, mul VA'×S
+    # Permute dimensions: A_permuted[α,z,a] = A[z,α,a]
+    A_permuted = permutedims!!(A, (2,1,3), buffer=buffer[1])
+    A_permuted = reshape(A_permuted, α, z*a)
 
-      # Order 1: VA[β,z,a] = V'[β,α] * A_permuted[α,z*a]
-      @timeit timer "first_contraction" begin
-        VA = mul!!(transpose(V), A_permuted, buffer=buffer[2])
-        VA = reshape(VA, β*z, a)
-      end
+    # Order 1: VA[β,z,a] = V'[β,α] * A_permuted[α,z*a]
+    VA = mul!!(transpose(V), A_permuted, buffer=buffer[2])
+    VA = reshape(VA, β*z, a)
 
-      # Step 2: W[a,b] = VA[β,z,a] * S[β,z,b] → transpose VA to [a,β,z] and multiply
-      @timeit timer "second_contraction" begin
-        mul!(W, transpose(VA), reshape(S, β*z, b))
-      end
-    else
-      # Order 2: ((V×S)×A)
-      # Cost: α*b*z*(β+1+a) for: mul V×S, permute VS, mul A'×VS
-      # VS[α,z,b] = V[α,β] * S[β,z,b], then W[a,b] = A[z,α,a] * VS[α,z,b]
-      @timeit timer "first_contraction" begin
-        VS = mul!!(V, reshape(S, β, z*b), buffer=buffer[1])
-        VS = reshape(VS, α, z, b)
-      end
+    # Step 2: W[a,b] = VA[β,z,a] * S[β,z,b] → transpose VA to [a,β,z] and multiply
+    mul!(W, transpose(VA), reshape(S, β*z, b))
+  else
+    # Order 2: ((V×S)×A)
+    # Cost: α*b*z*(β+1+a) for: mul V×S, permute VS, mul A'×VS
+    # VS[α,z,b] = V[α,β] * S[β,z,b], then W[a,b] = A[z,α,a] * VS[α,z,b]
+    VS = mul!!(V, reshape(S, β, z*b), buffer=buffer[1])
+    VS = reshape(VS, α, z, b)
 
-      # Permute dimensions: VS_permuted[z,α,b] = VS[α,z,b]
-      @timeit timer "permutedims" begin
-        VS_permuted = permutedims!!(VS, (2,1,3), buffer=buffer[2])
-        VS_permuted = reshape(VS_permuted, z*α,b)
-      end
+    # Permute dimensions: VS_permuted[z,α,b] = VS[α,z,b]
+    VS_permuted = permutedims!!(VS, (2,1,3), buffer=buffer[2])
+    VS_permuted = reshape(VS_permuted, z*α,b)
 
-      # Step 2: W[a,b] = A'[a,z*α] * VS_permuted[z*α,b]
-      @timeit timer "second_contraction" begin
-        mul!(W, transpose(reshape(A, z*α, a)), VS_permuted)
-      end
-    end
+    # Step 2: W[a,b] = A'[a,z*α] * VS_permuted[z*α,b]
+    mul!(W, transpose(reshape(A, z*α, a)), VS_permuted)
   end
 
   return W
@@ -663,8 +658,8 @@ function contract_sketch_core_forwards_buffers_size(z::Int, α::Int, a::Int, β:
   end
 end
 
-function contract_sketch_core_forwards!(W::Array{T,3}, A::Array{T,3}, B::Array{T,4}, S::Array{T,3}, V::Array{T,3};
-                                buffer=(nothing,nothing,nothing), timer=TimerOutput()) where T
+function contract_sketch_core_forwards!(W::AbstractArray{T,3}, A::AbstractArray{T,3}, B::AbstractArray{T,4}, S::AbstractArray{T,3}, V::AbstractArray{T,3};
+                                buffer=(nothing,nothing,nothing)) where T
 
   a,b,c = size(W)
   α,β,γ = size(V)
@@ -674,87 +669,61 @@ function contract_sketch_core_forwards!(W::Array{T,3}, A::Array{T,3}, B::Array{T
   @assert size(B) === (ζ,z,β,b) "Factor B has the wrong dimensions: need $((ζ,z,β,b)), got $(size(B))"
   @assert size(S) === (γ,z,c)   "Factor S has the wrong dimensions: need $((γ,z,c)), got $(size(S))"
 
-  @timeit timer "contract_sketch_core" begin
-    if ζ*a*α*β*γ + a*γ*ζ*β*z*b + a*b*γ*z*c < α*β*γ*z*c + ζ*b*z*β*α*c + a*ζ*α*b*c # Order 1: ((V*A)*B)*S
-      # Order 1 cost dominated by: ζ*a*α*β*γ + a*γ*ζ*β*z*b + a*b*γ*z*c
+  if ζ*a*α*β*γ + a*γ*ζ*β*z*b + a*b*γ*z*c < α*β*γ*z*c + ζ*b*z*β*α*c + a*ζ*α*b*c # Order 1: ((V*A)*B)*S
+    # Order 1 cost dominated by: ζ*a*α*β*γ + a*γ*ζ*β*z*b + a*b*γ*z*c
 
-      # Permute dimensions: A_permuted[ζ,a,α] = A[ζ,α,a]
-      @timeit timer "permutedims" begin
-        A_permuted = permutedims!!(A, (1,3,2), buffer=buffer[1])
-      end
-      # Step 1: VA[ζ,a,β,γ] = A_permuted[ζ*a, α] * V[α,β,γ]
-      @timeit timer "first_contraction" begin
-        VA = mul!!(reshape(A_permuted, ζ*a, α), reshape(V, α, β*γ), buffer=buffer[2])
-        VA = reshape(VA, ζ, a, β, γ)
-      end
+    # Permute dimensions: A_permuted[ζ,a,α] = A[ζ,α,a]
+    A_permuted = permutedims!!(A, (1,3,2), buffer=buffer[1])
+    # Step 1: VA[ζ,a,β,γ] = A_permuted[ζ*a, α] * V[α,β,γ]
+    VA = mul!!(reshape(A_permuted, ζ*a, α), reshape(V, α, β*γ), buffer=buffer[2])
+    VA = reshape(VA, ζ, a, β, γ)
 
-      # Permute dimensions: VA_permuted[a,γ,ζ,β] = VA[ζ,a,β,γ]
-      @timeit timer "permutedims" begin
-        VA_permuted = permutedims!!(VA, (2,4,1,3), buffer=buffer[1])
-        VA_permuted = reshape(VA_permuted, a*γ,ζ*β)
-      end
+    # Permute dimensions: VA_permuted[a,γ,ζ,β] = VA[ζ,a,β,γ]
+    VA_permuted = permutedims!!(VA, (2,4,1,3), buffer=buffer[1])
+    VA_permuted = reshape(VA_permuted, a*γ,ζ*β)
 
-      # Permute dimensions: B_permuted[ζ,β,z,b] = B[ζ,z,β,b]
-      @timeit timer "permutedims" begin
-        B_permuted = permutedims!!(B, (1,3,2,4), buffer=buffer[2])
-        B_permuted = reshape(B_permuted, ζ*β,z*b)
-      end
+    # Permute dimensions: B_permuted[ζ,β,z,b] = B[ζ,z,β,b]
+    B_permuted = permutedims!!(B, (1,3,2,4), buffer=buffer[2])
+    B_permuted = reshape(B_permuted, ζ*β,z*b)
 
-      # Step 2: VAB[a,γ,z,b] = VA_permuted[a,γ,ζ,β] * B_permuted[ζ,β,z,b]
-      @timeit timer "second_contraction" begin
-        VAB = mul!!(VA_permuted, B_permuted, buffer=buffer[3])
-        VAB = reshape(VAB, a,γ,z,b)
-      end
+    # Step 2: VAB[a,γ,z,b] = VA_permuted[a,γ,ζ,β] * B_permuted[ζ,β,z,b]
+    VAB = mul!!(VA_permuted, B_permuted, buffer=buffer[3])
+    VAB = reshape(VAB, a,γ,z,b)
 
-      # Permute dimensions: VAB_permuted[a,b,γ,z] = VAB[a,γ,z,b]
-      @timeit timer "permutedims" begin
-        VAB_permuted = permutedims!!(VAB, (1,4,2,3), buffer=buffer[1])
-        VAB_permuted = reshape(VAB_permuted, a*b,γ*z)
-      end
+    # Permute dimensions: VAB_permuted[a,b,γ,z] = VAB[a,γ,z,b]
+    VAB_permuted = permutedims!!(VAB, (1,4,2,3), buffer=buffer[1])
+    VAB_permuted = reshape(VAB_permuted, a*b,γ*z)
 
-      # Step 3: W[a,b,c] = VAB_permuted[a,b,γ,z] * S[γ,z,c]
-      mul!(reshape(W, a*b, c), VAB_permuted, reshape(S, γ*z, c))
-    else # Order 2: ((V*S)*B)*A
-      # Order 2 cost dominated by: α*β*γ*z*c + ζ*b*z*β*α*c + a*ζ*α*b*c
-      # Step 1: VS[α,β,z,c] = V[α,β,γ] * S[γ,z,c]
-      @timeit timer "first_contraction" begin
-        VS = mul!!(reshape(V, α*β, γ), reshape(S, γ, z*c), buffer=buffer[1])
-        VS = reshape(VS, α,β,z,c)
-      end
+    # Step 3: W[a,b,c] = VAB_permuted[a,b,γ,z] * S[γ,z,c]
+    mul!(reshape(W, a*b, c), VAB_permuted, reshape(S, γ*z, c))
+  else # Order 2: ((V*S)*B)*A
+    # Order 2 cost dominated by: α*β*γ*z*c + ζ*b*z*β*α*c + a*ζ*α*b*c
+    # Step 1: VS[α,β,z,c] = V[α,β,γ] * S[γ,z,c]
+    VS = mul!!(reshape(V, α*β, γ), reshape(S, γ, z*c), buffer=buffer[1])
+    VS = reshape(VS, α,β,z,c)
 
-      # Permute dimensions: VS_permuted[z,β,α,c] = VS[α,β,z,c]
-      @timeit timer "permutedims" begin
-        VS_permuted = permutedims!!(VS, (3,2,1,4), buffer=buffer[2])
-        VS_permuted = reshape(VS_permuted, z*β, α*c)
-      end
+    # Permute dimensions: VS_permuted[z,β,α,c] = VS[α,β,z,c]
+    VS_permuted = permutedims!!(VS, (3,2,1,4), buffer=buffer[2])
+    VS_permuted = reshape(VS_permuted, z*β, α*c)
 
-      # Permute dimensions: B_permuted[ζ,b,z,β] = B[ζ,z,β,b]
-      @timeit timer "permutedims" begin
-        B_permuted = permutedims!!(B, (1,4,2,3), buffer=buffer[1])
-        B_permuted = reshape(B_permuted, ζ*b, z*β)
-      end
+    # Permute dimensions: B_permuted[ζ,b,z,β] = B[ζ,z,β,b]
+    B_permuted = permutedims!!(B, (1,4,2,3), buffer=buffer[1])
+    B_permuted = reshape(B_permuted, ζ*b, z*β)
 
-      # Step 2: VBS[ζ,b,α,c] = B_permuted[ζ,b,z,β] * VS_permuted[z,β,α,c]
-      @timeit timer "second_contraction" begin
-        VBS = mul!!(B_permuted, VS_permuted, buffer=buffer[3])
-        VBS = reshape(VBS, ζ,b,α,c)
-      end
+    # Step 2: VBS[ζ,b,α,c] = B_permuted[ζ,b,z,β] * VS_permuted[z,β,α,c]
+    VBS = mul!!(B_permuted, VS_permuted, buffer=buffer[3])
+    VBS = reshape(VBS, ζ,b,α,c)
 
-      # Permute dimensions: A_permuted[a,ζ,α] = A[ζ,α,a]
-      @timeit timer "permutedims" begin
-        A_permuted = permutedims!!(A, (3,1,2), buffer=buffer[1])
-        A_permuted = reshape(A_permuted, a,ζ*α)
-      end
+    # Permute dimensions: A_permuted[a,ζ,α] = A[ζ,α,a]
+    A_permuted = permutedims!!(A, (3,1,2), buffer=buffer[1])
+    A_permuted = reshape(A_permuted, a,ζ*α)
 
-      # Permute dimensions: VBS_permuted[ζ,α,b,c] = VBS[ζ,b,α,c]
-      @timeit timer "permutedims" begin
-        VBS_permuted = permutedims!!(VBS, (1,3,2,4), buffer=buffer[2])
-        VBS_permuted = reshape(VBS_permuted, ζ*α,b*c)
-      end
+    # Permute dimensions: VBS_permuted[ζ,α,b,c] = VBS[ζ,b,α,c]
+    VBS_permuted = permutedims!!(VBS, (1,3,2,4), buffer=buffer[2])
+    VBS_permuted = reshape(VBS_permuted, ζ*α,b*c)
 
-      # Step 3: W[a,b,c] = A_permuted[a,ζ,α] * VBS_permuted[ζ,α,b,c]
-      mul!(reshape(W, a,b*c), A_permuted, VBS_permuted)
-    end
+    # Step 3: W[a,b,c] = A_permuted[a,ζ,α] * VBS_permuted[ζ,α,b,c]
+    mul!(reshape(W, a,b*c), A_permuted, VBS_permuted)
   end
 
   return W
@@ -810,8 +779,8 @@ Uses adaptive contraction ordering based on rank sizes to minimize overall cost:
 - `timer::TimerOutput`: Optional timer for performance profiling
 
 """
-function contract_sketch_core_backwards!(W::Matrix{T}, A::Array{T,3}, S::Array{T,3}, V::Matrix{T};
-                                buffer=(nothing,nothing), timer=TimerOutput()) where T
+function contract_sketch_core_backwards!(W::AbstractMatrix{T}, A::AbstractArray{T,3}, S::AbstractArray{T,3}, V::AbstractMatrix{T};
+                                buffer=(nothing,nothing)) where T
 
   a,b = size(W)
   α,β = size(V)
@@ -819,44 +788,30 @@ function contract_sketch_core_backwards!(W::Matrix{T}, A::Array{T,3}, S::Array{T
   @assert size(A) === (z,a,α) "Factor A has the wrong dimensions: need $((z,a,α)), got $(size(A))"
   @assert size(S) === (β,z,b) "Factor S has the wrong dimensions: need $((β,z,b)), got $(size(S))"
 
-  @timeit timer "contract_sketch_core" begin
-    if a*β*(α+b+1) < α*(b+1)*(a+β)
-      # Order 1: AV[z,a,β] = A[z,a,α] * V[α,β], then W[a,b] = AV * S
-      # Cost: z*a*β*(α+1+b) for: mul A×V, permute AV, mul AV×S
-      @timeit timer "first_contraction" begin
-        AV = mul!!(reshape(A, z*a, α), V, buffer=buffer[1])
-        AV = reshape(AV, z, a, β)
-      end
+  if a*β*(α+b+1) < α*(b+1)*(a+β)
+    # Order 1: AV[z,a,β] = A[z,a,α] * V[α,β], then W[a,b] = AV * S
+    # Cost: z*a*β*(α+1+b) for: mul A×V, permute AV, mul AV×S
+      AV = mul!!(reshape(A, z*a, α), V, buffer=buffer[1])
+      AV = reshape(AV, z, a, β)
 
-      # Permute dimensions: AV_permuted[a,β,z] = AV[z,a,β]
-      @timeit timer "permutedims" begin
-        AV_permuted = permutedims!!(AV, (2,3,1), buffer=buffer[2])
-        AV_permuted = reshape(AV_permuted, a,β*z)
-      end
+    # Permute dimensions: AV_permuted[a,β,z] = AV[z,a,β]
+      AV_permuted = permutedims!!(AV, (2,3,1), buffer=buffer[2])
+      AV_permuted = reshape(AV_permuted, a,β*z)
 
-      # Step 2: W[a,b] = AV_permuted[a,β,z] * S[β,z,b]
-      @timeit timer "second_contraction" begin
-        mul!(W, AV_permuted, reshape(S, β*z, b))
-      end
-    else
-      # Order 2: VS[α,z,b] = V[α,β] * S[β,z,b], then W[a,b] = A * VS
-      # Cost: z*α*(b+1)*(a+β) for: mul V×S, permute A, mul A×VS
-      @timeit timer "first_contraction" begin
-        VS = mul!!(V, reshape(S, β, z*b), buffer=buffer[1])
-        VS = reshape(VS, α*z, b)
-      end
+    # Step 2: W[a,b] = AV_permuted[a,β,z] * S[β,z,b]
+      mul!(W, AV_permuted, reshape(S, β*z, b))
+  else
+    # Order 2: VS[α,z,b] = V[α,β] * S[β,z,b], then W[a,b] = A * VS
+    # Cost: z*α*(b+1)*(a+β) for: mul V×S, permute A, mul A×VS
+      VS = mul!!(V, reshape(S, β, z*b), buffer=buffer[1])
+      VS = reshape(VS, α*z, b)
 
-      # Permute dimensions: A_permuted[a,α,z] = A[z,a,α]
-      @timeit timer "permutedims" begin
-        A_permuted = permutedims!!(A, (2,3,1), buffer=buffer[2])
-        A_permuted = reshape(A_permuted, a, α*z)
-      end
+    # Permute dimensions: A_permuted[a,α,z] = A[z,a,α]
+      A_permuted = permutedims!!(A, (2,3,1), buffer=buffer[2])
+      A_permuted = reshape(A_permuted, a, α*z)
 
-      # Step 2: W[a,b] = A_permuted[a,α,z] * VS[α,z,b]
-      @timeit timer "second_contraction" begin
-        mul!(W, A_permuted, VS)
-      end
-    end
+    # Step 2: W[a,b] = A_permuted[a,α,z] * VS[α,z,b]
+      mul!(W, A_permuted, VS)
   end
 
   return W
@@ -870,8 +825,8 @@ function contract_sketch_core_backwards_buffers_size(z::Int, a::Int, α::Int, β
   end
 end
 
-function contract_sketch_core_backwards!(W::Array{T,3}, A::Array{T,3}, B::Array{T,4}, S::Array{T,3}, V::Array{T,3};
-                                buffer=(nothing,nothing,nothing), timer=TimerOutput()) where T
+function contract_sketch_core_backwards!(W::AbstractArray{T,3}, A::AbstractArray{T,3}, B::AbstractArray{T,4}, S::AbstractArray{T,3}, V::AbstractArray{T,3};
+                                buffer=(nothing,nothing,nothing)) where T
 
   a,b,c = size(W)
   α,β,γ = size(V)
@@ -881,82 +836,57 @@ function contract_sketch_core_backwards!(W::Array{T,3}, A::Array{T,3}, B::Array{
   @assert size(B) === (z,ζ,b,β) "Factor B has the wrong dimensions: need $((z,ζ,b,β)), got $(size(B))"
   @assert size(S) === (γ,ζ,c)   "Factor S has the wrong dimensions: need $((γ,ζ,c)), got $(size(S))"
 
-  @timeit timer "contract_sketch_core" begin
-    if a*γ*(z*β*(α+ζ*b)+ζ*b*c) < α*c*(ζ*β*(γ+z*b) + z*a*b) # Order 1: ((V*A)*B)*S
-      # Order 1 cost dominated by: z*a*α*β*γ + a*γ*z*β*ζ*b + a*b*γ*ζ*c
+  if a*γ*(z*β*(α+ζ*b)+ζ*b*c) < α*c*(ζ*β*(γ+z*b) + z*a*b) # Order 1: ((V*A)*B)*S
+  # Order 1 cost dominated by: z*a*α*β*γ + a*γ*z*β*ζ*b + a*b*γ*ζ*c
+  # Step 1: VA[z,a,β,γ] = A[z*a, α] * V[α,β,γ]
+    VA = mul!!(reshape(A, z*a, α), reshape(V, α, β*γ), buffer=buffer[1])
+    VA = reshape(VA, z, a, β, γ)
 
-      # Step 1: VA[z,a,β,γ] = A[z*a, α] * V[α,β,γ]
-      @timeit timer "first_contraction" begin
-        VA = mul!!(reshape(A, z*a, α), reshape(V, α, β*γ), buffer=buffer[1])
-        VA = reshape(VA, z, a, β, γ)
-      end
+  # Permute dimensions: VA_permuted[a,γ,z,β] = VA[z,a,β,γ]
+    VA_permuted = permutedims!!(VA, (2,4,1,3), buffer=buffer[2])
+    VA_permuted = reshape(VA_permuted, a*γ,z*β)
 
-      # Permute dimensions: VA_permuted[a,γ,z,β] = VA[z,a,β,γ]
-      @timeit timer "permutedims" begin
-        VA_permuted = permutedims!!(VA, (2,4,1,3), buffer=buffer[2])
-        VA_permuted = reshape(VA_permuted, a*γ,z*β)
-      end
+  # Permute dimensions: B_permuted[z,β,ζ,b] = B[z,ζ,b,β]
+    B_permuted = permutedims!!(B, (1,4,2,3), buffer=buffer[1])
+    B_permuted = reshape(B_permuted, z*β,ζ*b)
 
-      # Permute dimensions: B_permuted[z,β,ζ,b] = B[z,ζ,b,β]
-      @timeit timer "permutedims" begin
-        B_permuted = permutedims!!(B, (1,4,2,3), buffer=buffer[1])
-        B_permuted = reshape(B_permuted, z*β,ζ*b)
-      end
+  # Step 2: VAB[a,γ,ζ,b] = VA_permuted[a,γ,z,β] * B_permuted[z,β,ζ,b]
+    VAB = mul!!(VA_permuted, B_permuted, buffer=buffer[3])
+    VAB = reshape(VAB, a,γ,ζ,b)
 
-      # Step 2: VAB[a,γ,ζ,b] = VA_permuted[a,γ,z,β] * B_permuted[z,β,ζ,b]
-      @timeit timer "second_contraction" begin
-        VAB = mul!!(VA_permuted, B_permuted, buffer=buffer[3])
-        VAB = reshape(VAB, a,γ,ζ,b)
-      end
+  # Permute dimensions: VAB_permuted[a,b,γ,ζ] = VAB[a,γ,ζ,b]
+    VAB_permuted = permutedims!!(VAB, (1,4,2,3), buffer=buffer[1])
+    VAB_permuted = reshape(VAB_permuted, a*b,γ*ζ)
+    # Step 3: W[a,b,c] = VAB_permuted[a,b,γ,ζ] * S[γ,ζ,c]
+    mul!(reshape(W, a*b, c), VAB_permuted, reshape(S, γ*ζ,c))
+  else # Order 2: ((V*S)*B)*A
+    # Order 2 cost dominated by: α*β*γ*ζ*c + z*b*ζ*β*α*c + a*z*α*b*c
+    # Step 1: VS[α,β,ζ,c] = V[α,β,γ] * S[γ,ζ,c]
+    VS = mul!!(reshape(V, α*β, γ), reshape(S, γ, ζ*c), buffer=buffer[1])
+    VS = reshape(VS, α,β,ζ,c)
 
-      # Permute dimensions: VAB_permuted[a,b,γ,ζ] = VAB[a,γ,ζ,b]
-      @timeit timer "permutedims" begin
-        VAB_permuted = permutedims!!(VAB, (1,4,2,3), buffer=buffer[1])
-        VAB_permuted = reshape(VAB_permuted, a*b,γ*ζ)
-      end
-      # Step 3: W[a,b,c] = VAB_permuted[a,b,γ,ζ] * S[γ,ζ,c]
-      mul!(reshape(W, a*b, c), VAB_permuted, reshape(S, γ*ζ,c))
-    else # Order 2: ((V*S)*B)*A
-      # Order 2 cost dominated by: α*β*γ*ζ*c + z*b*ζ*β*α*c + a*z*α*b*c
-      # Step 1: VS[α,β,ζ,c] = V[α,β,γ] * S[γ,ζ,c]
-      @timeit timer "first_contraction" begin
-        VS = mul!!(reshape(V, α*β, γ), reshape(S, γ, ζ*c), buffer=buffer[1])
-        VS = reshape(VS, α,β,ζ,c)
-      end
+    # Permute dimensions: VS_permuted[ζ,β,α,c] = VS[α,β,ζ,c]
+    VS_permuted = permutedims!!(VS, (3,2,1,4), buffer=buffer[2])
+    VS_permuted = reshape(VS_permuted, ζ*β, α*c)
 
-      # Permute dimensions: VS_permuted[ζ,β,α,c] = VS[α,β,ζ,c]
-      @timeit timer "permutedims" begin
-        VS_permuted = permutedims!!(VS, (3,2,1,4), buffer=buffer[2])
-        VS_permuted = reshape(VS_permuted, ζ*β, α*c)
-      end
+    # Permute dimensions: B_permuted[z,b,ζ,β] = B[z,ζ,b,β]
+    B_permuted = permutedims!!(B, (1,3,2,4), buffer=buffer[1])
+    B_permuted = reshape(B_permuted, z*b, ζ*β)
 
-      # Permute dimensions: B_permuted[z,b,ζ,β] = B[z,ζ,b,β]
-      @timeit timer "permutedims" begin
-        B_permuted = permutedims!!(B, (1,3,2,4), buffer=buffer[1])
-        B_permuted = reshape(B_permuted, z*b, ζ*β)
-      end
+    # Step 2: VSB[z,b,α,c] = B_permuted[z,b,ζ,β] * VS_permuted[ζ,β,α,c]
+    VSB = mul!!(B_permuted, VS_permuted, buffer=buffer[3])
+    VSB = reshape(VSB, z,b,α,c)
 
-      # Step 2: VSB[z,b,α,c] = B_permuted[z,b,ζ,β] * VS_permuted[ζ,β,α,c]
-      @timeit timer "second_contraction" begin
-        VSB = mul!!(B_permuted, VS_permuted, buffer=buffer[3])
-        VSB = reshape(VSB, z,b,α,c)
-      end
+    # Permute dimensions: A_permuted[a,z,α] = A[z,a,α]
+    A_permuted = permutedims!!(A, (2,1,3), buffer=buffer[1])
+    A_permuted = reshape(A_permuted, a,z*α)
 
-      # Permute dimensions: A_permuted[a,z,α] = A[z,a,α]
-      @timeit timer "permutedims" begin
-        A_permuted = permutedims!!(A, (2,1,3), buffer=buffer[1])
-        A_permuted = reshape(A_permuted, a,z*α)
-      end
+    # Permute dimensions: VSB_permuted[z,α,b,c] = VSB[z,b,α,c]
+    VSB_permuted = permutedims!!(VSB, (1,3,2,4), buffer=buffer[2])
+    VSB_permuted = reshape(VSB_permuted, z*α,b*c)
 
-      # Permute dimensions: VSB_permuted[z,α,b,c] = VSB[z,b,α,c]
-      @timeit timer "permutedims" begin
-        VSB_permuted = permutedims!!(VSB, (1,3,2,4), buffer=buffer[2])
-        VSB_permuted = reshape(VSB_permuted, z*α,b*c)
-      end
-
-      # Step 3: W[a,b,c] = A_permuted[a,z,α] * VSB_permuted[z,α,b,c]
-      mul!(reshape(W, a,b*c), A_permuted, VSB_permuted)
-    end
+    # Step 3: W[a,b,c] = A_permuted[a,z,α] * VSB_permuted[z,α,b,c]
+    mul!(reshape(W, a,b*c), A_permuted, VSB_permuted)
   end
 
   return W
@@ -984,7 +914,7 @@ end
 
 
 
-function permutedims!!(A::Array{T, N}, perm; buffer=nothing) where {T,N}
+function permutedims!!(A::AbstractArray{T, N}, perm; buffer=nothing) where {T,N}
   if buffer === nothing
     A_permuted = permutedims(A, perm)
   else
@@ -1002,7 +932,7 @@ function mul!!(A::AbstractMatrix{T}, B::AbstractMatrix{T}; buffer=nothing) where
   else
     m = size(A,1)
     n = size(B,2)
-    @assert length(buffer) >= m*n "Buffer too small: need $(m*n), got $(length(buffer))"
+    @assert length(buffer) >= m*n "Buffer too small: need $(m*n)=($m)⨯($n), got $(length(buffer))"
     C = unsafe_wrap(Array, pointer(buffer), (m,n))
     mul!(C, A,B)
   end
