@@ -1,5 +1,6 @@
 using TensorOperations
 using LinearAlgebra
+using TimerOutputs
 
 """
     default_rank_heuristic(y::TTvector{T,N}) -> Vector{Int}
@@ -112,36 +113,44 @@ sum = ttrand_rounding([0.5, 0.5], [y1, y2], rks)
 x_new = ttrand_rounding([1.0, -step_size], A, [x, gradient], rks)
 ```
 """
-function ttrand_rounding(y::TTvector{T,N}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234) where {T,N}
-  dims = y.ttv_dims
-  vec = Vector{Array{T,3}}(undef, N)
-  W, sketch_rks = tt_recursive_sketch(T, y, rks; orthogonal=orthogonal, reverse=true, seed=seed)
-  ot = zeros(Int, N)
-
-  # Randomized sketching and orthogonalization
-  yₖ = reshape(y.ttv_vec[1], dims[1], 1, y.ttv_rks[2])
-  @inbounds begin
-    for k in 1:N-1
-      # Randomized QR decomposition
-      Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
-      @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*W[k+1][αₖ₊₁,ρₖ₊₁]
-      Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
-      Q, _ = qr!(Zₖ, ColumnNorm())
-      Q = Matrix(Q)
-      rks[k+1] = size(Q,2)
-      vec[k] = reshape(Q,dims[k],rks[k],rks[k+1])
-      ot[k] = 1
-
-      #update left parts
-      yₖ₊₁ = zeros(T, dims[k+1],rks[k+1],y.ttv_rks[k+2])
-      @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁)  yₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂] = yₖ[iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y.ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
-      yₖ = yₖ₊₁
+function ttrand_rounding(y::TTvector{T,N}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+  @timeit timer "ttrand_rounding" begin
+    dims = y.ttv_dims
+    vec = Vector{Array{T,3}}(undef, N)
+    @timeit timer "reverse_sketch" begin
+      W, sketch_rks = tt_recursive_sketch(T, y, rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
     end
-    rks[N+1] = 1
-    vec[N] = reshape(yₖ, dims[N],rks[N],rks[N+1])
-  end
+    ot = zeros(Int, N)
 
-  return TTvector{T,N}(N,vec,dims,rks,ot)
+    # Randomized sketching and orthogonalization
+    @timeit timer "orthogonalization" begin
+      @timeit timer "left_sweep" begin
+        yₖ = reshape(y.ttv_vec[1], dims[1], 1, y.ttv_rks[2])
+        @inbounds begin
+          for k in 1:N-1
+            # Randomized QR decomposition
+            Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
+            @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*W[k+1][αₖ₊₁,ρₖ₊₁]
+            Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
+            Q, _ = qr!(Zₖ, ColumnNorm())
+            Q = Matrix(Q)
+            rks[k+1] = size(Q,2)
+            vec[k] = reshape(Q,dims[k],rks[k],rks[k+1])
+            ot[k] = 1
+
+            #update left parts
+            yₖ₊₁ = zeros(T, dims[k+1],rks[k+1],y.ttv_rks[k+2])
+            @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁)  yₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂] = yₖ[iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y.ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
+            yₖ = yₖ₊₁
+          end
+          rks[N+1] = 1
+          vec[N] = reshape(yₖ, dims[N],rks[N],rks[N+1])
+        end
+      end
+    end
+
+    return TTvector{T,N}(N,vec,dims,rks,ot)
+  end
 end
 
 """
@@ -150,157 +159,181 @@ end
 Convenience variant of ttrand_rounding that takes a maximum rank as second argument.
 Generates uniform ranks [1, rmax, rmax, ..., rmax, 1] for sketching.
 """
-function ttrand_rounding(y::TTvector{T,N}, rmax::Int; orthogonal::Bool=true, seed::Int=1234) where {T,N}
+function ttrand_rounding(y::TTvector{T,N}, rmax::Int; orthogonal::Bool=true, seed::Int=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
     # Generate uniform ranks with rmax
     rks = ones(Int, N+1)
     rks[2:N] .= rmax
-    return ttrand_rounding(y, rks; orthogonal=orthogonal, seed=seed)
+    return ttrand_rounding(y, rks; orthogonal=orthogonal, seed=seed, block_rks=block_rks, timer=timer)
 end
 
-function ttrand_rounding(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TTvector{T,N}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234) where {T,N}
-  dims = y.ttv_dims
-  vec = Vector{Array{T,3}}(undef, N)
-  WAy, sketch_rks = tt_recursive_sketch(T, Atto, y, rks; orthogonal=orthogonal, reverse=true, seed=seed)
-  Wb,  sketch_rks = tt_recursive_sketch(T,       b, rks; orthogonal=orthogonal, reverse=true, seed=seed)
-  ot = zeros(Int, N)
+function ttrand_rounding(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TTvector{T,N}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+  @timeit timer "ttrand_rounding" begin
+    dims = y.ttv_dims
+    vec = Vector{Array{T,3}}(undef, N)
+    @timeit timer "reverse_sketch" begin
+      WAy, sketch_rks = tt_recursive_sketch(T, Atto, y, rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
+      Wb,  sketch_rks = tt_recursive_sketch(T,       b, rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
+    end
+    ot = zeros(Int, N)
 
 # Randomized sketching and orthogonalization
-  Ayₖ = zeros(T, dims[1], 1, y.ttv_rks[2], Atto.tto_rks[2])
-  @tensoropt (αₖ,βₖ,αₖ₊₁,βₖ₊₁) Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁] = y.ttv_vec[1][jₖ,αₖ,αₖ₊₁]*Atto.tto_vec[1][iₖ,jₖ,βₖ,βₖ₊₁]
-  bₖ = reshape(b.ttv_vec[1], dims[1], 1, b.ttv_rks[2])
-  @inbounds begin
-    for k in 1:N-1
-      # Randomized QR decomposition
-      Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
-      @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] := Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*WAy[k+1][αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[iₖ,ρₖ,αₖ₊₁]*Wb[k+1][αₖ₊₁,ρₖ₊₁]
-      Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
-      Q, _ = qr!(Zₖ, ColumnNorm())
-      Q = Matrix(Q)
-      rks[k+1] = size(Q,2)
-      vec[k] = reshape(Q,dims[k],rks[k],rks[k+1])
-      ot[k] = 1
+    @timeit timer "orthogonalization" begin
+      @timeit timer "left_sweep" begin
+        Ayₖ = zeros(T, dims[1], 1, y.ttv_rks[2], Atto.tto_rks[2])
+        @tensoropt (αₖ,βₖ,αₖ₊₁,βₖ₊₁) Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁] = y.ttv_vec[1][jₖ,αₖ,αₖ₊₁]*Atto.tto_vec[1][iₖ,jₖ,βₖ,βₖ₊₁]
+        bₖ = reshape(b.ttv_vec[1], dims[1], 1, b.ttv_rks[2])
+        @inbounds begin
+          for k in 1:N-1
+            # Randomized QR decomposition
+            Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
+            @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] := Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*WAy[k+1][αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[iₖ,ρₖ,αₖ₊₁]*Wb[k+1][αₖ₊₁,ρₖ₊₁]
+            Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
+            Q, _ = qr!(Zₖ, ColumnNorm())
+            Q = Matrix(Q)
+            rks[k+1] = size(Q,2)
+            vec[k] = reshape(Q,dims[k],rks[k],rks[k+1])
+            ot[k] = 1
 
-      #update left parts
-      Ayₖ₊₁ = zeros(T, dims[k+1],rks[k+1],y.ttv_rks[k+2],Atto.tto_rks[k+2])
-       bₖ₊₁ = zeros(T, dims[k+1],rks[k+1],b.ttv_rks[k+2])
-      @tensoropt (αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂,ρₖ₊₁) Ayₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂,βₖ₊₂] = Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y.ttv_vec[k+1][jₖ₊₁,αₖ₊₁,αₖ₊₂]*Atto.tto_vec[k+1][iₖ₊₁,jₖ₊₁,βₖ₊₁,βₖ₊₂]
-      @tensoropt (αₖ₊₁,     αₖ₊₂,    ρₖ₊₁)  bₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂     ] =  bₖ[iₖ,ρₖ,αₖ₊₁    ]*vec[k][iₖ,ρₖ,ρₖ₊₁]*b.ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
-      Ayₖ = Ayₖ₊₁
-      bₖ  = bₖ₊₁
+            #update left parts
+            Ayₖ₊₁ = zeros(T, dims[k+1],rks[k+1],y.ttv_rks[k+2],Atto.tto_rks[k+2])
+             bₖ₊₁ = zeros(T, dims[k+1],rks[k+1],b.ttv_rks[k+2])
+            @tensoropt (αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂,ρₖ₊₁) Ayₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂,βₖ₊₂] = Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y.ttv_vec[k+1][jₖ₊₁,αₖ₊₁,αₖ₊₂]*Atto.tto_vec[k+1][iₖ₊₁,jₖ₊₁,βₖ₊₁,βₖ₊₂]
+            @tensoropt (αₖ₊₁,     αₖ₊₂,    ρₖ₊₁)  bₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂     ] =  bₖ[iₖ,ρₖ,αₖ₊₁    ]*vec[k][iₖ,ρₖ,ρₖ₊₁]*b.ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
+            Ayₖ = Ayₖ₊₁
+            bₖ  = bₖ₊₁
+          end
+          rks[N+1] = 1
+          vec[N] = reshape(Ayₖ,dims[N],rks[N],rks[N+1]) - reshape(bₖ,dims[N],rks[N],rks[N+1])
+        end
+      end
     end
-    rks[N+1] = 1
-    vec[N] = reshape(Ayₖ,dims[N],rks[N],rks[N+1]) - reshape(bₖ,dims[N],rks[N],rks[N+1])
-  end
 
-  return TTvector{T,N}(N,vec,dims,rks,ot)
+    return TTvector{T,N}(N,vec,dims,rks,ot)
+  end
 end
 
-function ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234) where {T,N}
-  m = length(α)
-  dims = y[1].ttv_dims
-  @assert length(y) == m && all(y[j].ttv_dims == dims for j=2:m)
+function ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+  @timeit timer "ttrand_rounding" begin
+    m = length(α)
+    dims = y[1].ttv_dims
+    @assert length(y) == m && all(y[j].ttv_dims == dims for j=2:m)
 
-  W = Vector{Vector{Array{T,2}}}(undef, m)
-  sketch_rks = Vector{Vector{Int64}}(undef, m)
+    W = Vector{Vector{Array{T,2}}}(undef, m)
+    sketch_rks = Vector{Vector{Int64}}(undef, m)
 
-  for j=1:m
-    W[j], sketch_rks[j] = tt_recursive_sketch(T, y[j], rks; orthogonal=orthogonal, reverse=true, seed=seed)
-    @assert sketch_rks[j] == sketch_rks[1]
-  end
-  sketch_rks = sketch_rks[1]
-
-  vec = Vector{Array{T,3}}(undef, N)
-  ot = zeros(Int, N)
-
-  # Randomized sketching and orthogonalization
-  Yₖ = [α[j].*reshape(y[j].ttv_vec[1], dims[1], 1, y[j].ttv_rks[2]) for j=1:m]
-  @inbounds begin
-    for k in 1:N-1
-      # Randomized QR decomposition
-      Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
+    @timeit timer "reverse_sketch" begin
       for j=1:m
-        @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*W[j][k+1][αₖ₊₁,ρₖ₊₁]
+        W[j], sketch_rks[j] = tt_recursive_sketch(T, y[j], rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
+        @assert sketch_rks[j] == sketch_rks[1]
       end
-      Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
-      Q, _ = qr!(Zₖ, ColumnNorm())
-      rks[k+1] = size(Q,2)
-      vec[k] = reshape(Matrix(Q),dims[k],rks[k],rks[k+1])
-      ot[k] = 1
-
-      #update left parts
-      Yₖ₊₁ = [ zeros(T, dims[k+1],rks[k+1],y[j].ttv_rks[k+2]) for j=1:m ]
-      for j=1:m
-        @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁)  Yₖ₊₁[j][iₖ₊₁,ρₖ₊₁,αₖ₊₂] = Yₖ[j][iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
-      end
-      Yₖ = Yₖ₊₁
+      sketch_rks = sketch_rks[1]
     end
-    rks[N+1] = 1
-    vec[N] = sum(Yₖ[j] for j=1:m)
-  end
 
-  return TTvector{T,N}(N,vec,dims,rks,ot)
+    vec = Vector{Array{T,3}}(undef, N)
+    ot = zeros(Int, N)
+
+    # Randomized sketching and orthogonalization
+    @timeit timer "orthogonalization" begin
+      @timeit timer "left_sweep" begin
+        Yₖ = [α[j].*reshape(y[j].ttv_vec[1], dims[1], 1, y[j].ttv_rks[2]) for j=1:m]
+        @inbounds begin
+          for k in 1:N-1
+            # Randomized QR decomposition
+            Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
+            for j=1:m
+              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*W[j][k+1][αₖ₊₁,ρₖ₊₁]
+            end
+            Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
+            Q, _ = qr!(Zₖ, ColumnNorm())
+            rks[k+1] = size(Q,2)
+            vec[k] = reshape(Matrix(Q),dims[k],rks[k],rks[k+1])
+            ot[k] = 1
+
+            #update left parts
+            Yₖ₊₁ = [ zeros(T, dims[k+1],rks[k+1],y[j].ttv_rks[k+2]) for j=1:m ]
+            for j=1:m
+              @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁)  Yₖ₊₁[j][iₖ₊₁,ρₖ₊₁,αₖ₊₂] = Yₖ[j][iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
+            end
+            Yₖ = Yₖ₊₁
+          end
+          rks[N+1] = 1
+          vec[N] = sum(Yₖ[j] for j=1:m)
+        end
+      end
+    end
+
+    return TTvector{T,N}(N,vec,dims,rks,ot)
+  end
 end
 
 
-function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234) where {T,N}
-  m = length(α)
-  dims = y[1].ttv_dims
-  @assert length(y) == m && all(y[j].ttv_dims == dims for j=2:m)
+function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+  @timeit timer "ttrand_rounding" begin
+    m = length(α)
+    dims = y[1].ttv_dims
+    @assert length(y) == m && all(y[j].ttv_dims == dims for j=2:m)
 
-  W = Vector{Vector{Array{T,2}}}(undef, m)
+    W = Vector{Vector{Array{T,2}}}(undef, m)
 
-  W₁, sketch_rks = tt_recursive_sketch(T, A, y[1], rks; orthogonal=orthogonal, reverse=true, seed=seed)
-  W[1] = [reshape(W₁[k], y[1].ttv_rks[k]*A.tto_rks[k], sketch_rks[k]) for k=1:N+1]
-  for j=2:m
-    Wⱼ, sketchj_rks = tt_recursive_sketch(T, y[j], rks; orthogonal=orthogonal, reverse=true, seed=seed)
-    W[j] = Wⱼ
-    @assert sketchj_rks == sketch_rks
-  end
-
-  vec = Vector{Array{T,3}}(undef, N)
-  ot = zeros(Int, N)
-
-  # Randomized sketching and orthogonalization
-  Yₖ = Vector{Array{T,3}}(undef, m)
-
-  Ay₁ = zeros(T, dims[1], 1, y[1].ttv_rks[2], A.tto_rks[2])
-  @tensoropt (α₂,β₂) Ay₁[i₁,ρₖ,α₂,β₂] = y[1].ttv_vec[1][j₁,ρₖ,α₂]*A.tto_vec[1][i₁,j₁,ρₖ,β₂]
-  Ay₁ .*= α[1]
-  Yₖ[1] = reshape(Ay₁, dims[1], 1, y[1].ttv_rks[2]*A.tto_rks[2])
-  for j=2:m
-    Yₖ[j] = α[j].*reshape(y[j].ttv_vec[1], dims[1], 1, y[j].ttv_rks[2])
-  end
-  @inbounds begin
-    for k in 1:N-1
-      # Randomized QR decomposition
-      Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
-      for j=1:m
-        @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*W[j][k+1][αₖ₊₁,ρₖ₊₁]
-      end
-      Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
-      Q, _ = qr!(Zₖ, ColumnNorm())
-      rks[k+1] = size(Q,2)
-      vec[k] = reshape(Matrix(Q),dims[k],rks[k],rks[k+1])
-      ot[k] = 1
-
-      #update left parts
-      Yₖ₊₁ = Vector{Array{T,3}}(undef, m)
-
-      y₁ₖ = reshape(Yₖ[1], dims[k], rks[k], y[1].ttv_rks[k+1], A.tto_rks[k+1])
-      Ay₁ₖ₊₁ = zeros(T, dims[k+1], rks[k+1], y[1].ttv_rks[k+2], A.tto_rks[k+2])
-      @tensoropt (ρₖ,ρₖ₊₁,αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂) Ay₁ₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂,βₖ₊₂] = y₁ₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y[1].ttv_vec[k+1][jₖ₊₁,αₖ₊₁,αₖ₊₂]*A.tto_vec[k+1][iₖ₊₁,jₖ₊₁,βₖ₊₁,βₖ₊₂]
-      Yₖ₊₁[1] = reshape(Ay₁ₖ₊₁, dims[k+1], rks[k+1], y[1].ttv_rks[k+2]*A.tto_rks[k+2])
+    @timeit timer "reverse_sketch" begin
+      W₁, sketch_rks = tt_recursive_sketch(T, A, y[1], rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
+      W[1] = [reshape(W₁[k], y[1].ttv_rks[k]*A.tto_rks[k], sketch_rks[k]) for k=1:N+1]
       for j=2:m
-        Yₖ₊₁[j] = zeros(T, dims[k+1],rks[k+1],y[j].ttv_rks[k+2])
-        @tensoropt (ρₖ₊₁,αₖ₊₁,αₖ₊₂)  Yₖ₊₁[j][iₖ₊₁,ρₖ₊₁,αₖ₊₂] = Yₖ[j][iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
+        Wⱼ, sketchj_rks = tt_recursive_sketch(T, y[j], rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
+        W[j] = Wⱼ
+        @assert sketchj_rks == sketch_rks
       end
-      Yₖ = Yₖ₊₁
     end
-    rks[N+1] = 1
-    vec[N] = sum(Yₖ[j] for j=1:m)
-  end
 
-  return TTvector{T,N}(N,vec,dims,rks,ot)
+    vec = Vector{Array{T,3}}(undef, N)
+    ot = zeros(Int, N)
+
+    # Randomized sketching and orthogonalization
+    @timeit timer "orthogonalization" begin
+      @timeit timer "left_sweep" begin
+        Yₖ = Vector{Array{T,3}}(undef, m)
+
+        Ay₁ = zeros(T, dims[1], 1, y[1].ttv_rks[2], A.tto_rks[2])
+        @tensoropt (α₂,β₂) Ay₁[i₁,ρₖ,α₂,β₂] = y[1].ttv_vec[1][j₁,ρₖ,α₂]*A.tto_vec[1][i₁,j₁,ρₖ,β₂]
+        Ay₁ .*= α[1]
+        Yₖ[1] = reshape(Ay₁, dims[1], 1, y[1].ttv_rks[2]*A.tto_rks[2])
+        for j=2:m
+          Yₖ[j] = α[j].*reshape(y[j].ttv_vec[1], dims[1], 1, y[j].ttv_rks[2])
+        end
+        @inbounds begin
+          for k in 1:N-1
+            # Randomized QR decomposition
+            Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
+            for j=1:m
+              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*W[j][k+1][αₖ₊₁,ρₖ₊₁]
+            end
+            Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
+            Q, _ = qr!(Zₖ, ColumnNorm())
+            rks[k+1] = size(Q,2)
+            vec[k] = reshape(Matrix(Q),dims[k],rks[k],rks[k+1])
+            ot[k] = 1
+
+            #update left parts
+            Yₖ₊₁ = Vector{Array{T,3}}(undef, m)
+
+            y₁ₖ = reshape(Yₖ[1], dims[k], rks[k], y[1].ttv_rks[k+1], A.tto_rks[k+1])
+            Ay₁ₖ₊₁ = zeros(T, dims[k+1], rks[k+1], y[1].ttv_rks[k+2], A.tto_rks[k+2])
+            @tensoropt (ρₖ,ρₖ₊₁,αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂) Ay₁ₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂,βₖ₊₂] = y₁ₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y[1].ttv_vec[k+1][jₖ₊₁,αₖ₊₁,αₖ₊₂]*A.tto_vec[k+1][iₖ₊₁,jₖ₊₁,βₖ₊₁,βₖ₊₂]
+            Yₖ₊₁[1] = reshape(Ay₁ₖ₊₁, dims[k+1], rks[k+1], y[1].ttv_rks[k+2]*A.tto_rks[k+2])
+            for j=2:m
+              Yₖ₊₁[j] = zeros(T, dims[k+1],rks[k+1],y[j].ttv_rks[k+2])
+              @tensoropt (ρₖ₊₁,αₖ₊₁,αₖ₊₂)  Yₖ₊₁[j][iₖ₊₁,ρₖ₊₁,αₖ₊₂] = Yₖ[j][iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
+            end
+            Yₖ = Yₖ₊₁
+          end
+          rks[N+1] = 1
+          vec[N] = sum(Yₖ[j] for j=1:m)
+        end
+      end
+    end
+
+    return TTvector{T,N}(N,vec,dims,rks,ot)
+  end
 end
 
 
@@ -357,49 +390,35 @@ SIAM J. Sci. Comput., 45(5), pp. A2610–A2629, https://arxiv.org/abs/2208.02600
 - stta_sketch automatically applies 50% oversampling to left ranks for optimal performance
 - More efficient than SVD-based methods for structured or streaming data
 """
-function stta(y_tt::TTvector{T,N}; rks=default_rank_heuristic(y_tt), 
-              seed_left::Int=1234, seed_right::Int=5678, orthogonal::Bool=true) where {T,N}
-  # stta_sketch handles the oversampling internally
-  Ω,Ψ = stta_sketch(y_tt, rks; seed_left=seed_left, seed_right=seed_right, orthogonal=orthogonal)
-  result_rks = ones(Int, N+1)
-  # Deep copy Ψ to avoid reference issues
-  Ψ_copy = [copy(Ψ[k]) for k=1:N]
-  for k in 1:N-1
-    if size(Ω[k],1)<size(Ω[k],2) #rR>rL
-      Ψ_temp = reshape(Ψ_copy[k],:,size(Ψ_copy[k],3))*stable_inverse(Ω[k])
-      Ψ_copy[k]= reshape(Ψ_temp,size(Ψ_copy[k],1),size(Ψ_copy[k],2),:)
-      result_rks[k+1] = size(Ψ_copy[k],3)
-    else 
-      Ψ_temp = stable_inverse(Ω[k])*reshape(permutedims(Ψ_copy[k+1],(2,1,3)),size(Ψ_copy[k+1],2),:)
-      Ψ_copy[k+1]= permutedims(reshape(Ψ_temp,:,size(Ψ_copy[k+1],1),size(Ψ_copy[k+1],3)),(2,1,3))
-      result_rks[k+1] = size(Ψ_copy[k+1],2)
+function stta(y_tt::TTvector{T,N}; rks=default_rank_heuristic(y_tt),
+              seed_left::Int=1234, seed_right::Int=5678, orthogonal::Bool=true, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+  @timeit timer "stta" begin
+    # stta_sketch handles the oversampling internally
+    @timeit timer "stta_sketch" begin
+      Ω,Ψ = stta_sketch(y_tt, rks; seed_left=seed_left, seed_right=seed_right, orthogonal=orthogonal, block_rks=block_rks, timer=timer)
     end
-  end
-  
-  # Set boundary ranks to 1 (should already be correct from sketch)
-  result_rks[1] = 1
-  result_rks[N+1] = 1
-  return TTvector{T,N}(N,Ψ_copy,y_tt.ttv_dims,result_rks,zeros(N))
-end
 
-"""
-Wrong algorithm
-"""
-function tt_hmt(y_tt::TTvector{T,N};rks=y_tt.ttv_rks,rmax=maximum(rks),ℓ=round(Int,maximum(rks))) where {T,N}
-  rks = r_and_d_to_rks(rks.+ℓ,y_tt.ttv_dims;rmax=rmax+ℓ)
-  Ω = [randn(T, y_tt.ttv_rks[k], rks[k]) for k=2:N+1]
-  x_tt = zeros_tt(y_tt.ttv_dims,rks)
-  y_temp = zeros(maximum(y_tt.ttv_dims),maximum(rks),maximum(y_tt.ttv_rks))
-  y_temp[1:y_tt.ttv_dims[1],1:rks[1],1:y_tt.ttv_rks[2]] = copy(y_tt.ttv_vec[1])
-  for k in 1:N-1
-    @tensor A[iₖ,αₖ₋₁,βₖ] := @view(y_temp[1:y_tt.ttv_dims[k],1:rks[k],1:y_tt.ttv_rks[k+1]])[iₖ,αₖ₋₁,αₖ]*Ω[k][αₖ,βₖ]
-    A = reshape(A,y_tt.ttv_dims[k]*rks[k],:)
-    q,_ = qr!(A, ColumnNorm())
-    x_tt.ttv_vec[k] = reshape(Matrix(q),y_tt.ttv_dims[k],rks[k],:)
-    rks[k+1] = size(x_tt.ttv_vec[k],3)
-    R_temp = q'[1:rks[k+1],:]*reshape(y_temp[1:y_tt.ttv_dims[k],1:rks[k],1:y_tt.ttv_rks[k+1]],y_tt.ttv_dims[k]*rks[k],:) #size rks[k+1] × y_tt.ttv_rks[k+1]
-    @tensor (y_temp[1:y_tt.ttv_dims[k+1],1:rks[k+1],1:y_tt.ttv_rks[k+2]])[iₖ₊₁,αₖ,αₖ₊₁] = R_temp[αₖ,βₖ]*y_tt.ttv_vec[k+1][iₖ₊₁,βₖ,αₖ₊₁]
+    result_rks = ones(Int, N+1)
+    # Deep copy Ψ to avoid reference issues
+    @timeit timer "rounding" begin
+      Ψ_copy = [copy(Ψ[k]) for k=1:N]
+      for k in 1:N-1
+        if size(Ω[k],1)<size(Ω[k],2) #rR>rL
+          Ψ_temp = reshape(Ψ_copy[k],:,size(Ψ_copy[k],3))*stable_inverse(Ω[k])
+          Ψ_copy[k]= reshape(Ψ_temp,size(Ψ_copy[k],1),size(Ψ_copy[k],2),:)
+          result_rks[k+1] = size(Ψ_copy[k],3)
+        else
+          Ψ_temp = stable_inverse(Ω[k])*reshape(permutedims(Ψ_copy[k+1],(2,1,3)),size(Ψ_copy[k+1],2),:)
+          Ψ_copy[k+1]= permutedims(reshape(Ψ_temp,:,size(Ψ_copy[k+1],1),size(Ψ_copy[k+1],3)),(2,1,3))
+          result_rks[k+1] = size(Ψ_copy[k+1],2)
+        end
+      end
+
+      # Set boundary ranks to 1 (should already be correct from sketch)
+      result_rks[1] = 1
+      result_rks[N+1] = 1
+    end
+
+    return TTvector{T,N}(N,Ψ_copy,y_tt.ttv_dims,result_rks,zeros(N))
   end
-  x_tt.ttv_vec[N] = y_temp[1:y_tt.ttv_dims[N],1:rks[N],1:1]
-  return TTvector{T,N}(N,x_tt.ttv_vec,y_tt.ttv_dims,rks,zeros(N))
 end

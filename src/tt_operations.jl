@@ -21,7 +21,7 @@ Semantics / shape notes:
   trick: represent the sum as a block-diagonal embedding in cores so that the
   original tensor and a constant tensor coexist in the enlarged TT-format.
 
-- typejoin(T,S) determines the numeric type for the output cores when T and S
+- typeof(one(T)+one(S)) determines the numeric type for the output cores when T and S
   differ (promotes types if needed).
 
 - rks = x.ttv_rks .+ 1 : we temporarily increase all ranks by 1, then force
@@ -34,7 +34,7 @@ Performance notes:
 """
 function +(x::TTvector{T,N},y::S) where {T<:Number,S<:Number,N}
     # Determine common numeric type for outputs
-    R = typejoin(T,S)
+    R = typeof(one(T)+one(S))
 
     # New ranks: add 1 to every internal bond so we have room for the constant
     rks = x.ttv_rks .+ 1
@@ -327,14 +327,13 @@ function dot(A::TTvector{T,N}, B::TTvector{T,N}) where {T<:Number,N}
         M = @view(out[1:A_rks[k+1], 1:B_rks[k+1]])
 
         # contraction over physical index and previous block `out`
-        @tensor M[a,b] = A.ttv_vec[k][z, α, a] * (B.ttv_vec[k][z, β, b] * out[1:A_rks[k], 1:B_rks[k]][α, β])
+        @tensor M[a,b] = A.ttv_vec[k][z, α, a] * (conj(B.ttv_vec[k][z, β, b]) * out[1:A_rks[k], 1:B_rks[k]][α, β])
         # after contracting this core, M becomes the new "out" for next iteration
     end
 
     # return the scalar in out[1,1]
     return out[1,1]::T
 end
-
 
 """
 dot_par(A, B) : parallelized dot.
@@ -368,7 +367,7 @@ function dot_par(A::TTvector{T,N}, B::TTvector{T,N}) where {T<:Number,N}
         M = zeros(T, A_rks[k], B_rks[k], A_rks[k+1], B_rks[k+1])
 
         # Contract the physical index z to build M for this site
-        @tensor M[a, b, c, d] = A.ttv_vec[k][z, a, c] * B.ttv_vec[k][z, b, d]
+        @tensor M[a, b, c, d] = A.ttv_vec[k][z, a, c] * conj(B.ttv_vec[k][z, b, d])
 
         # Reshape into matrix form: rows = (A_rk * B_rk), cols = (A_rk+1 * B_rk+1)
         Y[k] = reshape(M, A_rks[k] * B_rks[k], A_rks[k+1] * B_rks[k+1])
@@ -391,7 +390,7 @@ end
 # This is a somewhat unconventional optimization: it avoids scaling all cores if
 # there is metadata that marks a "root" core for scalar embedding.
 function *(a::S, A::TTvector{R,N}) where {S<:Number, R<:Number, N}
-    T = typejoin(typeof(a), R)
+    T = typeof(one(S)*one(R))
 
     # If scalar is zero return zero TTvector with minimal ranks (all ones)
     if iszero(a)
@@ -408,7 +407,7 @@ end
 # Scalar * TToperator: analogous to above but for operators
 function *(a::S, A::TToperator{R,N}) where {S<:Number, R<:Number, N}
     i = findfirst(isequal(0), A.tto_ot)
-    T = typejoin(typeof(a), R)
+    T = typeof(one(S)*one(R))
     X = copy(A.tto_vec)
     X[i] = a * X[i]
     return TToperator{T,N}(A.N, X, A.tto_dims, A.tto_rks, A.tto_ot)

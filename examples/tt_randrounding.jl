@@ -31,10 +31,11 @@ function modes_sensitivity(;
       A_ttsvd = tt_rounding(A_tt+ε*B_tt+ε^2*C_tt;rmax=rks_list[i_rks])
       norm_list_exact[i_d,i_rks] = norm(A_ttsvd-A_tt+ε*B_tt+ε^2*C_tt)
       @threads for _ in 1:n_samples
-        A_rand = ttrand_rounding(A_tt+ε*B_tt+ε^2*C_tt;rmax=rks_list[i_rks],orthogonal=false,ℓ=ℓ)
-        A_orth = ttrand_rounding(A_tt+ε*B_tt+ε^2*C_tt;rmax=rks_list[i_rks],ℓ=ℓ)
-        A_ttstta = stta(A_tt+ε*B_tt+ε^2*C_tt,rmax=rks_list[i_rks],ℓ=ℓ)
-        A_tthmt = tt_hmt(A_tt+ε*B_tt+ε^2*C_tt,rmax=rks_list[i_rks],ℓ=ℓ)
+        A_rand = ttrand_rounding(A_tt+ε*B_tt+ε^2*C_tt, rks_list[i_rks]; orthogonal=false)
+        A_orth = ttrand_rounding(A_tt+ε*B_tt+ε^2*C_tt, rks_list[i_rks])
+        rks_vec = [1; fill(rks_list[i_rks], d_list[i_d]-1); 1]
+        A_ttstta = stta(A_tt+ε*B_tt+ε^2*C_tt; rks=rks_vec)
+        A_tthmt = tt_hmt(A_tt+ε*B_tt+ε^2*C_tt; rmax=rks_list[i_rks], ℓ=ℓ)
         norm_list[i_d,i_rks] += norm(A_tt+ε*B_tt+ε^2*C_tt-A_rand)
         norm_list_orth[i_d,i_rks] += norm(A_tt+ε*B_tt+ε^2*C_tt-A_orth)
         norm_list_stta[i_d,i_rks] += norm(A_tt+ε*B_tt+ε^2*C_tt-A_ttstta)
@@ -53,6 +54,7 @@ function modes_sensitivity(;
   data["stta_error"] = norm_list_stta/n_samples
   data["tthmt_error"] = norm_list_tthmt/n_samples
   data["n_samples"] = n_samples
+  mkpath("out/rand-rounding")
   open(io -> JSON3.write(io, data, allow_inf=true), "out/rand-rounding/perturbed_ℓ=$(ℓ)_ε=$(ε).json", "w")
   nothing
 end
@@ -163,11 +165,12 @@ function slater_mode(;
         println(rks_list[i_rks])
         ϕ_tt = tt_rounding(ψ_tt,rmax=rks_list[i_rks])
         norm_list_exact[i_N,i_rks] += norm(ψ_tt-ϕ_tt)
-        typeof(ℓ_in) == Int64 ? ℓ = ℓ_in : ℓ=round(Int,rks_list[i_rks]*ℓ_in)
+        ℓ = typeof(ℓ_in) == Int64 ? ℓ_in : round(Int,rks_list[i_rks]*ℓ_in)
         for _ in 1:n_samples
-          ϕ_ttrand = ttrand_rounding(ψ_tt,rmax=rks_list[i_rks],orthogonal=false,ℓ=ℓ)
-          ϕ_ttorth = ttrand_rounding(ψ_tt,rmax=rks_list[i_rks],ℓ=ℓ)
-          ϕ_ttstta = stta(ψ_tt,rmax=rks_list[i_rks],ℓ=ℓ)
+          ϕ_ttrand = ttrand_rounding(ψ_tt, rks_list[i_rks]; orthogonal=false)
+          ϕ_ttorth = ttrand_rounding(ψ_tt, rks_list[i_rks])
+          rks_vec = [1; fill(rks_list[i_rks], N_list[i_N]-1); 1]
+          ϕ_ttstta = stta(ψ_tt; rks=rks_vec)
 #          ϕ_tthmt = tt_hmt(ψ_tt,rmax=rks_list[i_rks],ℓ=ℓ)
           norm_list_rand[i_N,i_rks] += norm(ψ_tt-ϕ_ttrand)
           norm_list_orth[i_N,i_rks] += norm(ψ_tt-ϕ_ttorth)
@@ -191,6 +194,7 @@ function slater_mode(;
   data["stta_error"] = norm_list_stta
   data["ℓ"] = ℓ_in 
 #  data["tthmt_error"] = norm_list_tthmt
+  mkpath("out/rand-rounding")
   open(io -> JSON3.write(io, data, allow_inf=true), "out/rand-rounding/slater_ℓ=$(ℓ_in)_N=$(N_list).json", "w")
   nothing
 #  return norm_list_exact,norm_list_rand,norm_list_orth,norm_list_stta,norm_list_tthmt
