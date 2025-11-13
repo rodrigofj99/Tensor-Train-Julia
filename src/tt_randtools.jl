@@ -50,67 +50,64 @@ function default_rank_heuristic(Y::Vector{TTvector{T,N}}) where {T,N}
 end
 
 """
-    ttrand_rounding(y::TTvector{T,N}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234) -> TTvector{T,N}
-    ttrand_rounding(A::TToperator{T,N}, y::TTvector{T,N}, b::TTvector{T,N}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234) -> TTvector{T,N}
-    ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234) -> TTvector{T,N}
-    ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234) -> TTvector{T,N}
+    ttrand_rounding(y::TTvector, rks; orthogonal=true, seed=1234, block_rks=N, timer=TimerOutput())
+    ttrand_rounding(y::TTvector, rmax::Int; orthogonal=true, seed=1234, block_rks=N, timer=TimerOutput())
+    ttrand_rounding(α::Vector, y::Vector{TTvector}, rks; orthogonal=true, seed=1234, block_rks=N, timer=TimerOutput())
 
-Randomized TT rounding using sketching and orthogonalization.
+Randomized TT rounding using recursive sketching and orthogonalization.
 
-Compresses a TTvector (or combination of TTvectors) to smaller ranks using random sketching
-followed by QR factorization with column pivoting. More efficient than SVD-based rounding for
-large-scale problems.
-
-# Variants
-1. Single TTvector: rounds `y`
-2. Residual: rounds `A*y - b` without explicitly forming the product (useful for iterative solvers)
-3. Linear combination: rounds `α₁*y₁ + α₂*y₂ + ... + αₘ*yₘ`
-4. Mixed combination: rounds `α₁*A*y₁ + α₂*y₂ + ... + αₘ*yₘ` (useful for gradient descent or Krylov solvers)
+Compresses a TTvector (or linear combination of TTvectors) to target ranks using random
+sketching followed by QR factorization with column pivoting. More efficient than SVD-based
+rounding for large-scale problems and moderate accuracy requirements.
 
 # Arguments
 - `y::TTvector{T,N}`: Input TTvector to round
-- `A::TToperator{T,N}`: Operator (for residual or mixed combinations)
-- `b::TTvector{T,N}`: Right-hand side vector (for residual)
-- `α::Vector{T}`: Coefficients (for linear combinations)
-- `y::Vector{TTvector{T,N}}`: Vector of TTvectors (for linear combinations)
-- `rks::Vector{Int}=default_rank_heuristic(...)`: Target ranks (with oversampling for stability)
+- `α::Vector`: Coefficients for linear combination α₁*y₁ + ... + αₘ*yₘ
+- `y::Vector{TTvector{T,N}}`: Vector of TTvectors for linear combination
+- `rks`: Target ranks (Vector{Int} of length N+1, or computed via `default_rank_heuristic`)
+- `rmax::Int`: Target rank (uniform across all bonds)
 
 # Keyword Arguments
-- `orthogonal::Bool=true`: Use orthogonal random sketches (recommended for stability)
+- `orthogonal::Bool=true`: Use orthogonal random matrices (Haar/spherical, more stable)
+  vs. Gaussian random matrices
 - `seed::Int=1234`: Random seed for reproducibility
+- `block_rks::Int=N`: Block rank for recursive sketching (controls sketch structure,
+  block_rks=1 gives Khatri-Rao structure, larger values allow more general sketches)
+- `timer::TimerOutput`: Timer for performance profiling
 
 # Returns
-- `result::TTvector{T,N}`: Rounded TTvector with left-orthogonal cores
+- `TTvector{T,N}`: Rounded TTvector with left-orthogonal cores (ot[k] = 1)
 
 # Algorithm
-Implements "Randomize then Orthogonalize" approach from:
-Al Daas, Ballard, Cazeaux, Hallman, Miedlar, Pasha, Reid & Saibaba (2023),
+Implements the "Randomize-then-Orthogonalize" (RTO) approach:
+1. Generate recursive sketch via right-to-left sweep (`tt_recursive_sketch`)
+2. Perform left-to-right sweep with randomized QR factorization with column pivoting
+3. Truncate ranks based on numerical rank detection from pivoted QR
+
+Reference: Al Daas, Ballard, Cazeaux, Hallman, Miedlar, Pasha, Reid & Saibaba (2023),
 "Randomized algorithms for rounding in the tensor-train format",
-SIAM J. Sci. Comput., 45(1), pp. A74–A95, https://doi.org/10.1137/21M1451191
+SIAM J. Sci. Comput., 45(1), pp. A74–A95. https://doi.org/10.1137/21M1451191
 
-1. Generate recursive sketch using tt_recursive_sketch
-2. Perform left-to-right sweep with randomized QR decomposition
-3. Truncate ranks based on numerical rank from column-pivoted QR
+# Performance Notes
+- Linear combination variant sketches each term separately, then combines during QR sweep
+- Resulting ranks may be smaller than target due to numerical rank detection
+- For high accuracy, consider SVD-based `tt_rounding`; for moderate accuracy and large
+  scale, use `ttrand_rounding`
 
-# Notes
-- Resulting TTvector has left-orthogonal cores (ot[k] = 1)
-- Actual ranks may be smaller than input rks due to numerical rank detection
-- More efficient than tt_rounding for low-to-moderate accuracy requirements
-- For combinations, sketches each term separately then combines during QR sweep for efficiency
-
-# Example
+# Examples
 ```julia
-# Simple rounding
-y_rounded = ttrand_rounding(y, rks)
+# Round single tensor to uniform rank 10
+y_rounded = ttrand_rounding(y, 10)
 
-# Residual for iterative solver
-residual = ttrand_rounding(A, x, b, rks)
+# Round to specific rank vector with Gaussian sketches
+rks = [1, 5, 10, 15, 10, 5, 1]
+y_rounded = ttrand_rounding(y, rks; orthogonal=false)
 
-# Linear combination
-sum = ttrand_rounding([0.5, 0.5], [y1, y2], rks)
+# Linear combination: 0.5*y₁ + 0.5*y₂
+y_avg = ttrand_rounding([0.5, 0.5], [y1, y2], 10)
 
-# Gradient descent step: x_new = x - α*∇f(x)
-x_new = ttrand_rounding([1.0, -step_size], A, [x, gradient], rks)
+# With block ranks for faster sketching
+y_rounded = ttrand_rounding(y, 10; block_rks=4)
 ```
 """
 function ttrand_rounding(y::TTvector{T,N}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
@@ -120,6 +117,7 @@ function ttrand_rounding(y::TTvector{T,N}, rks=default_rank_heuristic(y); orthog
     @timeit timer "reverse_sketch" begin
       W, sketch_rks = tt_recursive_sketch(T, y, rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
     end
+    out_rks = ones(Int, N+1)
     ot = zeros(Int, N)
 
     # Randomized sketching and orthogonalization
@@ -129,27 +127,25 @@ function ttrand_rounding(y::TTvector{T,N}, rks=default_rank_heuristic(y); orthog
         @inbounds begin
           for k in 1:N-1
             # Randomized QR decomposition
-            Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
+            Zₖ = zeros(T, dims[k],out_rks[k],sketch_rks[k+1])
             @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*W[k+1][αₖ₊₁,ρₖ₊₁]
-            Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
+            Zₖ = reshape(Zₖ,dims[k]*out_rks[k],sketch_rks[k+1])
             Q, _ = qr!(Zₖ, ColumnNorm())
             Q = Matrix(Q)
-            rks[k+1] = size(Q,2)
-            vec[k] = reshape(Q,dims[k],rks[k],rks[k+1])
+            out_rks[k+1] = size(Q,2)
+            vec[k] = reshape(Q,dims[k],out_rks[k],out_rks[k+1])
             ot[k] = 1
 
             #update left parts
-            yₖ₊₁ = zeros(T, dims[k+1],rks[k+1],y.ttv_rks[k+2])
+            yₖ₊₁ = zeros(T, dims[k+1],out_rks[k+1],y.ttv_rks[k+2])
             @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁)  yₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂] = yₖ[iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y.ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
             yₖ = yₖ₊₁
           end
-          rks[N+1] = 1
-          vec[N] = reshape(yₖ, dims[N],rks[N],rks[N+1])
+          vec[N] = reshape(yₖ, dims[N],out_rks[N],out_rks[N+1])
         end
       end
     end
-
-    return TTvector{T,N}(N,vec,dims,rks,ot)
+    return TTvector{T,N}(N,vec,dims,out_rks,ot)
   end
 end
 
@@ -174,6 +170,7 @@ function ttrand_rounding(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TTvector{T,
       WAy, sketch_rks = tt_recursive_sketch(T, Atto, y, rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
       Wb,  sketch_rks = tt_recursive_sketch(T,       b, rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
     end
+    out_rks = ones(Int, N+1)
     ot = zeros(Int, N)
 
 # Randomized sketching and orthogonalization
@@ -185,31 +182,38 @@ function ttrand_rounding(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TTvector{T,
         @inbounds begin
           for k in 1:N-1
             # Randomized QR decomposition
-            Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
+            Zₖ = zeros(T, dims[k],out_rks[k],sketch_rks[k+1])
             @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] := Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*WAy[k+1][αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[iₖ,ρₖ,αₖ₊₁]*Wb[k+1][αₖ₊₁,ρₖ₊₁]
-            Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
+            Zₖ = reshape(Zₖ,dims[k]*out_rks[k],sketch_rks[k+1])
             Q, _ = qr!(Zₖ, ColumnNorm())
             Q = Matrix(Q)
-            rks[k+1] = size(Q,2)
-            vec[k] = reshape(Q,dims[k],rks[k],rks[k+1])
+            out_rks[k+1] = size(Q,2)
+            vec[k] = reshape(Q,dims[k],out_rks[k],out_rks[k+1])
             ot[k] = 1
 
             #update left parts
-            Ayₖ₊₁ = zeros(T, dims[k+1],rks[k+1],y.ttv_rks[k+2],Atto.tto_rks[k+2])
-             bₖ₊₁ = zeros(T, dims[k+1],rks[k+1],b.ttv_rks[k+2])
+            Ayₖ₊₁ = zeros(T, dims[k+1],out_rks[k+1],y.ttv_rks[k+2],Atto.tto_rks[k+2])
+             bₖ₊₁ = zeros(T, dims[k+1],out_rks[k+1],b.ttv_rks[k+2])
             @tensoropt (αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂,ρₖ₊₁) Ayₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂,βₖ₊₂] = Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y.ttv_vec[k+1][jₖ₊₁,αₖ₊₁,αₖ₊₂]*Atto.tto_vec[k+1][iₖ₊₁,jₖ₊₁,βₖ₊₁,βₖ₊₂]
             @tensoropt (αₖ₊₁,     αₖ₊₂,    ρₖ₊₁)  bₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂     ] =  bₖ[iₖ,ρₖ,αₖ₊₁    ]*vec[k][iₖ,ρₖ,ρₖ₊₁]*b.ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
             Ayₖ = Ayₖ₊₁
             bₖ  = bₖ₊₁
           end
           rks[N+1] = 1
-          vec[N] = reshape(Ayₖ,dims[N],rks[N],rks[N+1]) - reshape(bₖ,dims[N],rks[N],rks[N+1])
+          vec[N] = reshape(Ayₖ,dims[N],out_rks[N],out_rks[N+1]) - reshape(bₖ,dims[N],out_rks[N],out_rks[N+1])
         end
       end
     end
 
-    return TTvector{T,N}(N,vec,dims,rks,ot)
+    return TTvector{T,N}(N,vec,dims,out_rks,ot)
   end
+end
+
+function ttrand_rounding(Atto::TToperator{T,N}, y::Vector{TTvector{T,N}}, b::TTvector{T,N}, rmax::Int; orthogonal::Bool=true, seed::Int=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+    # Generate uniform ranks with rmax
+    rks = ones(Int, N+1)
+    rks[2:N] .= rmax
+    return ttrand_rounding(Atto, y, b, rks; orthogonal=orthogonal, seed=seed, block_rks=block_rks, timer=timer)
 end
 
 function ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
@@ -230,6 +234,7 @@ function ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rks=default_ra
     end
 
     vec = Vector{Array{T,3}}(undef, N)
+    out_rks = ones(Int, N+1)
     ot = zeros(Int, N)
 
     # Randomized sketching and orthogonalization
@@ -239,33 +244,40 @@ function ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rks=default_ra
         @inbounds begin
           for k in 1:N-1
             # Randomized QR decomposition
-            Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
+            Zₖ = zeros(T, dims[k],out_rks[k],sketch_rks[k+1])
             for j=1:m
               @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*W[j][k+1][αₖ₊₁,ρₖ₊₁]
             end
-            Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
+            Zₖ = reshape(Zₖ,dims[k]*out_rks[k],sketch_rks[k+1])
             Q, _ = qr!(Zₖ, ColumnNorm())
-            rks[k+1] = size(Q,2)
-            vec[k] = reshape(Matrix(Q),dims[k],rks[k],rks[k+1])
+            Q = Matrix(Q)
+            out_rks[k+1] = size(Q,2)
+            vec[k] = reshape(Q,dims[k],out_rks[k],out_rks[k+1])
             ot[k] = 1
 
             #update left parts
-            Yₖ₊₁ = [ zeros(T, dims[k+1],rks[k+1],y[j].ttv_rks[k+2]) for j=1:m ]
+            Yₖ₊₁ = [ zeros(T, dims[k+1],out_rks[k+1],y[j].ttv_rks[k+2]) for j=1:m ]
             for j=1:m
               @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁)  Yₖ₊₁[j][iₖ₊₁,ρₖ₊₁,αₖ₊₂] = Yₖ[j][iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
             end
             Yₖ = Yₖ₊₁
           end
-          rks[N+1] = 1
+          out_rks[N+1] = 1
           vec[N] = sum(Yₖ[j] for j=1:m)
         end
       end
     end
 
-    return TTvector{T,N}(N,vec,dims,rks,ot)
+    return TTvector{T,N}(N,vec,dims,out_rks,ot)
   end
 end
 
+function ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rmax::Int; orthogonal::Bool=true, seed::Int=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+    # Generate uniform ranks with rmax
+    rks = ones(Int, N+1)
+    rks[2:N] .= rmax
+    return ttrand_rounding(α, y, rks; orthogonal=orthogonal, seed=seed, block_rks=block_rks, timer=timer)
+end
 
 function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
   @timeit timer "ttrand_rounding" begin
@@ -303,37 +315,45 @@ function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T
         @inbounds begin
           for k in 1:N-1
             # Randomized QR decomposition
-            Zₖ = zeros(T, dims[k],rks[k],sketch_rks[k+1])
+            Zₖ = zeros(T, dims[k],out_rks[k],sketch_rks[k+1])
             for j=1:m
               @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*W[j][k+1][αₖ₊₁,ρₖ₊₁]
             end
-            Zₖ = reshape(Zₖ,dims[k]*rks[k],sketch_rks[k+1])
+            Zₖ = reshape(Zₖ,dims[k]*out_rks[k],sketch_rks[k+1])
             Q, _ = qr!(Zₖ, ColumnNorm())
-            rks[k+1] = size(Q,2)
-            vec[k] = reshape(Matrix(Q),dims[k],rks[k],rks[k+1])
+            Q = Matrix(Q)
+            out_rks[k+1] = size(Q,2)
+            vec[k] = reshape(Q,dims[k],out_rks[k],out_rks[k+1])
             ot[k] = 1
 
             #update left parts
             Yₖ₊₁ = Vector{Array{T,3}}(undef, m)
 
-            y₁ₖ = reshape(Yₖ[1], dims[k], rks[k], y[1].ttv_rks[k+1], A.tto_rks[k+1])
-            Ay₁ₖ₊₁ = zeros(T, dims[k+1], rks[k+1], y[1].ttv_rks[k+2], A.tto_rks[k+2])
+            y₁ₖ = reshape(Yₖ[1], dims[k], out_rks[k], y[1].ttv_rks[k+1], A.tto_rks[k+1])
+            Ay₁ₖ₊₁ = zeros(T, dims[k+1], out_rks[k+1], y[1].ttv_rks[k+2], A.tto_rks[k+2])
             @tensoropt (ρₖ,ρₖ₊₁,αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂) Ay₁ₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂,βₖ₊₂] = y₁ₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y[1].ttv_vec[k+1][jₖ₊₁,αₖ₊₁,αₖ₊₂]*A.tto_vec[k+1][iₖ₊₁,jₖ₊₁,βₖ₊₁,βₖ₊₂]
-            Yₖ₊₁[1] = reshape(Ay₁ₖ₊₁, dims[k+1], rks[k+1], y[1].ttv_rks[k+2]*A.tto_rks[k+2])
+            Yₖ₊₁[1] = reshape(Ay₁ₖ₊₁, dims[k+1], out_rks[k+1], y[1].ttv_rks[k+2]*A.tto_rks[k+2])
             for j=2:m
-              Yₖ₊₁[j] = zeros(T, dims[k+1],rks[k+1],y[j].ttv_rks[k+2])
+              Yₖ₊₁[j] = zeros(T, dims[k+1],out_rks[k+1],y[j].ttv_rks[k+2])
               @tensoropt (ρₖ₊₁,αₖ₊₁,αₖ₊₂)  Yₖ₊₁[j][iₖ₊₁,ρₖ₊₁,αₖ₊₂] = Yₖ[j][iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
             end
             Yₖ = Yₖ₊₁
           end
-          rks[N+1] = 1
+          out_rks[N+1] = 1
           vec[N] = sum(Yₖ[j] for j=1:m)
         end
       end
     end
 
-    return TTvector{T,N}(N,vec,dims,rks,ot)
+    return TTvector{T,N}(N,vec,dims,out_rks,ot)
   end
+end
+
+function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, rmax::Int; orthogonal::Bool=true, seed::Int=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+    # Generate uniform ranks with rmax
+    rks = ones(Int, N+1)
+    rks[2:N] .= rmax
+    return ttrand_rounding(α, A, y, rks; orthogonal=orthogonal, seed=seed, block_rks=block_rks, timer=timer)
 end
 
 
@@ -353,44 +373,67 @@ function stable_inverse(A;ε=1e-12)
 end
 
 """
-    stta(y::TTvector{T,N}; rks=default_rank_heuristic(y), 
-         seed_left=1234, seed_right=5678, orthogonal=true) -> TTvector{T,N}
+    stta(y::TTvector, rks; seed_left=1234, seed_right=5678, orthogonal=true, block_rks=N, timer=TimerOutput())
+    stta(y::TTvector, rmax::Int; seed_left=1234, seed_right=5678, orthogonal=true, block_rks=N, timer=TimerOutput())
+    stta(α::Vector, y::Vector{TTvector}, rks; seed_left=1234, seed_right=5678, orthogonal=true, block_rks=N, timer=TimerOutput())
 
-Streaming Tensor Train Approximation (STTA) - approximate a TTvector using two-sided random sketches.
+Streaming Tensor Train Approximation (STTA) using two-sided random sketches.
 
-Constructs a low-rank approximation by computing left and right random sketches, forming
-overlap matrices, and solving local systems. Unlike standard rounding methods, STTA can
-leverage structure in the input tensor without accessing the full tensor cores.
+Constructs a low-rank approximation by computing left and right random sketches simultaneously,
+then solving local systems to recover the TT cores. More efficient than one-sided sketching for
+certain problems and can exploit structure without accessing full tensor cores.
 
 # Arguments
 - `y::TTvector{T,N}`: Input TTvector to approximate
+- `α::Vector`: Coefficients for linear combination α₁*y₁ + ... + αₘ*yₘ
+- `y::Vector{TTvector{T,N}}`: Vector of TTvectors for linear combination
+- `rks`: Target ranks (Vector{Int} of length N+1, or computed via `default_rank_heuristic`)
+- `rmax::Int`: Target rank (uniform across all bonds)
 
 # Keyword Arguments
-- `rks::Vector{Int}=default_rank_heuristic(y)`: Target ranks for approximation
-- `seed_left::Int=1234`: Random seed for left sketch
-- `seed_right::Int=5678`: Random seed for right sketch
-- `orthogonal::Bool=true`: Use orthogonal random sketches
+- `seed_left::Int=1234`: Random seed for left-to-right sketch
+- `seed_right::Int=5678`: Random seed for right-to-left sketch (must differ from seed_left)
+- `orthogonal::Bool=true`: Use orthogonal random matrices (Haar/spherical) vs. Gaussian
+- `block_rks::Int=N`: Block rank for recursive sketching (controls sketch structure)
+- `timer::TimerOutput`: Timer for performance profiling
 
 # Returns
-- `y_approx::TTvector{T,N}`: Approximated TTvector with ranks determined adaptively
+- `TTvector{T,N}`: Approximated TTvector with adaptively determined ranks
 
 # Algorithm
-Based on:
-Kressner, Vandereycken & Voorhaar (2022), "Streaming Tensor Train Approximation",
-SIAM J. Sci. Comput., 45(5), pp. A2610–A2629, https://arxiv.org/abs/2208.02600
+Implements the Streaming TT Approximation (STTA) algorithm:
+1. Generate forward (left-to-right) and backward (right-to-left) sketches via `stta_sketch`
+   (automatically applies 50% oversampling to left/forward sketch ranks)
+2. Compute overlap matrices Ω[k] = W_L[k]ᵀ * W_R[k] and sketched cores Ψ[k]
+3. Solve local systems adaptively at each bond: choose Ψ[k] * Ω[k]⁻¹ or Ω[k]⁻¹ * Ψ[k+1]
+   based on sketch dimensions (prefer overdetermined systems)
+4. Return approximation with ranks determined adaptively from sketch dimensions
 
-1. Generate left and right sketches via stta_sketch (automatically applies 50% oversampling to left ranks)
-2. Compute overlap matrices Ω[k] and sketched cores Ψ[k] from the sketches
-3. Solve local systems adaptively: either Ψ[k] * Ω[k]⁻¹ or Ω[k]⁻¹ * Ψ[k+1]
-4. Return approximation with adaptively determined ranks
+Reference: Kressner, Vandereycken & Voorhaar (2022), "Streaming Tensor Train Approximation",
+SIAM J. Sci. Comput., 45(5), pp. A2610–A2629. https://arxiv.org/abs/2208.02600
 
-# Notes
-- Uses stable_inverse with SVD truncation (ε=1e-12) for numerical stability
-- Adapts sweep direction at each site based on sketch dimensions
-- stta_sketch automatically applies 50% oversampling to left ranks for optimal performance
-- More efficient than SVD-based methods for structured or streaming data
+# Performance Notes
+- Uses `stable_inverse` with SVD truncation (ε=1e-12) for numerical stability
+- Adaptively selects sweep direction at each bond based on sketch rank ratios
+- Left sketch automatically oversampled by 50% for optimal conditioning
+- Can be more efficient than `ttrand_rounding` for certain structured inputs
+
+# Examples
+```julia
+# Round single tensor to uniform rank 10
+y_approx = stta(y, 10)
+
+# With different seeds for left/right sketches
+y_approx = stta(y, 10; seed_left=1234, seed_right=5678)
+
+# Linear combination: 0.5*y₁ + 0.5*y₂
+y_avg = stta([0.5, 0.5], [y1, y2], 10)
+
+# With Gaussian sketches and custom block ranks
+y_approx = stta(y, 10; orthogonal=false, block_rks=4)
+```
 """
-function stta(y_tt::TTvector{T,N}; rks=default_rank_heuristic(y_tt),
+function stta(y_tt::TTvector{T,N}, rks=default_rank_heuristic(y_tt);
               seed_left::Int=1234, seed_right::Int=5678, orthogonal::Bool=true, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
   @timeit timer "stta" begin
     # stta_sketch handles the oversampling internally
@@ -421,4 +464,63 @@ function stta(y_tt::TTvector{T,N}; rks=default_rank_heuristic(y_tt),
 
     return TTvector{T,N}(N,Ψ_copy,y_tt.ttv_dims,result_rks,zeros(N))
   end
+end
+
+function stta(y::TTvector{T,N}, rmax::Int; 
+              seed_left::Int=1234, seed_right::Int=5678, orthogonal::Bool=true, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+    # Generate uniform ranks with rmax
+    rks = ones(Int, N+1)
+    rks[2:N] .= rmax
+    return stta(y, rks; orthogonal=orthogonal, seed_left=seed_left, seed_right=seed_right, block_rks=block_rks, timer=timer)
+end
+
+function stta(α::Vector{T}, y::Vector{TTvector{T,N}}, rks=default_rank_heuristic(y_tt);
+              seed_left::Int=1234, seed_right::Int=5678, orthogonal::Bool=true, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+  @timeit timer "stta" begin
+    m = length(α)
+    dims = y[1].ttv_dims
+    @assert length(y) == m && all(y[j].ttv_dims == dims for j=2:m)
+    # stta_sketch handles the oversampling internally
+    @timeit timer "stta_sketch" begin
+      Ω,Ψ = stta_sketch(y[1], rks; seed_left=seed_left, seed_right=seed_right, orthogonal=orthogonal, block_rks=block_rks, timer=timer)
+      Ω .*= α[1]
+      Ψ .*= α[1]
+      for j=2:m
+        Ωj,Ψj = stta_sketch(y[j], rks; seed_left=seed_left, seed_right=seed_right, orthogonal=orthogonal, block_rks=block_rks, timer=timer)
+        Ω .+= α[j] * Ωj
+        Ψ .+= α[j] * Ψj
+      end
+    end
+
+    result_rks = ones(Int, N+1)
+    # Deep copy Ψ to avoid reference issues
+    @timeit timer "rounding" begin
+      Ψ_copy = [copy(Ψ[k]) for k=1:N]
+      for k in 1:N-1
+        if size(Ω[k],1)<size(Ω[k],2) #rR>rL
+          Ψ_temp = reshape(Ψ_copy[k],:,size(Ψ_copy[k],3))*stable_inverse(Ω[k])
+          Ψ_copy[k]= reshape(Ψ_temp,size(Ψ_copy[k],1),size(Ψ_copy[k],2),:)
+          result_rks[k+1] = size(Ψ_copy[k],3)
+        else
+          Ψ_temp = stable_inverse(Ω[k])*reshape(permutedims(Ψ_copy[k+1],(2,1,3)),size(Ψ_copy[k+1],2),:)
+          Ψ_copy[k+1]= permutedims(reshape(Ψ_temp,:,size(Ψ_copy[k+1],1),size(Ψ_copy[k+1],3)),(2,1,3))
+          result_rks[k+1] = size(Ψ_copy[k+1],2)
+        end
+      end
+
+      # Set boundary ranks to 1 (should already be correct from sketch)
+      result_rks[1] = 1
+      result_rks[N+1] = 1
+    end
+
+    return TTvector{T,N}(N,Ψ_copy,dims,result_rks,zeros(N))
+  end
+end
+
+function stta(α::Vector{T}, y::Vector{TTvector{T,N}}, rmax::Int; 
+              seed_left::Int=1234, seed_right::Int=5678, orthogonal::Bool=true, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+    # Generate uniform ranks with rmax
+    rks = ones(Int, N+1)
+    rks[2:N] .= rmax
+    return stta(α, y, rks; orthogonal=orthogonal, seed_left=seed_left, seed_right=seed_right, block_rks=block_rks, timer=timer)
 end

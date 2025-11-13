@@ -123,8 +123,8 @@ function compute_sketch_blocks_heuristic(rks::Vector{Int}, block_rks_vec::Vector
 end
 
 """
-    tt_recursive_sketch([T=Float64,] [H::TToperator,] A::TTvector, rks;       orthogonal=true, reverse=true, seed=1234, block_rks=N) -> (W, sketch_rks)
-    tt_recursive_sketch([T=Float64,] [H::TToperator,] A::TTvector, rmax::Int; orthogonal=true, reverse=true, seed=1234, block_rks=N) -> (W, sketch_rks)
+    tt_recursive_sketch([T=Float64,] [H::TToperator,] A::TTvector, rks;       orthogonal=true, reverse=true, seed=1234, block_rks=N, oversampling=1, timer) -> (W, sketch_rks)
+    tt_recursive_sketch([T=Float64,] [H::TToperator,] A::TTvector, rmax::Int; orthogonal=true, reverse=true, seed=1234, block_rks=N, oversampling=1, timer) -> (W, sketch_rks)
 
 Compute a recursive sketch of a TTvector A, or of the result of applying TToperator H to TTvector A,
 without explicitly forming the product, using optimized random projections with adaptive normalization.
@@ -144,6 +144,7 @@ suitable for efficient randomized algorithms like ttrand_rounding and STTA.
 - `reverse::Bool=true`: Sweep direction (true: right-to-left, false: left-to-right)
 - `seed::Int=1234`: Random seed for reproducibility
 - `block_rks::Int=N`: Block rank for sketching heuristic (controls sketch granularity)
+- `oversampling=1`: overall multiplier for the number of blocks, useful for STTA oversampling in particular
 
 # Returns
 - `W::Vector{Matrix}`: Sketch matrices where W[k] has size (A.ttv_rks[k], sketch_rks[k])
@@ -171,7 +172,7 @@ numerical stability and consistent spectral properties across different rank reg
 - Randomized tensor train decomposition with block sketching
 - See ttrand_rounding, stta for usage examples
 """
-function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N}
+function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, oversampling=1, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N}
   @timeit timer "tt_recursive_sketch" begin
     rng = Random.default_rng()
     Random.seed!(rng, seed)
@@ -190,6 +191,9 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
         end
 
         p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
+        if oversampling ≠ 1
+          p[1:N] .= ceil.(Int, oversampling .* p[1:N])
+        end
 
         W[N+1] = ones(TW,1,1,1)
 
@@ -222,8 +226,8 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
             W[k] = zeros(TW, A.ttv_rks[k], block_rks_vec[k], p[k])
           end
 
-            for j=1:p[k]
           @timeit timer "tensor_contraction" begin
+            for j=1:p[k]
               W_next_j = view(W[k+1],:,:,(k<N ? j : 1))
               B_j = view(B_sketch,:,:,:,j)
               W_k_j = view(W[k],:,:,j)
@@ -242,7 +246,9 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
         end
 
         p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
-
+        if oversampling ≠ 1
+          p[2:N+1] .= ceil.(Int, oversampling .* p[2:N+1])
+        end
         W[1] = ones(TW,1,1,1)
 
         # Preallocate buffer for the entire loop
@@ -274,8 +280,8 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
             W[k+1] = zeros(TW, A.ttv_rks[k+1], block_rks_vec[k+1], p[k+1])
           end
 
-            for j=1:p[k+1]
           @timeit timer "tensor_contraction" begin
+            for j=1:p[k+1]
               W_k_j = view(W[k],:,:,(k>1 ? j : 1))
               B_j = view(B_sketch,:,:,:,j)
               W_next_j = view(W[k+1],:,:,j)
@@ -542,20 +548,14 @@ function stta_sketch(x::TTvector{T,N}, rks::Vector{Int};
                      seed_left::Int=1234, seed_right::Int=5678, orthogonal::Bool=true, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
   @timeit timer "stta_sketch" begin
     # For optimal STTA performance, left ranks should be 50% larger than target ranks
-    r_rks = rks  # Right sketch uses target ranks
-    l_rks = ones(Int, N+1)
-    for k=2:N
-      l_rks[k] = ceil(Int, 1.5*r_rks[k]) # Left sketch with 50% oversampling
-    end
-
-    # Generate left sketch (forward direction)
+    # Generate left sketch (forward direction) with 50% oversampling
     @timeit timer "left_sketch" begin
-      W_left, sketch_l_rks = tt_recursive_sketch(T, x, l_rks; orthogonal=orthogonal, reverse=false, seed=seed_left, block_rks=block_rks, timer=timer)
+      W_left, sketch_l_rks = tt_recursive_sketch(T, x, rks; orthogonal=orthogonal, reverse=false, seed=seed_left, block_rks=block_rks, oversampling=1.5, timer=timer)
     end
 
     # Generate right sketch (reverse direction)
     @timeit timer "right_sketch" begin
-      W_right, sketch_r_rks = tt_recursive_sketch(T, x, r_rks; orthogonal=orthogonal, reverse=true, seed=seed_right, block_rks=block_rks, timer=timer)
+      W_right, sketch_r_rks = tt_recursive_sketch(T, x, rks; orthogonal=orthogonal, reverse=true, seed=seed_right, block_rks=block_rks, timer=timer)
     end
 
     # Compute Ω and Ψ from the sketch matrices

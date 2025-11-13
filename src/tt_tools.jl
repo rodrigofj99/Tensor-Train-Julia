@@ -302,15 +302,18 @@ function rand_tt(::Type{T},dims,rks;normalise=false,orthogonal=false,right=true,
       y.ttv_vec[i] = randn(T,dims[i],rks[i],rks[i+1])
     end
     if normalise
-      if right
-        for i=1:N
-          y.ttv_vec[i] .*= 1/sqrt(dims[i]*rks[i+1])
-        end
-      else
-        for i=1:N
-          y.ttv_vec[i] .*= 1/sqrt(dims[i]*rks[i])
-        end
+      for i=1:N
+        y.ttv_vec[i] .*= 1/sqrt(dims[i]*rks[i]*rks[i+1])
       end
+      # if right
+      #   for i=1:N
+      #     y.ttv_vec[i] .*= 1/sqrt(dims[i]*rks[i+1])
+      #   end
+      # else
+      #   for i=1:N
+      #     y.ttv_vec[i] .*= 1/sqrt(dims[i]*rks[i])
+      #   end
+      # end
     end
   end
   
@@ -319,6 +322,14 @@ end
 
 function rand_tt(dims,rks;normalise=false,orthogonal=false, right=true,stable=true,seed=nothing)
   return rand_tt(Float64,dims,rks;normalise=normalise,orthogonal=orthogonal,right=right,stable=stable,seed=seed)
+end
+
+function rand_tt(::Type{T}, dims,rmax::Int;normalise=false,orthogonal=false,right=true,stable=true, seed=nothing) where T
+  d = length(dims)
+  rks = rmax*ones(Int,d+1)
+  # For rmax variant, always apply r_and_d_to_rks since user specified max rank, not exact ranks
+  rks = r_and_d_to_rks(rks,dims;rmax=rmax)
+  return rand_tt(T,dims,rks;normalise=normalise,orthogonal=orthogonal,right=right,stable=true,seed=seed)
 end
 
 function rand_tt(dims,rmax::Int;normalise=false,orthogonal=false,right=true,stable=true, seed=nothing)
