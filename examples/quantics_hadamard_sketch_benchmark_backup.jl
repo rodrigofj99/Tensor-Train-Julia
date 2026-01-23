@@ -11,44 +11,34 @@ using Colors
 using JSON3
 using Dates
 
-# Configure CairoMakie for publication-quality plots
-CairoMakie.activate!(type = "pdf")
+# Set CairoMakie as the backend and configure for high-quality plots
+CairoMakie.activate!(type = "png", px_per_unit = 2)
 
-# Define consistent styling theme
+# Define consistent styling for publication-quality plots
 const PLOT_THEME = Theme(
-    fontsize = 12,
-    font = "Computer Modern",  # Good Computer Modern alternative
+    fontsize = 14,
+    font = "Computer Modern",
     linewidth = 2,
     markersize = 8,
     Axis = (
-        titlesize = 12,
-        xlabelsize = 11,
-        ylabelsize = 11,
-        xticklabelsize = 10,
-        yticklabelsize = 10,
-        spinewidth = 1.5,
-        xtickwidth = 1.5,
-        ytickwidth = 1.5,
-        xgridwidth = 0.75,
-        ygridwidth = 0.75,
+        titlesize = 16,
+        xlabelsize = 14,
+        ylabelsize = 14,
+        xticklabelsize = 12,
+        yticklabelsize = 12,
+        spinewidth = 1,
+        xtickwidth = 1,
+        ytickwidth = 1,
+        xgridwidth = 0.5,
+        ygridwidth = 0.5,
         xgridcolor = :gray90,
-        ygridcolor = :gray90,
-        xgridvisible = true,
-        ygridvisible = true,
-        topspinevisible = true,
-        rightspinevisible = true,
-        leftspinecolor = :black,
-        rightspinecolor = :black,
-        topspinecolor = :black,
-        bottomspinecolor = :black
+        ygridcolor = :gray90
     ),
     Legend = (
-        labelsize = 11,
-        titlesize = 12,
+        labelsize = 12,
+        titlesize = 14,
         framevisible = true,
-        backgroundcolor = (:white, 0.9),
-        framecolor = :black,
-        framewidth = 1
+        bgcolor = (:white, 0.8)
     )
 )
 set_theme!(PLOT_THEME)
@@ -724,8 +714,8 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     small_blocks_time_bars = small_blocks_time_bars[sort_idx]
     large_blocks_time_bars = large_blocks_time_bars[sort_idx]
     
-    # Helper function to add error bands with CairoMakie
-    function add_error_band!(ax, x_vals, y_vals, error_bars, valid_mask, color, alpha=0.3)
+    # Helper function to add error bands with Makie
+    function add_error_band!(ax, x_vals, y_vals, error_bars, valid_mask, color, alpha=0.2)
         if any(valid_mask)
             x_valid = x_vals[valid_mask]
             y_valid = y_vals[valid_mask]
@@ -737,46 +727,33 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
             
             # Add error band
             band!(ax, x_valid, lower_bounds, upper_bounds, 
-                  color = (color, alpha))
+                  color = (color, alpha), transparency = true)
         end
     end
     
-    # Helper function to plot valid data points with CairoMakie
-    function plot_valid_data!(ax, x_vals, y_vals, valid_mask, label, color, marker; linestyle=:solid)
+    # Helper function to plot valid data points
+    function plot_valid_data!(ax, x_vals, y_vals, valid_mask, label, color, marker)
         if any(valid_mask)
             x_valid = x_vals[valid_mask]
             y_valid = y_vals[valid_mask]
-            lines!(ax, x_valid, y_valid, color = color, linewidth = 2, 
-                   label = label, linestyle = linestyle)
+            lines!(ax, x_valid, y_valid, color = color, linewidth = 2, label = label)
             scatter!(ax, x_valid, y_valid, color = color, marker = marker, 
                     markersize = 8, strokewidth = 1, strokecolor = :white)
         end
     end
     
-    # Define colors and markers for consistent styling
-    colors = Dict(
-        :deterministic => :black,
-        :khatri_rao => :red,
-        :small_blocks => :blue,
-        :large_blocks => :green
-    )
-    
-    markers = Dict(
-        :deterministic => :star8,
-        :khatri_rao => :circle,
-        :small_blocks => :rect,
-        :large_blocks => :diamond
-    )
-    
     # Accuracy comparison plot
     println("Creating accuracy comparison plot...")
-    
-    fig1 = Figure(size = (312, 254))
-    ax1 = Axis(fig1[1, 1], 
-              title = "Accuracy vs Target Rank",
-              xlabel = "Target Rank", 
-              ylabel = "Relative Error",
-              yscale = log10)
+    # For LaTeX inclusion: create larger plots that will be scaled down
+    # Target size in document: 3.25" width
+    # Create at 2x size with larger fonts for better scaling
+    # 650×490 pixels at 100 DPI gives good quality when scaled
+    p1 = plot(title="Accuracy vs Target Rank",
+             xlabel="Target Rank", ylabel="Relative Error",
+             yscale=:log10, legend=:bottomleft,
+             grid=true, gridwidth=1, gridcolor=:lightgray,
+             size=(3.25inches, 2.5inches), dpi=300, fontfamily="Computer Modern",
+             titlefontsize=11, guidefontsize=10, tickfontsize=9, legendfontsize=7)
     
     # Filter out NaN values for plotting
     valid_det = .!isnan.(deterministic_errors)
@@ -784,37 +761,49 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     valid_sb = .!isnan.(small_blocks_errors)
     valid_lb = .!isnan.(large_blocks_errors)
     
-    # Add error bands first (so they appear behind the lines)
-    add_error_band!(ax1, target_ranks, deterministic_errors, deterministic_error_bars, valid_det, colors[:deterministic])
-    add_error_band!(ax1, target_ranks, khatri_rao_errors, khatri_rao_error_bars, valid_kr, colors[:khatri_rao])
-    add_error_band!(ax1, target_ranks, small_blocks_errors, small_blocks_error_bars, valid_sb, colors[:small_blocks])
-    add_error_band!(ax1, target_ranks, large_blocks_errors, large_blocks_error_bars, valid_lb, colors[:large_blocks])
+    # Add error bars first (so they appear behind the lines)
+    add_error_bars!(p1, target_ranks, deterministic_errors, deterministic_error_bars, valid_det, :black, 0.2)
+    add_error_bars!(p1, target_ranks, khatri_rao_errors, khatri_rao_error_bars, valid_kr, :red, 0.2)
+    add_error_bars!(p1, target_ranks, small_blocks_errors, small_blocks_error_bars, valid_sb, :blue, 0.2)
+    add_error_bars!(p1, target_ranks, large_blocks_errors, large_blocks_error_bars, valid_lb, :green, 0.2)
     
-    # Plot data with lines and markers
-    plot_valid_data!(ax1, target_ranks, deterministic_errors, valid_det, 
-                    "Deterministic (tt_rounding)", colors[:deterministic], markers[:deterministic])
-    plot_valid_data!(ax1, target_ranks, khatri_rao_errors, valid_kr, 
-                    "Khatri-Rao (R=1)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax1, target_ranks, small_blocks_errors, valid_sb, 
-                    "Small blocks (R=4)", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax1, target_ranks, large_blocks_errors, valid_lb, 
-                    "Large blocks (R=8)", colors[:large_blocks], markers[:large_blocks])
+    # Add main lines with markers
+    if any(valid_det)
+        plot!(p1, target_ranks[valid_det], deterministic_errors[valid_det], 
+             label="Deterministic (tt_rounding)", marker=:star, linewidth=3, 
+             color=:black, markersize=8)
+    end
     
-    # Add legend
-    axislegend(ax1, position = :rt)
+    if any(valid_kr)
+        plot!(p1, target_ranks[valid_kr], khatri_rao_errors[valid_kr], 
+             label="Khatri-Rao (R=1)", marker=:circle, linewidth=2, 
+             color=:red, markersize=6)
+    end
     
-    accuracy_file = joinpath(save_dir, "hadamard_accuracy_comparison.pdf")
-    save(accuracy_file, fig1)
+    if any(valid_sb)
+        plot!(p1, target_ranks[valid_sb], small_blocks_errors[valid_sb], 
+             label="Small blocks (R=4)", marker=:square, linewidth=2, 
+             color=:blue, markersize=6)
+    end
+    
+    if any(valid_lb)
+        plot!(p1, target_ranks[valid_lb], large_blocks_errors[valid_lb], 
+             label="Large blocks (R=8)", marker=:diamond, linewidth=2, 
+             color=:green, markersize=6)
+    end
+    
+    accuracy_file = joinpath(save_dir, "hadamard_accuracy_comparison.png")
+    savefig(p1, accuracy_file)
     println("Accuracy plot saved: $accuracy_file")
     
     # Timing comparison plot
     println("Creating timing comparison plot...")
-    
-    fig2 = Figure(size = (312, 254))
-    ax2 = Axis(fig2[1, 1], 
-              title = "Timing vs Target Rank",
-              xlabel = "Target Rank", 
-              ylabel = "Time (milliseconds)")
+    p2 = plot(title="Timing vs Target Rank",
+             xlabel="Target Rank", ylabel="Time (milliseconds)",
+             legend=:topleft,
+             grid=true, gridwidth=1, gridcolor=:lightgray,
+             size=(3.25inches, 2.5inches), dpi=300, fontfamily="Computer Modern",
+             titlefontsize=11, guidefontsize=10, tickfontsize=9, legendfontsize=7)
     
     # Filter out NaN values for timing plot
     valid_det_time = .!isnan.(deterministic_times)
@@ -822,87 +811,48 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     valid_sb_time = .!isnan.(small_blocks_times)
     valid_lb_time = .!isnan.(large_blocks_times)
     
-    # Add timing error bands
-    add_error_band!(ax2, target_ranks, deterministic_times, deterministic_time_bars, valid_det_time, colors[:deterministic])
-    add_error_band!(ax2, target_ranks, khatri_rao_times, khatri_rao_time_bars, valid_kr_time, colors[:khatri_rao])
-    add_error_band!(ax2, target_ranks, small_blocks_times, small_blocks_time_bars, valid_sb_time, colors[:small_blocks])
-    add_error_band!(ax2, target_ranks, large_blocks_times, large_blocks_time_bars, valid_lb_time, colors[:large_blocks])
+    # Add timing error bars first (so they appear behind the lines)
+    add_error_bars!(p2, target_ranks, deterministic_times, deterministic_time_bars, valid_det_time, :black, 0.2)
+    add_error_bars!(p2, target_ranks, khatri_rao_times, khatri_rao_time_bars, valid_kr_time, :red, 0.2)
+    add_error_bars!(p2, target_ranks, small_blocks_times, small_blocks_time_bars, valid_sb_time, :blue, 0.2)
+    add_error_bars!(p2, target_ranks, large_blocks_times, large_blocks_time_bars, valid_lb_time, :green, 0.2)
     
-    # Plot timing data
-    plot_valid_data!(ax2, target_ranks, deterministic_times, valid_det_time, 
-                    "Deterministic (tt_rounding)", colors[:deterministic], markers[:deterministic])
-    plot_valid_data!(ax2, target_ranks, khatri_rao_times, valid_kr_time, 
-                    "Khatri-Rao (R=1)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax2, target_ranks, small_blocks_times, valid_sb_time, 
-                    "Small blocks (R=4)", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax2, target_ranks, large_blocks_times, valid_lb_time, 
-                    "Large blocks (R=8)", colors[:large_blocks], markers[:large_blocks])
+    if any(valid_det_time)
+        plot!(p2, target_ranks[valid_det_time], deterministic_times[valid_det_time], 
+             label="Deterministic (tt_rounding)", marker=:star, linewidth=3, 
+             color=:black, markersize=8)
+    end
     
-    # Add legend
-    axislegend(ax2, position = :lt)
+    if any(valid_kr_time)
+        plot!(p2, target_ranks[valid_kr_time], khatri_rao_times[valid_kr_time], 
+             label="Khatri-Rao (R=1)", marker=:circle, linewidth=2, 
+             color=:red, markersize=6)
+    end
     
-    timing_file = joinpath(save_dir, "hadamard_timing_comparison.pdf")
-    save(timing_file, fig2)
+    if any(valid_sb_time)
+        plot!(p2, target_ranks[valid_sb_time], small_blocks_times[valid_sb_time], 
+             label="Small blocks (R=4)", marker=:square, linewidth=2, 
+             color=:blue, markersize=6)
+    end
+    
+    if any(valid_lb_time)
+        plot!(p2, target_ranks[valid_lb_time], large_blocks_times[valid_lb_time], 
+             label="Large blocks (R=8)", marker=:diamond, linewidth=2, 
+             color=:green, markersize=6)
+    end
+    
+    timing_file = joinpath(save_dir, "hadamard_timing_comparison.png")
+    savefig(p2, timing_file)
     println("Timing plot saved: $timing_file")
     
     # Combined plot with subplots
     println("Creating combined comparison plot...")
+    # Full width: 6.5" for combined plot (two 3.25" plots side-by-side)
+    p_combined = plot(p1, p2, layout=(1,2), size=(6.5inches, 3inches), dpi=300, fontfamily="Computer Modern",
+             titlefontsize=11, guidefontsize=10, tickfontsize=9, legendfontsize=7)
     
-    # Adjust figure size to accommodate horizontal legend below
-    fig_combined = Figure(size = (624, 300))
-    
-    # Accuracy subplot
-    ax_acc = Axis(fig_combined[1, 1], 
-                 title = "Accuracy vs Target Rank",
-                 xlabel = "Target Rank", 
-                 ylabel = "Relative Error",
-                 yscale = log10)
-    
-    # Add error bands and data for accuracy
-    add_error_band!(ax_acc, target_ranks, deterministic_errors, deterministic_error_bars, valid_det, colors[:deterministic])
-    add_error_band!(ax_acc, target_ranks, khatri_rao_errors, khatri_rao_error_bars, valid_kr, colors[:khatri_rao])
-    add_error_band!(ax_acc, target_ranks, small_blocks_errors, small_blocks_error_bars, valid_sb, colors[:small_blocks])
-    add_error_band!(ax_acc, target_ranks, large_blocks_errors, large_blocks_error_bars, valid_lb, colors[:large_blocks])
-    
-    plot_valid_data!(ax_acc, target_ranks, deterministic_errors, valid_det, 
-                    "Deterministic", colors[:deterministic], markers[:deterministic])
-    plot_valid_data!(ax_acc, target_ranks, khatri_rao_errors, valid_kr, 
-                    "Khatri-Rao (R=1)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax_acc, target_ranks, small_blocks_errors, valid_sb, 
-                    "Small blocks (R=4)", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax_acc, target_ranks, large_blocks_errors, valid_lb, 
-                    "Large blocks (R=8)", colors[:large_blocks], markers[:large_blocks])
-    
-    # Timing subplot
-    ax_time = Axis(fig_combined[1, 2], 
-                  title = "Timing vs Target Rank",
-                  xlabel = "Target Rank", 
-                  ylabel = "Time (milliseconds)")
-    
-    # Add error bands and data for timing
-    add_error_band!(ax_time, target_ranks, deterministic_times, deterministic_time_bars, valid_det_time, colors[:deterministic])
-    add_error_band!(ax_time, target_ranks, khatri_rao_times, khatri_rao_time_bars, valid_kr_time, colors[:khatri_rao])
-    add_error_band!(ax_time, target_ranks, small_blocks_times, small_blocks_time_bars, valid_sb_time, colors[:small_blocks])
-    add_error_band!(ax_time, target_ranks, large_blocks_times, large_blocks_time_bars, valid_lb_time, colors[:large_blocks])
-    
-    plot_valid_data!(ax_time, target_ranks, deterministic_times, valid_det_time, 
-                    "Deterministic", colors[:deterministic], markers[:deterministic])
-    plot_valid_data!(ax_time, target_ranks, khatri_rao_times, valid_kr_time, 
-                    "Khatri-Rao (R=1)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax_time, target_ranks, small_blocks_times, valid_sb_time, 
-                    "Small blocks (R=4)", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax_time, target_ranks, large_blocks_times, valid_lb_time, 
-                    "Large blocks (R=8)", colors[:large_blocks], markers[:large_blocks])
-    
-    # Add horizontal legend below both subplots
-    Legend(fig_combined[2, 1:2], ax_acc, 
-           orientation = :horizontal, 
-           tellheight = true, 
-           framevisible = true,
-           halign = :center)
-    
-    combined_file = joinpath(save_dir, "hadamard_benchmark_comparison.pdf")
-    save(combined_file, fig_combined)
+    combined_file = joinpath(save_dir, "hadamard_benchmark_comparison.png")
+    savefig(p_combined, combined_file)
     println("Combined plot saved: $combined_file")
     
     # Create timing breakdown plot
@@ -983,11 +933,12 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     orthog_error_bars_sb = orthog_error_bars_sb[sort_idx]
     orthog_error_bars_lb = orthog_error_bars_lb[sort_idx]
     
-    fig3 = Figure(size = (312, 254))
-    ax3 = Axis(fig3[1, 1], 
-              title = "Timing Breakdown",
-              xlabel = "Target Rank", 
-              ylabel = "Time (milliseconds)")
+    p3 = plot(title="Timing Breakdown",
+             xlabel="Target Rank", ylabel="Time (milliseconds)",
+             legend=:topleft,
+             grid=true, gridwidth=1, gridcolor=:lightgray,
+             size=(3.25inches, 2.5inches), dpi=300, fontfamily="Computer Modern",
+             titlefontsize=11, guidefontsize=10, tickfontsize=9, legendfontsize=7)
     
     # Filter out NaN values for timing breakdown
     valid_sketch_kr = .!isnan.(sketch_times_kr)
@@ -997,35 +948,44 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     valid_orthog_sb = .!isnan.(orthog_times_sb)
     valid_orthog_lb = .!isnan.(orthog_times_lb)
     
-    # Add error bands first (so they appear behind the lines)
-    add_error_band!(ax3, target_ranks, sketch_times_kr, sketch_error_bars_kr, valid_sketch_kr, colors[:khatri_rao], 0.15)
-    add_error_band!(ax3, target_ranks, sketch_times_sb, sketch_error_bars_sb, valid_sketch_sb, colors[:small_blocks], 0.15)
-    add_error_band!(ax3, target_ranks, sketch_times_lb, sketch_error_bars_lb, valid_sketch_lb, colors[:large_blocks], 0.15)
-    add_error_band!(ax3, target_ranks, orthog_times_kr, orthog_error_bars_kr, valid_orthog_kr, colors[:khatri_rao], 0.15)
-    add_error_band!(ax3, target_ranks, orthog_times_sb, orthog_error_bars_sb, valid_orthog_sb, colors[:small_blocks], 0.15)
-    add_error_band!(ax3, target_ranks, orthog_times_lb, orthog_error_bars_lb, valid_orthog_lb, colors[:large_blocks], 0.15)
+    # Add error bars first (so they appear behind the lines)
+    add_error_bars!(p3, target_ranks, sketch_times_kr, sketch_error_bars_kr, valid_sketch_kr, :red, 0.15)
+    add_error_bars!(p3, target_ranks, sketch_times_sb, sketch_error_bars_sb, valid_sketch_sb, :blue, 0.15)
+    add_error_bars!(p3, target_ranks, sketch_times_lb, sketch_error_bars_lb, valid_sketch_lb, :green, 0.15)
+    add_error_bars!(p3, target_ranks, orthog_times_kr, orthog_error_bars_kr, valid_orthog_kr, :red, 0.15)
+    add_error_bars!(p3, target_ranks, orthog_times_sb, orthog_error_bars_sb, valid_orthog_sb, :blue, 0.15)
+    add_error_bars!(p3, target_ranks, orthog_times_lb, orthog_error_bars_lb, valid_orthog_lb, :green, 0.15)
     
-    # Plot sketch times (dashed lines)
-    plot_valid_data!(ax3, target_ranks, sketch_times_kr, valid_sketch_kr, 
-                    "Khatri-Rao (sketch)", colors[:khatri_rao], markers[:khatri_rao]; linestyle=:dash)
-    plot_valid_data!(ax3, target_ranks, sketch_times_sb, valid_sketch_sb, 
-                    "Small blocks (sketch)", colors[:small_blocks], markers[:small_blocks]; linestyle=:dash)
-    plot_valid_data!(ax3, target_ranks, sketch_times_lb, valid_sketch_lb, 
-                    "Large blocks (sketch)", colors[:large_blocks], markers[:large_blocks]; linestyle=:dash)
+    # Plot sketch times
+    if any(valid_sketch_kr)
+        plot!(p3, target_ranks, sketch_times_kr, label="Khatri-Rao (sketch)", 
+             color=:red, linestyle=:dash, linewidth=2, marker=:circle)
+    end
+    if any(valid_sketch_sb)
+        plot!(p3, target_ranks, sketch_times_sb, label="Small blocks (sketch)", 
+             color=:blue, linestyle=:dash, linewidth=2, marker=:square)
+    end
+    if any(valid_sketch_lb)
+        plot!(p3, target_ranks, sketch_times_lb, label="Large blocks (sketch)", 
+             color=:green, linestyle=:dash, linewidth=2, marker=:diamond)
+    end
     
-    # Plot orthogonalization times (solid lines)
-    plot_valid_data!(ax3, target_ranks, orthog_times_kr, valid_orthog_kr, 
-                    "Khatri-Rao (QR)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax3, target_ranks, orthog_times_sb, valid_orthog_sb, 
-                    "Small blocks (QR)", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax3, target_ranks, orthog_times_lb, valid_orthog_lb, 
-                    "Large blocks (QR)", colors[:large_blocks], markers[:large_blocks])
+    # Plot orthogonalization times
+    if any(valid_orthog_kr)
+        plot!(p3, target_ranks, orthog_times_kr, label="Khatri-Rao (QR)", 
+             color=:red, linestyle=:solid, linewidth=2, marker=:circle)
+    end
+    if any(valid_orthog_sb)
+        plot!(p3, target_ranks, orthog_times_sb, label="Small blocks (QR)", 
+             color=:blue, linestyle=:solid, linewidth=2, marker=:square)
+    end
+    if any(valid_orthog_lb)
+        plot!(p3, target_ranks, orthog_times_lb, label="Large blocks (QR)", 
+             color=:green, linestyle=:solid, linewidth=2, marker=:diamond)
+    end
     
-    # Add legend
-    axislegend(ax3, position = :lt)
-    
-    breakdown_file = joinpath(save_dir, "hadamard_timing_breakdown.pdf")
-    save(breakdown_file, fig3)
+    breakdown_file = joinpath(save_dir, "hadamard_timing_breakdown.png")
+    savefig(p3, breakdown_file)
     println("Timing breakdown plot saved: $breakdown_file")
 
     # Memory usage comparison plot
@@ -1104,11 +1064,12 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     small_blocks_memory_bars = small_blocks_memory_bars[sort_idx]
     large_blocks_memory_bars = large_blocks_memory_bars[sort_idx]
 
-    fig4 = Figure(size = (312, 254))
-    ax4 = Axis(fig4[1, 1], 
-              title = "Memory Usage vs Target Rank",
-              xlabel = "Target Rank", 
-              ylabel = "Memory Usage (MB)")
+    p4 = plot(title="Memory Usage vs Target Rank",
+             xlabel="Target Rank", ylabel="Memory Usage (MB)",
+             legend=:topleft,
+             grid=true, gridwidth=1, gridcolor=:lightgray,
+             size=(3.25inches, 2.5inches), dpi=300,
+             titlefontsize=11, guidefontsize=10, tickfontsize=9, legendfontsize=7)
 
     # Filter out NaN values for memory plot
     valid_det_memory = .!isnan.(deterministic_memory)
@@ -1116,27 +1077,38 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     valid_sb_memory = .!isnan.(small_blocks_memory)
     valid_lb_memory = .!isnan.(large_blocks_memory)
 
-    # Add memory error bands first
-    add_error_band!(ax4, target_ranks, deterministic_memory, deterministic_memory_bars, valid_det_memory, colors[:deterministic])
-    add_error_band!(ax4, target_ranks, khatri_rao_memory, khatri_rao_memory_bars, valid_kr_memory, colors[:khatri_rao])
-    add_error_band!(ax4, target_ranks, small_blocks_memory, small_blocks_memory_bars, valid_sb_memory, colors[:small_blocks])
-    add_error_band!(ax4, target_ranks, large_blocks_memory, large_blocks_memory_bars, valid_lb_memory, colors[:large_blocks])
+    # Add memory error bars first
+    add_error_bars!(p4, target_ranks, deterministic_memory, deterministic_memory_bars, valid_det_memory, :black, 0.2)
+    add_error_bars!(p4, target_ranks, khatri_rao_memory, khatri_rao_memory_bars, valid_kr_memory, :red, 0.2)
+    add_error_bars!(p4, target_ranks, small_blocks_memory, small_blocks_memory_bars, valid_sb_memory, :blue, 0.2)
+    add_error_bars!(p4, target_ranks, large_blocks_memory, large_blocks_memory_bars, valid_lb_memory, :green, 0.2)
 
-    # Plot memory data
-    plot_valid_data!(ax4, target_ranks, deterministic_memory, valid_det_memory, 
-                    "Deterministic (tt_rounding)", colors[:deterministic], markers[:deterministic])
-    plot_valid_data!(ax4, target_ranks, khatri_rao_memory, valid_kr_memory, 
-                    "Khatri-Rao (R=1)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax4, target_ranks, small_blocks_memory, valid_sb_memory, 
-                    "Small blocks (R=4)", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax4, target_ranks, large_blocks_memory, valid_lb_memory, 
-                    "Large blocks (R=8)", colors[:large_blocks], markers[:large_blocks])
+    if any(valid_det_memory)
+        plot!(p4, target_ranks[valid_det_memory], deterministic_memory[valid_det_memory],
+             label="Deterministic (tt_rounding)", marker=:star, linewidth=3,
+             color=:black, markersize=8)
+    end
 
-    # Add legend
-    axislegend(ax4, position = :lt)
+    if any(valid_kr_memory)
+        plot!(p4, target_ranks[valid_kr_memory], khatri_rao_memory[valid_kr_memory],
+             label="Khatri-Rao (R=1)", marker=:circle, linewidth=2,
+             color=:red, markersize=6)
+    end
 
-    memory_file = joinpath(save_dir, "hadamard_memory_comparison.pdf")
-    save(memory_file, fig4)
+    if any(valid_sb_memory)
+        plot!(p4, target_ranks[valid_sb_memory], small_blocks_memory[valid_sb_memory],
+             label="Small blocks (R=4)", marker=:square, linewidth=2,
+             color=:blue, markersize=6)
+    end
+
+    if any(valid_lb_memory)
+        plot!(p4, target_ranks[valid_lb_memory], large_blocks_memory[valid_lb_memory],
+             label="Large blocks (R=8)", marker=:diamond, linewidth=2,
+             color=:green, markersize=6)
+    end
+
+    memory_file = joinpath(save_dir, "hadamard_memory_comparison.png")
+    savefig(p4, memory_file)
     println("Memory comparison plot saved: $memory_file")
 
     return accuracy_file, timing_file, combined_file, breakdown_file, memory_file

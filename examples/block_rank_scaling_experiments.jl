@@ -4,7 +4,8 @@ using LinearAlgebra
 using Statistics
 using JSON3
 using Random
-using Plots
+using CairoMakie
+using LaTeXStrings
 using Printf
 
 """
@@ -29,11 +30,11 @@ Scenario 1: Injectivity vs Dimension N (fixed subspace size μ)
 function injectivity_vs_dimension(;
     N_list = [5, 10, 15, 20, 25, 30],  # Dimension values to test
     d = 4,                              # Physical dimension per core
-    μ = 20,                             # Fixed subspace size
-    block_rks_list = [1, 2, 4, 8, 16], # Block ranks to test
+    μ = 32,                             # Fixed subspace size
+    block_rks_list = [1, 4, 8], # Block ranks to test
     n_realizations = 10,                # Number of realizations
     seed = 1234,
-    test_types = [Float64, ComplexF64],
+    test_types = [Float64],
     force_rerun = false                 # Force rerun even if results exist
 )
     # Check if results already exist
@@ -67,9 +68,7 @@ function injectivity_vs_dimension(;
             end
         end
 
-        # Recreate plots from existing data
-        println("Recreating plots from existing data...")
-        create_dimension_plots(results, N_list_loaded, block_rks_list_loaded, μ_loaded)
+        # Note: Individual plots replaced by combined plotting function
 
         return results
     end
@@ -131,7 +130,7 @@ function injectivity_vs_dimension(;
                     print("    block_rks=$block_rks: ")
 
                     # Get sketch dimension
-                    _, sketch_rks = tt_recursive_sketch(T, X[1], μ;
+                    _, sketch_rks = tt_recursive_sketch(T, X[1], 2μ;
                                                         orthogonal=orthogonal, reverse=false,
                                                         block_rks=block_rks, seed=seed)
                     sketch_dim = sketch_rks[N+1]
@@ -142,7 +141,7 @@ function injectivity_vs_dimension(;
                         sketch_seed = seed + real + 1000*i_blk + 10000*i_N
 
                         for j = 1:μ
-                            W, _ = tt_recursive_sketch(T, X[j], μ;
+                            W, _ = tt_recursive_sketch(T, X[j], 2μ;
                                                       orthogonal=orthogonal, reverse=false,
                                                       seed=sketch_seed, block_rks=block_rks)
                             Ω_matrix[:, j] = W[N+1]'
@@ -174,9 +173,7 @@ function injectivity_vs_dimension(;
         end
     end
 
-    # Create plots
-    println("\n--- Creating plots ---")
-    create_dimension_plots(results, N_list, block_rks_list, μ)
+    # Note: Individual plots handled by combined plotting function
 
     # Save results
     mkpath("out/block_rank_experiments")
@@ -194,10 +191,10 @@ function injectivity_vs_subspace_size(;
     N = 50,                             # Fixed dimension
     d = 4,                              # Physical dimension per core
     μ_list = [10, 20, 30, 40, 50],     # Subspace sizes to test
-    block_rks_list = [1, 2, 4, 8, 16], # Block ranks to test
+    block_rks_list = [1, 4, 8], # Block ranks to test
     n_realizations = 10,                # Number of realizations
     seed = 1234,
-    test_types = [Float64, ComplexF64],
+    test_types = [Float64],
     force_rerun = false                 # Force rerun even if results exist
 )
     # Check if results already exist
@@ -230,9 +227,7 @@ function injectivity_vs_subspace_size(;
             end
         end
 
-        # Recreate plots from existing data
-        println("Recreating plots from existing data...")
-        create_subspace_plots(results, μ_list_loaded, block_rks_list_loaded, N_loaded)
+        # Note: Individual plots replaced by combined plotting function
 
         return results
     end
@@ -295,7 +290,7 @@ function injectivity_vs_subspace_size(;
                     print("    block_rks=$block_rks: ")
 
                     # Get sketch dimension
-                    _, sketch_rks = tt_recursive_sketch(T, X[1], μ;
+                    _, sketch_rks = tt_recursive_sketch(T, X[1], 2μ;
                                                         orthogonal=orthogonal, reverse=false,
                                                         block_rks=block_rks, seed=seed)
                     sketch_dim = sketch_rks[N+1]
@@ -306,7 +301,7 @@ function injectivity_vs_subspace_size(;
                         sketch_seed = seed + real + 1000*i_blk + 10000*i_μ
 
                         for j = 1:μ
-                            W, _ = tt_recursive_sketch(T, X[j], μ;
+                            W, _ = tt_recursive_sketch(T, X[j], 2μ;
                                                       orthogonal=orthogonal, reverse=false,
                                                       seed=sketch_seed, block_rks=block_rks)
                             Ω_matrix[:, j] = W[N+1]'
@@ -338,9 +333,7 @@ function injectivity_vs_subspace_size(;
         end
     end
 
-    # Create plots
-    println("\n--- Creating plots ---")
-    create_subspace_plots(results, μ_list, block_rks_list, N)
+    # Note: Individual plots handled by combined plotting function
 
     # Save results
     mkpath("out/block_rank_experiments")
@@ -352,152 +345,192 @@ function injectivity_vs_subspace_size(;
 end
 
 """
-Create 4-subplot figure for Scenario 1 (injectivity vs dimension N)
+Create combined side-by-side plot comparing orthogonal vs non-orthogonal approaches
 """
-function create_dimension_plots(results, N_list, block_rks_list, μ)
+function create_combined_scaling_plots(results1, results2, N_list, μ_list, block_rks_list, μ_fixed, N_fixed)
     mkpath("out/block_rank_experiments/plots")
 
-    # Define the 4 approaches
-    approaches = [
-        ("Float64_orthogonal", "Real Orthogonal"),
-        ("Float64_non_orthogonal", "Real Non-Orthogonal"),
-        ("ComplexF64_orthogonal", "Complex Orthogonal"),
-        ("ComplexF64_non_orthogonal", "Complex Non-Orthogonal")
-    ]
+    # Configure CairoMakie for publication-quality plots
+    CairoMakie.activate!(type = "pdf")
 
-    # Color scheme for block ranks
-    colors = [:blue, :red, :green, :orange, :purple]
-    markers = [:circle, :square, :diamond, :utriangle, :dtriangle]
+    # Define consistent styling theme (same as randomized rounding)
+    PLOT_THEME = Theme(
+        fontsize = 11,
+        font = "Computer Modern",
+        linewidth = 2,
+        markersize = 6,
+        Axis = (
+            titlesize = 11,
+            xlabelsize = 10,
+            ylabelsize = 10,
+            xticklabelsize = 9,
+            yticklabelsize = 9,
+            spinewidth = 1,
+            xtickwidth = 1,
+            ytickwidth = 1,
+            xgridwidth = 0.5,
+            ygridwidth = 0.5,
+            xgridcolor = (:gray, 0.3),
+            ygridcolor = (:gray, 0.3)
+        ),
+        Legend = (
+            framevisible = true,
+            backgroundcolor = (:white, 0.9),
+            framecolor = :gray,
+            framewidth = 1,
+            padding = (6, 6, 3, 3),
+            rowgap = 3,
+            colgap = 8,
+            labelsize = 9
+        )
+    )
 
-    # Create 2×2 subplot layout
-    plots = []
+    with_theme(PLOT_THEME) do
+        # Ensure proper types for plotting
+        N_list = Int.(N_list)
+        μ_list = Int.(μ_list)
+        block_rks_list = Int.(block_rks_list)
 
-    for (approach_key, approach_title) in approaches
-        data = results[approach_key]
-        med = data["median_injectivity"]
-        q25 = data["q25_injectivity"]
-        q75 = data["q75_injectivity"]
+        # Color scheme for block ranks - extended for rank 16
+        colors_blk = Dict(1 => :blue, 4 => :orange, 16 => :green, 32 => :red)
+        markers_blk = Dict(1 => :circle, 4 => :rect, 16 => :diamond, 32 => :utriangle)
 
-        p = plot(xlabel="Dimension N", ylabel="Median Injectivity (σ²ₘᵢₙ)",
-                 title=approach_title,
-                 yscale=:log10,
-                 ylims=(1e-6, 1), yticks=10.0.^(-6:0),
-                 legend=:bottomleft,
-                 size=(400, 350))
+        fig = Figure(size = (624, 300))  # 6.5" wide, 4.5" tall (72 DPI equivalent)
 
-        # Plot each block rank as a separate series
-        for (i_blk, block_rks) in enumerate(block_rks_list)
-            # Extract data for this block rank across all N values
-            med_curve = med[:, i_blk]
-            err_low = med_curve .- q25[:, i_blk]
-            err_high = q75[:, i_blk] .- med_curve
+        # Create two subplots side by side
+        ax1 = Axis(fig[1, 1],
+                   xlabel = L"Dimension $d$",
+                   ylabel = L"Injectivity $\sigma^2_{\mathrm{min}}$",
+                   yscale = log10,
+                   limits = (nothing, (1e-6, 1e-1)),
+                   yticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
+                            [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
+                   title = LaTeXString("Injectivity vs d (μ = $μ_fixed)"))
 
-            plot!(p, N_list, med_curve,
-                  yerror=(err_low, err_high),
-                  label=( block_rks==1 ? "Khatri-Rao" : "Block ranks=$block_rks"),
-                  marker=markers[i_blk],
-                  color=colors[i_blk],
-                  linewidth=2,
-                  markersize=5,
-                  markerstrokewidth=1.5)
+        ax2 = Axis(fig[1, 2],
+                   xlabel = L"Subspace Size $\mu$",
+                   ylabel = "",
+                   xscale = log2,
+                   yscale = log10,
+                   limits = (nothing, (1e-6, 1e-1)),
+                   xticks = (μ_list, string.(μ_list)),
+                   yticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
+                            [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
+                   title = LaTeXString("Injectivity vs μ (d = $N_fixed)"))
+
+        # Link y-axes for consistent scaling
+        linkyaxes!(ax1, ax2)
+
+        # Plot both orthogonal and non-orthogonal for scenario 1: N vs injectivity
+        for (orth_flag, linestyle) in [(true, :solid), (false, :dash)]
+            data_key = orth_flag ? "Float64_orthogonal" : "Float64_non_orthogonal"
+            data1 = results1[data_key]
+            med1 = Float64.(data1["median_injectivity"])
+            q25_1 = Float64.(data1["q25_injectivity"])
+            q75_1 = Float64.(data1["q75_injectivity"])
+
+            for (i_blk, block_rks) in enumerate(block_rks_list)
+                color = colors_blk[block_rks]
+                marker = markers_blk[block_rks]
+
+                # Extract data for this block rank across all N values
+                med_curve = med1[:, i_blk]
+                err_low = q25_1[:, i_blk]
+                err_high = q75_1[:, i_blk]
+
+                band!(ax1, N_list, err_low, err_high, color=(color, 0.2))
+                scatterlines!(ax1, N_list, med_curve,
+                             color=color,
+                             linewidth=2,
+                             linestyle=linestyle,
+                             marker=marker,
+                             markersize=6)
+            end
         end
 
-        push!(plots, p)
-    end
+        # Plot both orthogonal and non-orthogonal for scenario 2: μ vs injectivity
+        for (orth_flag, linestyle) in [(true, :solid), (false, :dash)]
+            data_key = orth_flag ? "Float64_orthogonal" : "Float64_non_orthogonal"
+            data2 = results2[data_key]
+            med2 = Float64.(data2["median_injectivity"])
+            q25_2 = Float64.(data2["q25_injectivity"])
+            q75_2 = Float64.(data2["q75_injectivity"])
 
-    # Combine into 2×2 layout
-    p_combined = plot(plots[1], plots[2], plots[3], plots[4],
-                      layout=(2, 2),
-                      size=(1000, 800),
-                      plot_title="Injectivity vs Dimension N (μ=$μ)",
-                      dpi=150)
+            for (i_blk, block_rks) in enumerate(block_rks_list)
+                color = colors_blk[block_rks]
+                marker = markers_blk[block_rks]
 
-    display(p_combined)
-    savefig(p_combined, "out/block_rank_experiments/plots/scaling_vs_dimension_mu$(μ).png")
-    println("Dimension scaling plot saved")
-end
+                # Extract data for this block rank across all μ values
+                med_curve = med2[:, i_blk]
+                err_low = q25_2[:, i_blk]
+                err_high = q75_2[:, i_blk]
 
-"""
-Create 4-subplot figure for Scenario 2 (injectivity vs subspace size μ)
-"""
-function create_subspace_plots(results, μ_list, block_rks_list, N)
-    mkpath("out/block_rank_experiments/plots")
-
-    # Define the 4 approaches
-    approaches = [
-        ("Float64_orthogonal", "Real Orthogonal"),
-        ("Float64_non_orthogonal", "Real Non-Orthogonal"),
-        ("ComplexF64_orthogonal", "Complex Orthogonal"),
-        ("ComplexF64_non_orthogonal", "Complex Non-Orthogonal")
-    ]
-
-    # Color scheme for block ranks
-    colors = [:blue, :red, :green, :orange, :purple]
-    markers = [:circle, :square, :diamond, :utriangle, :dtriangle]
-
-    # Create 2×2 subplot layout
-    plots = []
-
-    for (approach_key, approach_title) in approaches
-        data = results[approach_key]
-        med = data["median_injectivity"]
-        q25 = data["q25_injectivity"]
-        q75 = data["q75_injectivity"]
-
-        p = plot(xlabel="Subspace Size μ", ylabel="Median Injectivity (σ²ₘᵢₙ)",
-                 title=approach_title,
-                 xscale=:log2,
-                 yscale=:log10,
-                 ylims=(1e-9, 1e-1), yticks=10.0.^(-9:-1),
-                 legend=:bottom,
-                 size=(400, 350))
-
-        # Plot each block rank as a separate series
-        for (i_blk, block_rks) in enumerate(block_rks_list)
-            # Extract data for this block rank across all μ values
-            med_curve = med[:, i_blk]
-            err_low = med_curve .- q25[:, i_blk]
-            err_high = q75[:, i_blk] .- med_curve
-
-            plot!(p, μ_list, med_curve,
-                  yerror=(err_low, err_high),
-                  label=( block_rks==1 ? "Khatri-Rao" : "Block ranks=$block_rks"),
-                  marker=markers[i_blk],
-                  color=colors[i_blk],
-                  linewidth=2,
-                  markersize=5,
-                  markerstrokewidth=1.5)
+                band!(ax2, μ_list, err_low, err_high, color=(color, 0.2))
+                scatterlines!(ax2, μ_list, med_curve,
+                             color=color,
+                             linewidth=2,
+                             linestyle=linestyle,
+                             marker=marker,
+                             markersize=6)
+            end
         end
 
-        push!(plots, p)
+        # Create custom legend with two rows
+        # Row 1: Block ranks with colors
+        color_elements = [
+            LineElement(color = :blue, linewidth = 2),
+            LineElement(color = :orange, linewidth = 2),
+            LineElement(color = :green, linewidth = 2),
+            LineElement(color = :red, linewidth = 2)
+        ]
+        color_labels = [LaTeXString("Khatri-Rao"), L"R = 4", L"R = 16", L"R = 32"]
+
+        # Row 2: Orthogonal vs Non-orthogonal line styles
+        style_elements = [
+            LineElement(color = :black, linewidth = 2, linestyle = :dash),
+            LineElement(color = :black, linewidth = 2, linestyle = :solid)
+        ]
+        style_labels = ["Gaussian i.i.d", "Orthogonal"]
+
+        # Combine elements
+        all_elements = [color_elements..., style_elements...]
+        all_labels = [color_labels..., style_labels...]
+
+        # Add horizontal legend below both subplots
+        Legend(fig[2, 1:2], all_elements, all_labels,
+               orientation = :horizontal,
+               tellheight = true,
+               framevisible = true,
+               halign = :center,
+               nbanks = 1,  # Single row
+               padding = (2, 2, 2, 2),
+               colgap = 8,
+               labelsize = 9)
+
+        display(fig)
+        sleep(2)
+
+        # Save the combined plot
+        save("out/block_rank_experiments/plots/combined_scaling_comparison.pdf", fig)
+        println("Combined scaling plot saved as PDF")
     end
-
-    # Combine into 2×2 layout
-    p_combined = plot(plots[1], plots[2], plots[3], plots[4],
-                      layout=(2, 2),
-                      size=(1000, 800),
-                      plot_title="Injectivity vs Subspace Size μ (N=$N)",
-                      dpi=150)
-
-    display(p_combined)
-    savefig(p_combined, "out/block_rank_experiments/plots/scaling_vs_subspace_N$(N).png")
-    println("Subspace scaling plot saved")
 end
 
+
 """
-Run both scenarios
+Run both scenarios comparing orthogonal and non-orthogonal approaches
 """
 function run_all_scaling_experiments(; force_rerun = false)
     println("="^70)
-    println("RUNNING ALL SCALING EXPERIMENTS")
+    println("RUNNING BLOCK RANK SCALING EXPERIMENTS")
     println("="^70)
 
     # Scenario 1: Injectivity vs Dimension N
     results1 = injectivity_vs_dimension(
         N_list = [5, 10, 15, 20, 25, 30],
-        μ = 20,
-        block_rks_list = [1, 2, 4, 8, 16],
-        n_realizations = 100,
+        μ = 32,
+        block_rks_list = [1, 4, 16, 32],
+        n_realizations = 10,
         force_rerun = force_rerun
     )
 
@@ -505,12 +538,24 @@ function run_all_scaling_experiments(; force_rerun = false)
 
     # Scenario 2: Injectivity vs Subspace Size μ
     results2 = injectivity_vs_subspace_size(
-        N = 50,
-        μ_list = [8, 16, 32, 64, 128],
-        block_rks_list = [1, 2, 4, 8, 16],
-        n_realizations = 100,
+        N = 20,
+        μ_list = [32, 64, 128, 256],
+        block_rks_list = [1, 4, 16, 32],
+        n_realizations = 10,
         force_rerun = force_rerun
     )
+
+    # Save results before plotting
+    println("\n--- Saving experimental results ---")
+    mkpath("out/block_rank_experiments")
+    
+    # Create combined side-by-side plot
+    println("\n--- Creating combined comparison plot ---")
+    create_combined_scaling_plots(results1, results2, 
+                                  [5, 10, 15, 20, 25, 30], 
+                                  [32, 64, 128, 256],
+                                  [1, 4, 16, 32], 
+                                  32, 20)
 
     println("\n" * "="^70)
     println("ALL EXPERIMENTS COMPLETED")
