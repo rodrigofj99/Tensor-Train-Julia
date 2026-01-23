@@ -302,18 +302,15 @@ function rand_tt(::Type{T},dims,rks;normalise=false,orthogonal=false,right=true,
       y.ttv_vec[i] = randn(T,dims[i],rks[i],rks[i+1])
     end
     if normalise
-      for i=1:N
-        y.ttv_vec[i] .*= 1/sqrt(dims[i]*rks[i]*rks[i+1])
+      if right
+        for i=1:N
+          y.ttv_vec[i] .*= 1/sqrt(dims[i]*rks[i+1])
+        end
+      else
+        for i=1:N
+          y.ttv_vec[i] .*= 1/sqrt(dims[i]*rks[i])
+        end
       end
-      # if right
-      #   for i=1:N
-      #     y.ttv_vec[i] .*= 1/sqrt(dims[i]*rks[i+1])
-      #   end
-      # else
-      #   for i=1:N
-      #     y.ttv_vec[i] .*= 1/sqrt(dims[i]*rks[i])
-      #   end
-      # end
     end
   end
   
@@ -516,7 +513,7 @@ end
 Returns a left-canonical TT representation
 """
 function vidal_to_left_canonical(x_v::TT_vidal{T,N}) where {T<:Number,N}
-  x_tt = zeros_tt(T,x_v.dims,x_v.rks,ot=vcat(ones(length(x_v.dims)), 0))
+  x_tt = zeros_tt(T,x_v.dims,x_v.rks,ot=vcat(ones(length(x_v.dims)-1), 0))
   x_tt.ttv_vec[1] = x_v.core[1]
   for i in 2:length(x_v.dims)
     for j in 1:x_v.dims[i]

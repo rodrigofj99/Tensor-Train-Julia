@@ -105,7 +105,7 @@ Compute the heuristic number of sketch blocks p[k] for each core using oversampl
 3. Boundary: p[1] = 1 (forward) or p[N+1] = 1 (reverse)
 """
 function compute_sketch_blocks_heuristic(rks::Vector{Int}, block_rks_vec::Vector{Int}, N::Int; reverse::Bool)
-  p = @. ceil(Int, 2*rks/block_rks_vec)
+  p = @. ceil(Int, rks/block_rks_vec)
 
   if reverse
     for i=2:N
@@ -458,6 +458,144 @@ function tt_recursive_sketch(H::TToperator{TH,N}, A::TTvector{TA,N}, rks_or_rmax
   return tt_recursive_sketch(Float64, H, A, rks_or_rmax; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, timer=timer)
 end
 
+function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, oversampling=1, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N,M}
+  @timeit timer "tt_recursive_sketch" begin
+    rng = Random.default_rng()
+    Random.seed!(rng, seed)
+
+    dims = A[1].ttv_dims
+    @assert all(a.ttv_dims == dims for a in A)
+    TW = typeof(one(T)*one(TA))
+    W = Vector{Array{TW,M+2}}(undef, N+1)
+
+    if reverse
+      @timeit timer "sketch_initialization" begin
+        @assert rks[N+1] == 1 && all(a.ttv_rks[N+1] == 1 for a in A)
+        block_rks_vec = ones(Int, N+1)
+        block_rks_vec[1:N] .= block_rks
+        for k=N:-1:1
+          block_rks_vec[k] = min(block_rks_vec[k], dims[k]*block_rks_vec[k+1])
+        end
+
+        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
+        if oversampling ≠ 1
+          p[1:N] .= ceil.(Int, oversampling .* p[1:N])
+        end
+
+        W[N+1] = ones(TW, ntuple(i->1, M+2))
+
+        # Preallocate buffer for the entire loop
+        max_sketch_buffer_size = maximum(block_rks_vec[k+1] * dims[k] * block_rks_vec[k] * p[k] for k in 1:N)
+        sketch_buffer = Vector{T}(undef, max_sketch_buffer_size)
+
+        max_contract_buffer1_size = 0
+        max_contract_buffer2_size = 0
+        max_contract_buffer3_size = 0
+        for k in 1:N
+          z = dims[k]
+          v = ntuple(i->(i==M+1 ? block_rks_vec[k+1] : A[i].ttv_rks[k+1]), M+1)
+          w = ntuple(i->(i==M+1 ? block_rks_vec[k  ] : A[i].ttv_rks[k  ]), M+1)
+          buf1_size, buf2_size, buf3_size = contract_sketch_core_backwards_kronecker_buffers_size(z, v, w)
+          max_contract_buffer1_size = max(max_contract_buffer1_size, buf1_size)
+          max_contract_buffer2_size = max(max_contract_buffer2_size, buf2_size)
+          max_contract_buffer3_size = max(max_contract_buffer3_size, buf3_size)
+        end
+        contract_buffer = (Vector{TW}(undef, max_contract_buffer1_size), Vector{TW}(undef, max_contract_buffer2_size), Vector{TW}(undef, max_contract_buffer3_size))
+      end
+
+      @timeit timer "contraction_reverse" begin
+        @inbounds for k in N:-1:1
+          @timeit timer "sketch_generation" begin
+            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; buffer=sketch_buffer, timer=timer)
+          end
+
+          @timeit timer "W_allocation" begin
+            W[k] = zeros(TW, (a.ttv_rks[k] for a in A)..., block_rks_vec[k], p[k])
+          end
+
+          @timeit timer "tensor_contraction" begin
+            for j=1:p[k]
+              W_next_j = view(W[k+1], ntuple(i->Colon(), M+1)..., (k<N ? j : 1))
+              B_j = view(B_sketch,:,:,:,j)
+              W_k_j = view(W[k], ntuple(i->Colon(), M+1)..., j)
+              contract_sketch_core_kronecker_backwards!(W_k_j, ntuple(i -> A[i].ttv_vec[k], M), B_j, W_next_j; buffer=contract_buffer)
+            end
+          end
+        end
+      end
+    else
+      @timeit timer "sketch_initialization" begin
+        @assert rks[1] == 1 && all(a.ttv_rks[1] == 1 for a in A)
+        block_rks_vec = ones(Int, N+1)
+        block_rks_vec[2:N+1] .= block_rks
+        for k=1:N
+          block_rks_vec[k+1] = min(block_rks_vec[k+1], dims[k]*block_rks_vec[k])
+        end
+
+        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
+        if oversampling ≠ 1
+          p[2:N+1] .= ceil.(Int, oversampling .* p[2:N+1])
+        end
+        W[1] = ones(TW, ntuple(i->1, M+2))
+
+        # Preallocate buffer for the entire loop
+        max_sketch_buffer_size = maximum(block_rks_vec[k] * dims[k] * block_rks_vec[k+1] * p[k+1] for k in 1:N)
+        sketch_buffer = Vector{T}(undef, max_sketch_buffer_size)
+
+        max_contract_buffer1_size = 0
+        max_contract_buffer2_size = 0
+        max_contract_buffer3_size = 0
+        for k in 1:N
+          z = dims[k]
+          v = ntuple(i->(i==M+1 ? block_rks_vec[k  ] : A[i].ttv_rks[k  ]), M+1)
+          w = ntuple(i->(i==M+1 ? block_rks_vec[k+1] : A[i].ttv_rks[k+1]), M+1)
+          buf1_size, buf2_size, buf3_size = contract_sketch_core_forwards_kronecker_buffers_size(z, v, w)
+          max_contract_buffer1_size = max(max_contract_buffer1_size, buf1_size)
+          max_contract_buffer2_size = max(max_contract_buffer2_size, buf2_size)
+          max_contract_buffer3_size = max(max_contract_buffer3_size, buf3_size)
+        end
+        contract_buffer = (Vector{TW}(undef, max_contract_buffer1_size), Vector{TW}(undef, max_contract_buffer2_size), Vector{TW}(undef, max_contract_buffer3_size))
+      end
+
+      @timeit timer "contraction_forward" begin
+        @inbounds for k in 1:N
+          @timeit timer "sketch_generation" begin
+            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; buffer=sketch_buffer, timer=timer)
+          end
+
+          @timeit timer "W_allocation" begin
+            W[k+1] = zeros(TW, (a.ttv_rks[k+1] for a in A)..., block_rks_vec[k+1], p[k+1])
+          end
+
+          @timeit timer "tensor_contraction" begin
+            for j=1:p[k+1]
+              W_k_j = view(W[k], ntuple(i->( i<M+2 ? Colon() : (k>1 ? j : 1) ), M+2)...)
+              B_j = view(B_sketch,:,:,:,j)
+              W_next_j = view(W[k+1], ntuple(i->( i<M+2 ? Colon() : j ), M+2)...)
+              contract_sketch_core_kronecker_forwards!(W_next_j, ntuple(i -> A[i].ttv_vec[k], M), B_j, W_k_j; buffer=contract_buffer)
+            end
+          end
+        end
+      end
+    end
+
+    for k=1:N+1
+      W[k] ./= sqrt(p[k])
+    end
+    return [reshape(W[k], (a.ttv_rks[k] for a in A)..., block_rks_vec[k]*p[k]) for k=1:N+1], block_rks_vec.*p
+  end
+end
+
+function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rmax::Int; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N,M}
+  rks = rmax*ones(Int,N+1)
+  rks[(reverse ? N+1 : 1)] = 1
+  return tt_recursive_sketch(T,A,rks; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, timer=timer)
+end
+
+function tt_recursive_sketch(A::NTuple{M,TTvector{T,N}},rks_or_rmax; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T<:Number,N,M}
+  return tt_recursive_sketch(Float64,A,rks_or_rmax; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, timer=timer)
+end
+
 
 """
 Compute partial contractions between two TTvectors A and B.
@@ -600,8 +738,8 @@ Uses adaptive contraction ordering based on rank sizes to minimize overall cost:
 
 # Case A*B*S*V
 - `W::AbstractArray{T,3}`: Output tensor [a,b,c] (modified in-place)
-- `A::AbstractArray{T,3}`: Left tensor [ζ,α,a] (forward TT format)
-- `B::AbstractArray{T,4}`: Operator tensor [ζ,z,β,b] (forward TTO format)
+- `A::AbstractArray{T,3}`: Left tensor [z/ζ,α,a] (forward TT format)
+  `B::AbstractArray{T,4}`: Operator tensor [ζ,z,β,b] (forward TTO format)
 - `S::AbstractArray{T,3}`: Sketch block tensor [γ,z,c] (sketch block format)
 - `V::AbstractArray{T,3}`: Connection array [α,β,γ] (previous sketch weights)
 
@@ -748,6 +886,247 @@ function contract_sketch_core_forwards_operator_buffers_size(ζ::Int, z::Int, α
     return (buffer1_size, buffer2_size, buffer3_size)
   end
 end
+
+
+function contract_sketch_core_kronecker_forwards!(W::AbstractArray{T,N1}, A::NTuple{N,AbstractArray{T,3}}, S::AbstractArray{T,3}, V::AbstractArray{T,N1};
+                                buffer=(nothing,nothing,nothing)) where {T,N,N1}
+  @assert N1 === N+1
+
+  w = size(W)
+  v = size(V)
+  z = size(A[1],1)
+  for i=1:N
+    @assert size(A[i]) == (z,v[i],w[i])   "Factor A[$i] has the wrong dimensions: need $((z,v[i],w[i])), got $(size(A[i]))"
+  end
+  @assert size(S) === (v[N+1],z,w[N+1])   "Factor S has the wrong dimensions: need $((v[N+1],z,w[N+1])), got $(size(S))"
+
+  function permutation(i,j) # Bring i to 1 and j to N+1
+    q = collect(1:N+2)
+    q[1], q[i] = i, 1
+    if 1<j # j is still at j
+      q[N+1], q[j] = j, q[N+1]
+    else # j is now at i
+      q[N+1], q[i] = j, q[N+1]
+    end
+    return q
+  end
+
+  function inversepermutation(i,j) # Bring i back from 1 and j from N+1
+    q = collect(1:N+2)
+    if 1<j
+      q[N+1], q[j] = q[j], q[N+1]
+    else
+      q[N+1], q[i] = q[i], q[N+1]
+    end
+    q[1], q[i] = q[i], q[1]
+    return q
+  end
+
+  order = sortperm(collect(w./v), rev=true)
+  j = pop!(order)    
+  # buffer[1]: V_permuted[α≠i,αi]  
+  perm = permutation(1,j)[1:N+1]
+  V_permuted = permutedims!!(V, perm, buffer=buffer[1])
+  if j == N+1
+    # buffer[2]: A_permuted[αj,aj,z] = S[β,z,b]
+    A_permuted = permutedims!!(S, (1,3,2), buffer=buffer[2])
+  else
+    # buffer[2]: A_permuted[αj,aj,z] = Ai[z,αj,aj]
+    A_permuted = permutedims!!(A[j], (2,3,1), buffer=buffer[2])
+  end
+  # buffer[3]: VA[α≠j, aj, z]
+  VA = mul!!(reshape(V_permuted, :, v[j]), reshape(A_permuted, v[j], w[j]*z), buffer=buffer[3])
+  va = [v[perm[1:N]]..., w[j], z]
+  VA = reshape(VA, va...)
+  perm = inversepermutation(1,j)
+
+
+
+  while length(order) > 2
+    i = pop!(order)
+    j = pop!(order)
+    perm = perm[permutation(i,j)]
+    # buffer[1]: VA_permuted[αi,α≠ij,αj,z]  
+    VA_permuted = permutedims!!(VA, perm, buffer=buffer[1])
+    va = va[perm]
+
+    if i == N+1
+      # buffer[2]: A_permuted[ai,αi,z] = S[β,z,b]
+      A_permuted = permutedims!!(S, (3,1,2), buffer=buffer[2])
+    else
+      # buffer[2]: A_permuted[ai,αi,z] = Ai[z,αi,ai]
+      A_permuted = permutedims!!(A[i], (3,2,1), buffer=buffer[2])
+    end
+    # buffer[3]: VA[ai,a/α≠ij,βj,z] = A_permuted[ai,αi,z] * VA_permuted[αi,α≠ij,βj,z] 
+    VA_intermediate = mul!!(A_permuted, reshape(VA_permuted,v[i],:,z), buffer=buffer[3])
+    va[1] = w[i]
+    if j == N+1
+      # buffer[1]: B_permuted[βj,bj,z] = S[β,z,b]
+      B_permuted = permutedims!!(S, (1,3,2), buffer=buffer[1])
+    else
+      # buffer[1]: B_permuted[βj,bj,z] = Aj[z,αj,aj]
+      B_permuted = permutedims!!(A[j], (2,3,1), buffer=buffer[1])
+    end
+    # buffer[2]: VA[ai,a/α≠ij,bj,z] = VA_intermediate[ai,α≠ij,βj,z] * B_permuted[βj,bj,z]
+    VA = mul!!(reshape(VA_intermediate,:,v[j],z), B_permuted, buffer=buffer[2])
+    va[N+1] = w[j]
+    VA = reshape(VA, va...)
+
+    perm = inversepermutation(i,j)
+  end
+
+  if length(order) == 2
+    i = pop!(order)
+    j = pop!(order)
+    perm = perm[permutation(i,j)]
+    
+        # buffer[1]: VA_permuted[αi,α≠ij,αj,z]  
+    VA_permuted = permutedims!!(VA, perm, buffer=buffer[1])
+    va = va[perm]
+
+    if i == N+1
+      # buffer[2]: A_permuted[ai,αi,z] = S[β,z,b]
+      A_permuted = permutedims!!(S, (3,1,2), buffer=buffer[2])
+    else
+      # buffer[2]: A_permuted[ai,αi,z] = Ai[z,αi,ai]
+      A_permuted = permutedims!!(A[i], (3,2,1), buffer=buffer[2])
+    end
+    # buffer[3]: VA_intermediate[ai,a/α≠ij,βj,z] = Ai_permuted[ai,αi,z] * VA_permuted[αi,α≠ij,βj,z] 
+    VA_intermediate = mul!!(A_permuted, reshape(VA_permuted,v[i],:,z), buffer=buffer[3])
+    va[1] = w[i]
+    if j == N+1
+      # buffer[1]: B_permuted[βj,z,bj] = S[β,z,b]
+      B_permuted = S
+    else
+      # buffer[1]: B_permuted[βj,z,bj]
+      B_permuted = permutedims!!(A[j], (2,1,3), buffer=buffer[1])
+    end
+    # buffer[2]: VA[ai,a≠ij,bj] = VA_intermediate[ai,α≠ij,βj,z] * Bj_permuted[βj,z,bj]
+    W_permuted = mul!!(reshape(VA_intermediate,:,v[j]*z), reshape(B_permuted,v[j]*z,w[j]), buffer=buffer[2])
+    va = va[1:N+1]
+    va[N+1] = w[j]
+ 
+    W_permuted = reshape(W_permuted, va...)
+    perm = inversepermutation(i,j)[1:N+1]
+    permutedims!(W, W_permuted, perm)
+  else # length(order == 1)
+    j = pop!(order)
+    perm = perm[permutation(1,j)]
+
+    # buffer[1]: VA_permuted[αi,α≠ij,αj,z]  
+    VA_permuted = permutedims!!(VA, perm, buffer=buffer[1])
+    va = va[perm]
+    if j == N+1
+      # buffer[2]: B_permuted[βj,z,bj] = S[β,z,b]
+      B_permuted = S
+    else
+      # buffer[2]: Bj_permuted[βj,z,bj]
+      B_permuted = permutedims!!(A[j], (2,1,3), buffer=buffer[2])
+    end
+    # buffer[3]: VA[ai,a≠ij,bj] = VA_permuted[a≠j,βj,z] * Bj_permuted[βj,z,bj]
+    W_permuted = mul!!(reshape(VA_permuted,:,v[j]*z), reshape(B_permuted, v[j]*z, w[j]), buffer=buffer[3])
+    va = va[1:N+1]
+    va[N+1] = w[j]
+
+    W_permuted = reshape(W_permuted, va...)
+    perm = inversepermutation(1,j)[1:N+1]
+    permutedims!(W, W_permuted, perm)
+  end
+
+  return W
+end
+
+function contract_sketch_core_forwards_kronecker_buffers_size(z::Int, v::NTuple{N1,Int}, w::NTuple{N1,Int}) where {N1}
+  N = N1 - 1
+  
+  # Buffer 1: Used for VA_permuted (permutations), B_permuted operations
+  buffer1_size = 0
+  # Buffer 2: Used for A_permuted, final VA/W_permuted results  
+  buffer2_size = 0
+  # Buffer 3: Used for VA_intermediate results from mul!!
+  buffer3_size = 0
+  
+  # Initial V permutation: V_permuted has same size as V
+  buffer1_size = max(buffer1_size, prod(v))
+  
+  # Track dimensions through the algorithm using same ordering as main function
+  order = sortperm(collect(w./v), rev=true)
+  va = [v..., z]  # Initial va dimensions
+
+  l(i) = z*v[i]*w[i]
+  
+  # Initial VA computation
+  i = pop!(order)
+  
+  # Initial A[i] or S permutation
+  buffer2_size = max(buffer2_size, l(i))
+  
+  # Update va after first contraction
+  va[i] = w[i]
+  buffer3_size = max(buffer3_size, prod(va))
+  
+  
+  # Track through algorithm iterations
+  while length(order) > 2
+    i = pop!(order)
+    j = pop!(order)
+    
+    # VA_permuted: reordered version of current VA
+    buffer1_size = max(buffer1_size, prod(va))
+    
+    # A_permuted for i (or S if i == N+1)
+    buffer2_size = max(buffer2_size, l(i))
+    
+    # VA_intermediate from mul!!
+    va[i] = w[i]
+    buffer3_size = max(buffer3_size, prod(va))
+    
+    # B_permuted for j (or S if j == N+1)
+    buffer1_size = max(buffer1_size, l(j))
+    
+    # Final VA from second mul!!
+    va[j] = w[j]
+    buffer2_size = max(buffer2_size, prod(va))
+  end
+  
+  if length(order) == 2
+    i = pop!(order)
+    j = pop!(order)
+    
+    # VA_permuted
+    buffer1_size = max(buffer1_size, prod(va))
+    
+    # A_permuted for i (or S if i == N+1)
+    buffer2_size = max(buffer2_size, l(i))
+    
+    # VA_intermediate from mul!!
+    va[i] = w[i]
+    buffer3_size = max(buffer3_size, prod(va))
+    
+    # B_permuted for j (or S if j == N+1)
+    buffer1_size = max(buffer1_size, l(j))
+    va[j] = w[j]
+    
+    # Final W_permuted
+    buffer2_size = max(buffer2_size, prod(va))
+    
+  elseif length(order) == 1
+    j = pop!(order)
+    
+    # VA_permuted
+    buffer1_size = max(buffer1_size, prod(va))
+    
+    # Handle special case: if j is the last core (N+1), use S directly
+    if j < N+1
+      # B_permuted[v[j], z, w[j]] for regular A[j]
+      buffer2_size = max(buffer2_size, l(j))
+    end
+    buffer3_size = max(buffer3_size, prod(w))
+  end
+  
+  return (buffer1_size, buffer2_size, buffer3_size)
+end
+
 
 
 """
@@ -912,6 +1291,245 @@ function contract_sketch_core_backwards_operator_buffers_size(z::Int, ζ::Int, a
   end
 end
 
+function contract_sketch_core_kronecker_backwards!(W::AbstractArray{T,N1}, A::NTuple{N,AbstractArray{T,3}}, S::AbstractArray{T,3}, V::AbstractArray{T,N1};
+                                buffer=(nothing,nothing,nothing)) where {T,N,N1}
+  @assert N1 === N+1
+
+  w = size(W)
+  v = size(V)
+  z = size(A[1],1)
+  for i=1:N
+    @assert size(A[i]) == (z,w[i],v[i])   "Factor A[$i] has the wrong dimensions: need $((z,w[i],v[i])), got $(size(A[i]))"
+  end
+  @assert size(S) === (v[N+1],z,w[N+1])   "Factor S has the wrong dimensions: need $((v[N+1],z,w[N+1])), got $(size(S))"
+
+  function permutation(i,j) # Bring i to 1 and j to N+1
+    q = collect(1:N+2)
+    q[1], q[i] = i, 1
+    if 1<j # j is still at j
+      q[N+1], q[j] = j, q[N+1]
+    else # j is now at i
+      q[N+1], q[i] = j, q[N+1]
+    end
+    return q
+  end
+
+  function inversepermutation(i,j) # Bring i back from 1 and j from N+1
+    q = collect(1:N+2)
+    if 1<j
+      q[N+1], q[j] = q[j], q[N+1]
+    else
+      q[N+1], q[i] = q[i], q[N+1]
+    end
+    q[1], q[i] = q[i], q[1]
+    return q
+  end
+
+  order = sortperm(collect(w./v), rev=true)
+  j = pop!(order)    
+  # buffer[1]: V_permuted[α≠i,αi]  
+  perm = permutation(1,j)[1:N+1]
+
+  V_permuted = permutedims!!(V, perm, buffer=buffer[1])
+  if j == N+1
+    # buffer[2]: A_permuted[αj,aj,z] = S[β,z,b]
+    A_permuted = permutedims!!(S, (1,3,2), buffer=buffer[2])
+  else
+    # buffer[2]: A_permuted[αj,aj,z] = Aj[z,aj,αj]
+    A_permuted = permutedims!!(A[j], (3,2,1), buffer=buffer[2])
+  end
+  # buffer[3]: VA[α≠j, aj, z]
+  VA = mul!!(reshape(V_permuted, :, v[j]), reshape(A_permuted, v[j], w[j]*z), buffer=buffer[3])
+  va = [v[perm[1:N]]..., w[j], z]
+  VA = reshape(VA, va...)
+  perm = inversepermutation(1,j)
+
+  while length(order) > 2
+    i = pop!(order)
+    j = pop!(order)
+    perm = perm[permutation(i,j)]
+
+    # buffer[1]: VA_permuted[αi,α≠ij,αj,z]  
+    VA_permuted = permutedims!!(VA, perm, buffer=buffer[1])
+    va = va[perm]
+
+    if i == N+1
+      # buffer[2]: A_permuted[ai,αi,z] = S[β,z,b]
+      A_permuted = permutedims!!(S, (3,1,2), buffer=buffer[2])
+    else
+      # buffer[2]: A_permuted[ai,αi,z] = Ai[z,ai,αi]
+      A_permuted = permutedims!!(A[i], (2,3,1), buffer=buffer[2])
+    end
+    # buffer[3]: VA[ai,a/α≠ij,βj,z] = A_permuted[ai,αi,z] * VA_permuted[αi,α≠ij,βj,z] 
+    VA_intermediate = mul!!(A_permuted, reshape(VA_permuted,v[i],:,z), buffer=buffer[3])
+    va[1] = w[i]
+    if j == N+1
+      # buffer[1]: B_permuted[βj,bj,z] = S[β,z,b]
+      B_permuted = permutedims!!(S, (1,3,2), buffer=buffer[1])
+    else
+      # buffer[1]: B_permuted[βj,bj,z]
+      B_permuted = permutedims!!(A[j], (3,2,1), buffer=buffer[1])
+    end
+    # buffer[2]: VA[ai,a/α≠ij,bj,z] = VA_intermediate[ai,α≠ij,βj,z] * B_permuted[βj,bj,z]
+    VA = mul!!(reshape(VA_intermediate,:,v[j],z), B_permuted, buffer=buffer[2])
+    va[N+1] = w[j]
+    VA = reshape(VA, va...)
+
+    perm = inversepermutation(i,j)
+  end
+
+  if length(order) == 2
+    i = pop!(order)
+    j = pop!(order)
+    perm = perm[permutation(i,j)]
+
+    # buffer[1]: VA_permuted[αi,α≠ij,αj,z]  
+    VA_permuted = permutedims!!(VA, perm, buffer=buffer[1])
+    va = va[perm]
+    if i == N+1
+      # buffer[2]: A_permuted[ai,αi,z] = S[β,z,b]
+      A_permuted = permutedims!!(S, (3,1,2), buffer=buffer[2])
+    else
+      # buffer[2]: A_permuted[ai,αi,z] = Ai[z,ai,αi]
+      A_permuted = permutedims!!(A[i], (2,3,1), buffer=buffer[2])
+    end
+    # buffer[3]: VA_intermediate[ai,a/α≠ij,βj,z] = Ai_permuted[ai,αi,z] * VA_permuted[αi,α≠ij,βj,z] 
+    VA_intermediate = mul!!(A_permuted, reshape(VA_permuted,v[i],:,z), buffer=buffer[3])
+    va[1] = w[i]
+    if j == N+1
+      # buffer[1]: B_permuted[βj,z,bj] = S[β,z,b]
+      B_permuted = S
+    else
+      # buffer[1]: B_permuted[βj,z,bj]
+      B_permuted = permutedims!!(A[j], (3,1,2), buffer=buffer[1])
+    end
+    # buffer[2]: VA[ai,a≠ij,bj] = VA_intermediate[ai,α≠ij,βj,z] * Bj_permuted[βj,z,bj]
+    W_permuted = mul!!(reshape(VA_intermediate,:,v[j]*z), reshape(B_permuted, v[j]*z, w[j]), buffer=buffer[2])
+    va = va[1:N+1]
+    va[N+1] = w[j]
+ 
+    W_permuted = reshape(W_permuted, va...)
+    perm = inversepermutation(i,j)[1:N+1]
+    permutedims!(W, W_permuted, perm)
+  else # length(order == 1)
+    # Dimension j is currently at index perm[j]
+    j = pop!(order)
+    perm = perm[permutation(1,j)]
+
+    # buffer[1]: VA_permuted[αi,α≠ij,αj,z]  
+    VA_permuted = permutedims!!(VA, perm, buffer=buffer[1])
+    va = va[perm]
+    if j == N+1
+      # buffer[2]: B_permuted[βj,z,bj] = S[β,z,b]
+      B_permuted = S
+    else
+      # buffer[2]: B_permuted[βj,z,bj]
+      B_permuted = permutedims!!(A[j], (3,1,2), buffer=buffer[2])
+    end
+    # buffer[3]: VA[ai,a≠ij,bj] = VA_permuted[a≠j,βj,z] * B_permuted[βj,z,bj]
+    W_permuted = mul!!(reshape(VA_permuted,:,v[j]*z), reshape(B_permuted, v[j]*z, w[j]), buffer=buffer[3])
+    va = va[1:N+1]
+    va[N+1] = w[j]
+ 
+    W_permuted = reshape(W_permuted, va...)
+    perm = inversepermutation(1,j)[1:N+1]
+    permutedims!(W, W_permuted, perm)
+  end
+
+  return W
+end
+
+function contract_sketch_core_backwards_kronecker_buffers_size(z::Int, v::NTuple{N1,Int}, w::NTuple{N1,Int}) where {N1}
+  N = N1 - 1
+  
+  # Buffer 1: Used for VA_permuted (permutations), B_permuted operations
+  buffer1_size = 0
+  # Buffer 2: Used for A_permuted, final VA/W_permuted results
+  buffer2_size = 0
+  # Buffer 3: Used for VA_intermediate results from mul!!
+  buffer3_size = 0
+  
+  # Initial V permutation: V_permuted has same size as V
+  buffer1_size = max(buffer1_size, prod(v))
+  
+  # Track dimensions through the algorithm using same ordering as main function
+  order = sortperm(collect(w./v), rev=true)
+  va = [v..., z]  # Initial va dimensions
+  
+  l(i) = z*v[i]*w[i]
+  
+  # Initial VA computation
+  i = pop!(order)
+  
+  # Initial A[i] or S permutation - now A[i] has dimensions (z,w[i],v[i])
+  buffer2_size = max(buffer2_size, l(i))
+  
+  # Update va after first contraction
+  va[i] = w[i]
+  buffer3_size = max(buffer3_size, prod(va))
+  
+  # Track through algorithm iterations
+  while length(order) > 2
+    i = pop!(order)
+    j = pop!(order)
+    
+    # VA_permuted: reordered version of current VA
+    current_va_size = prod(va)
+    buffer1_size = max(buffer1_size, current_va_size)
+    
+    # A_permuted for i (or S if i == N+1) - A[i] has dimensions (z,w[i],v[i])
+    buffer2_size = max(buffer2_size, l(i))
+    
+    # VA_intermediate from mul!!
+    va[i] = w[i]
+    buffer3_size = max(buffer3_size, prod(va))
+    
+    # B_permuted for j (or S if j == N+1) - A[j] has dimensions (z,w[j],v[j])
+    buffer1_size = max(buffer1_size, l(j))
+    
+    # Final VA from second mul!!
+    va[j] = w[j]
+    buffer2_size = max(buffer2_size, prod(va))
+  end
+  
+  if length(order) == 2
+    i = pop!(order)
+    j = pop!(order)
+    
+    # VA_permuted
+    buffer1_size = max(buffer1_size, prod(va))
+    
+    # A_permuted for i (or S if i == N+1)
+    buffer2_size = max(buffer2_size, l(i))
+    
+    # VA_intermediate from mul!!
+    va[i] = w[i]
+    buffer3_size = max(buffer3_size, prod(va))
+    
+    # B_permuted for j (or S if j == N+1)
+    buffer1_size = max(buffer1_size, l(j))
+    
+    # Final W_permuted
+    va[j] = w[j]
+    buffer2_size = max(buffer2_size, prod(w))
+    
+  elseif length(order) == 1
+    j = pop!(order)
+    
+    # VA_permuted
+    buffer1_size = max(buffer1_size, prod(va))
+    
+    # Handle special case: if j is the last core (N+1), use S directly
+    if j < N+1
+      # B_permuted for regular A[j] - A[j] has dimensions (z,w[j],v[j])
+      buffer2_size = max(buffer2_size, l(j))
+    end
+    va[j] = w[j]
+    buffer3_size = max(buffer3_size, prod(w))
+  end
+  
+  return (buffer1_size, buffer2_size, buffer3_size)
+end
 
 
 function permutedims!!(A::AbstractArray{T, N}, perm; buffer=nothing) where {T,N}
@@ -936,6 +1554,29 @@ function mul!!(A::AbstractMatrix{T}, B::AbstractMatrix{T}; buffer=nothing) where
     C = unsafe_wrap(Array, pointer(buffer), (m,n))
     mul!(C, A,B)
   end
+  return C
+end
+
+
+function mul!!(A::AbstractArray{T,3}, B::AbstractArray{T,3}; buffer=nothing) where {T}
+  if buffer === nothing
+    m = size(A,1)
+    n = size(B,2)
+    K = size(A,3)
+    @assert size(B,3) == K "Incompatible sizes: expected size(A,3)==$(K)==size(B,3)==$(size(B,3))"
+    C = Array{T,3}(undef, m,n,K)
+    for k=1:K
+      @views mul!(C[:,:,k], A[:,:,k], B[:,:,k])
+    end
+  else
+    m = size(A,1)
+    n = size(B,2)
+    K = size(A,3)
+    @assert length(buffer) >= m*n*K "Buffer too small: need $(m*n*k)=($m)⨯($n)⨯($K), got $(length(buffer))"
+    C = unsafe_wrap(Array, pointer(buffer), (m,n,K))
+    for k=1:K
+      @views mul!(C[:,:,k], A[:,:,k], B[:,:,k])
+    end  end
   return C
 end
 
