@@ -323,11 +323,11 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
         @assert rks[N+1] == 1 && A.ttv_rks[N+1] == 1 && H.tto_rks[N+1] == 1
         block_rks_vec = ones(Int, N+1)
         block_rks_vec[1:N] .= block_rks
-
-        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
         for k=N:-1:1
           block_rks_vec[k] = min(block_rks_vec[k], dims[k]*block_rks_vec[k+1])
         end
+
+        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
 
         W[N+1] = ones(TW,1,1,1,1)
 
@@ -343,8 +343,8 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
           ζ = dims[k]
           a = A.ttv_rks[k]
           α = A.ttv_rks[k+1]
-          b = B.tto_rks[k]
-          β = B.tto_rks[k+1]
+          b = H.tto_rks[k]
+          β = H.tto_rks[k+1]
           c = block_rks_vec[k]
           γ = block_rks_vec[k+1]
           buf1_size, buf2_size, buf3_size = contract_sketch_core_backwards_operator_buffers_size(z, z, α, a, β, b, γ, c)
@@ -382,11 +382,11 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
         @assert rks[1] == 1 && A.ttv_rks[1] == 1 && H.tto_rks[1] == 1
         block_rks_vec = ones(Int, N+1)
         block_rks_vec[2:N+1] .= block_rks
-
-        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
         for k=1:N
           block_rks_vec[k+1] = min(block_rks_vec[k+1], dims[k]*block_rks_vec[k])
         end
+
+        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
 
         W[1] = ones(TW,1,1,1,1)
 
@@ -402,8 +402,8 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
           z = dims[k]
           α = A.ttv_rks[k]
           a = A.ttv_rks[k+1]
-          β = B.tto_rks[k]
-          b = B.tto_rks[k+1]
+          β = H.tto_rks[k]
+          b = H.tto_rks[k+1]
           γ = block_rks_vec[k]
           c = block_rks_vec[k+1]
           buf1_size, buf2_size, buf3_size = contract_sketch_core_forwards_operator_buffers_size(z, z, α, a, β, b, γ, c)

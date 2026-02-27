@@ -301,6 +301,7 @@ function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T
     end
 
     vec = Vector{Array{T,3}}(undef, N)
+    out_rks = ones(Int, N+1)
     ot = zeros(Int, N)
 
     # Randomized sketching and orthogonalization
@@ -308,8 +309,8 @@ function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T
       @timeit timer "left_sweep" begin
         Yₖ = Vector{Array{T,3}}(undef, m)
 
-        Ay₁ = zeros(T, dims[1], 1, y[1].ttv_rks[2], A.tto_rks[2])
-        @tensoropt (α₂,β₂) Ay₁[i₁,ρₖ,α₂,β₂] = y[1].ttv_vec[1][j₁,ρₖ,α₂]*A.tto_vec[1][i₁,j₁,ρₖ,β₂]
+        Ay₁ = zeros(T, dims[1], 1, 1, y[1].ttv_rks[2], A.tto_rks[2])
+        @tensoropt (α₂,β₂) Ay₁[i₁,α₁,β₁,α₂,β₂] = y[1].ttv_vec[1][j₁,α₁,α₂]*A.tto_vec[1][i₁,j₁,β₁,β₂]
         Ay₁ .*= α[1]
         Yₖ[1] = reshape(Ay₁, dims[1], 1, y[1].ttv_rks[2]*A.tto_rks[2])
         for j=2:m
@@ -320,7 +321,7 @@ function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T
             # Randomized QR decomposition
             Zₖ = zeros(T, dims[k],out_rks[k],sketch_rks[k+1])
             for j=1:m
-              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*W[j][k+1][αₖ₊₁,ρₖ₊₁]
+              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,αₖ,βₖ₊₁] += Yₖ[j][iₖ,αₖ,αₖ₊₁]*W[j][k+1][αₖ₊₁,βₖ₊₁]
             end
             Zₖ = reshape(Zₖ,dims[k]*out_rks[k],sketch_rks[k+1])
             Q, _ = qr!(Zₖ)
