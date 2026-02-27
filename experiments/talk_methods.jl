@@ -7,7 +7,7 @@ include("utilities.jl")
 include("sketches.jl")
 
 # Number of independent runs
-num_realizations = 10
+num_realizations = 1
 
 #Random.seed!(2)
 rng = MersenneTwister(2)
@@ -15,12 +15,12 @@ rng = MersenneTwister(2)
 # embedding dimensions
 k = r -> 3*r+8 # embedding dimension as a linear function of rank
 
-λ_max = 301 #Subspace dimension
-k_max = k(λ_max) #Embedding dimension
+λ_max = 30 #Subspace dimension
+k_max = 32*k(λ_max)^2 #Embedding dimension
 
 # Ranks and physical dimensions of tensors
-ranks = [1, 2, 12] #divisors of k_max
-ranks_X = [1, 1, 10]
+ranks = [1, 2, 896] #divisors of k_max
+ranks_X = 10#[1, 1, 10]
 d = 2 # dimensions
 N = 50 # cores
 
@@ -35,9 +35,9 @@ for rX in eachindex(ranks_X)
         tmp2 = [reverse(cumprod(reverse(dims)))..., 1]
         R = [min(tmp1[i], tmp2[i]) for i in eachindex(tmp1)]
         X_λ = tt_randn(rng, dims, R, normalization="none", orthogonal=true)
-        if rX == 2
+        #= if rX == 2
             X_λ = (1 + rand()*10^(-2))*X_λ
-        end
+        end =#
         X[λ] = X_λ/norm(X_λ)
     end
 
@@ -110,13 +110,13 @@ for rX in eachindex(ranks_X)
     
 
 
-    if rX == 1
+    #= if rX == 1
         p1 = plot(range(1,λ_max), α_gtt, label="GTT", yscale=:log10, linestyle=:dot, seriescolor=:black, legend=:bottomright)
     elseif rX == 2
         p1 = plot(range(1,λ_max), α_gtt, label="GTT", yscale=:log10, linestyle=:dot, seriescolor=:black, legend=:bottomright)
-    else
+    else =#
         p1 = plot(range(1,λ_max), α_gtt, label="GTT", yscale=:log10, linestyle=:dot, seriescolor=:black, legend=:topright)
-    end
+    #end
 
 
 
