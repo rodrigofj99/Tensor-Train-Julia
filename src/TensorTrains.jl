@@ -19,10 +19,11 @@ include("dmrg.jl")
 export dmrg_linsolv, dmrg_eigsolv, dmrg_schedule, dmrg_schedule_default
 
 include("tt_solvers.jl")
-export tt_cg, tt_gmres, gradient_fixed_step, eig_arnoldi, davidson
+export tt_cg, tt_gmres, gradient_fixed_step, eig_arnoldi, davidson,
+       dot_operator, expand_basis!, sketched_rr, sketched_rayleigh_ritz
 
 include("models.jl")
-export hubbard_1D, hubbard_2D, PPP_C_NH_N, hV_to_mpo, site_switch, half_filling, slater, part_num, one_e_two_e_integrals_to_hV,one_body_diagonal
+export hubbard_1D, hubbard_2D, PPP_C_NH_N, hV_to_mpo, hV_to_mpo_tree, site_switch, half_filling, slater, part_num, one_e_two_e_integrals_to_hV, one_body_diagonal
 
 include("ordering_schemes.jl")
 export entropy, fiedler_order, bwpo_order, bwpo_order_sites, N_rdm, one_prdm, CAS_generator
@@ -40,7 +41,7 @@ include("tt_randtools.jl")
 export ttrand_rounding, stta, tt_hmt, default_rank_heuristic
 
 include("sketches.jl")
-export tt_recursive_sketch, stta_sketch, partial_contraction
+export tt_recursive_sketch, stta_sketch, partial_contraction, tt_sketch
 
 include("FCIDUMP.jl")
 export read_electron_integral_tensors,read_electron_integral_tensors_nosymmetry

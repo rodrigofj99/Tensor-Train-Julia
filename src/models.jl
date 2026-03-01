@@ -231,6 +231,111 @@ function hV_to_mpo(h::Array{T,2},V,dims::NTuple{N,Int64};tol=1e-8::Float64,n_rnd
 end
 
 """
+    hV_to_mpo_tree(h, V, dims; tol=1e-8, n_leaf=20, n_branch=8, chemistry=false)
+
+Hierarchical tree assembly of an MPO for the second-quantized Hamiltonian
+
+    H = Σ_{ij} h_ij a_i†a_j + Σ_{ijkl} V_{ijkl} a_i†a_j†a_k a_l
+
+Faster than `hV_to_mpo` for dense h/V because ranks are controlled at every level:
+
+1. All one- and two-body terms are collected and partitioned into leaf groups of
+   size `n_leaf`.
+2. Each leaf group is summed and compressed (via `tt_rounding`).
+3. The compressed results are merged in groups of `n_branch`, compressed, and
+   reduced hierarchically until a single MPO remains.
+
+The tree structure keeps intermediate TT ranks small throughout, unlike the linear
+accumulation in `hV_to_mpo` which allows ranks to grow across the full term list.
+
+`chemistry=true` uses the chemistry convention V_{ijkl} a_i†a_j†a_l a_k (with 1/2 prefactor
+and Hermitian symmetry), matching `hV_to_mpo`. `h` must be symmetric.
+"""
+function hV_to_mpo_tree(h::Array{T,2}, V, dims::NTuple{N,Int64};
+                         tol=1e-8, n_leaf::Int=20, n_branch::Int=8,
+                         chemistry=false) where {T,N}
+    L = size(h, 1)
+    @assert issymmetric(h)
+
+    tto_crea = [tto_creation(T, i, dims) for i in 1:L]
+    tto_anni = [tto_annihilation(T, i, dims) for i in 1:L]
+
+    # ── Phase 1: collect all scaled terms ─────────────────────────────────────
+    terms = TToperator{T,N}[]
+
+    # One-body
+    for i in findall(x -> !isapprox(x, 0.0, atol=1e-12), h)
+        if i[1] < i[2]
+            push!(terms, h[i] * (tto_crea[i[1]]*tto_anni[i[2]] +
+                                  tto_crea[i[2]]*tto_anni[i[1]]))
+        elseif i[1] == i[2]
+            push!(terms, h[i] * (tto_crea[i[1]]*tto_anni[i[2]]))
+        end
+    end
+
+    # Two-body
+    for i in findall(x -> !isapprox(x, 0.0, atol=1e-12), V)
+        if chemistry
+            # Convention: V_{pqrs} a_p†a_r†a_s a_q  (with 1/2 and H+H†)
+            if (i[1], i[3]) < (i[2], i[4])
+                push!(terms, (V[i]/2) *
+                    ((tto_crea[i[1]]*tto_crea[i[3]]*tto_anni[i[4]]*tto_anni[i[2]]) +
+                     (tto_crea[i[2]]*tto_crea[i[4]]*tto_anni[i[3]]*tto_anni[i[1]])))
+            elseif (i[1], i[3]) == (i[2], i[4])
+                push!(terms, (V[i]/2) *
+                    (tto_crea[i[1]]*tto_crea[i[3]]*tto_anni[i[4]]*tto_anni[i[2]]))
+            end
+        else
+            # Convention: V_{pqrs} a_p†a_q†a_r a_s  (with H+H†)
+            if (i[1], i[2]) < (i[4], i[3])
+                push!(terms, V[i] *
+                    ((tto_crea[i[1]]*tto_crea[i[2]]*tto_anni[i[3]]*tto_anni[i[4]]) +
+                     (tto_crea[i[4]]*tto_crea[i[3]]*tto_anni[i[2]]*tto_anni[i[1]])))
+            elseif (i[1], i[2]) == (i[4], i[3])
+                push!(terms, V[i] *
+                    (tto_crea[i[1]]*tto_crea[i[2]]*tto_anni[i[3]]*tto_anni[i[4]]))
+            end
+        end
+    end
+
+    isempty(terms) && return zeros_tto(T, dims, ones(Int64, N+1))
+
+    # ── Phase 2: leaf assembly ─────────────────────────────────────────────────
+    n_terms  = length(terms)
+    n_groups = cld(n_terms, n_leaf)
+
+    current = Vector{TToperator{T,N}}(undef, n_groups)
+    for g in 1:n_groups
+        idx_start = (g-1)*n_leaf + 1
+        idx_end   = min(g*n_leaf, n_terms)
+        A = terms[idx_start]
+        for k in idx_start+1:idx_end
+            A = A + terms[k]
+        end
+        current[g] = tt_rounding(A; tol=tol)
+    end
+
+    # ── Phase 3: hierarchical merging ─────────────────────────────────────────
+    while length(current) > 1
+        n_cur = length(current)
+        n_new = cld(n_cur, n_branch)
+        next = Vector{TToperator{T,N}}(undef, n_new)
+        for g in 1:n_new
+            idx_start = (g-1)*n_branch + 1
+            idx_end   = min(g*n_branch, n_cur)
+            A = current[idx_start]
+            for k in idx_start+1:idx_end
+                A = A + current[k]
+            end
+            next[g] = tt_rounding(A; tol=tol)
+        end
+        current = next
+    end
+
+    return current[1]
+end
+
+"""
 for normal ordered Hamiltonians
 """
 function normal_ordering(p,q,r,s,n)

@@ -122,8 +122,14 @@ returns a TT representation where the singular values lower than tol are discard
 """
 function tt_rounding(x_tt::TTvector{T,N};tol=1e-12,rmax=2^14) where {T<:Number,N}
 	is_leftorthogonal(x_tt) ? y_tt = copy(x_tt) :	y_tt = orthogonalize(x_tt;i=x_tt.N)
+	norm(y_tt) < tol && return zeros_tt(T,x_tt.ttv_dims,x_tt.ttv_rks)
 	for j in x_tt.N:-1:2
-		u,s,v = svd(reshape(permutedims(y_tt.ttv_vec[j],[2 1 3]),y_tt.ttv_rks[j],:),full=false)
+		M = reshape(permutedims(y_tt.ttv_vec[j],[2 1 3]),y_tt.ttv_rks[j],:)
+		u,s,v = try
+			svd(M, full=false)
+		catch e
+			e isa LAPACKException ? svd(M, full=false, alg=LinearAlgebra.QRIteration()) : rethrow(e)
+		end
 		_,k = floor(s[s.>0],tol)
 		k = min(k,rmax)
 		y_tt.ttv_vec[j] = permutedims(reshape(v'[1:k,:],:,x_tt.ttv_dims[j],y_tt.ttv_rks[j+1]),[2 1 3])

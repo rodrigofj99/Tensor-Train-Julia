@@ -12,7 +12,8 @@ function lih(;n_cas = 10,canonical=true,fiedler=false,print=true,sweep_schedule=
   println(dot(v,H_tto*v)+F[1]-F[3]*μ) # =-7.9836
   if canonical
     v = tt_up_rks(v,rmax_schedule[1];ϵ_wn=1e-2)
-    E,ψ_tt,r_hist =dmrg_eigsolv(H_tto,v;sweep_schedule=sweep_schedule,rmax_schedule=rmax_schedule,it_solver=true) 
+    schedule = dmrg_schedule_default(; rmax=rmax)
+    E,ψ_tt,r_hist =dmrg_eigsolv(H_tto,v;schedule=schedule) 
     if print
       date = now()
       open("psi_LiH_canonical_cas=$(n_cas)_$(date).json","w") do io 

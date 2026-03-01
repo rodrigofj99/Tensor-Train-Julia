@@ -90,27 +90,19 @@ function +(x::TTvector{T,N}, y::TTvector{T,N}) where {T<:Number,N}
     rks[1] = 1
     rks[d+1] = 1
 
-    # Initialize each core to the right shape in parallel to leverage threads.
-    @threads for k in 1:d
-        # core k shape: (n_k, rks[k], rks[k+1])
+    for k in 1:d
         ttv_vec[k] = zeros(T, x.ttv_dims[k], rks[k], rks[k+1])
     end
 
     @inbounds begin
-        # Fill first core: put x's first core in the left block and y's in the
-        # right block (concatenation along the rank dimension)
         ttv_vec[1][:, :, 1:x.ttv_rks[2]] = x.ttv_vec[1]
         ttv_vec[1][:, :, (x.ttv_rks[2]+1):rks[2]] = y.ttv_vec[1]
 
-        # Fill interior cores: place x's core in the top-left block and y's in
-        # the bottom-right block of the new core. Off-diagonal blocks remain 0
-        # (this keeps the two components independent inside the TT).
-        @threads for k in 2:(d-1)
+        for k in 2:(d-1)
             ttv_vec[k][:, 1:x.ttv_rks[k], 1:x.ttv_rks[k+1]] = x.ttv_vec[k]
             ttv_vec[k][:, (x.ttv_rks[k]+1):rks[k], (x.ttv_rks[k+1]+1):rks[k+1]] = y.ttv_vec[k]
         end
 
-        # Last core: same concatenation idea (rank dimension collapses on the right)
         ttv_vec[d][:, 1:x.ttv_rks[d], 1] = x.ttv_vec[d]
         ttv_vec[d][:, (x.ttv_rks[d]+1):rks[d], 1] = y.ttv_vec[d]
     end
@@ -135,24 +127,19 @@ function +(x::TToperator{T,N}, y::TToperator{T,N}) where {T<:Number,N}
     rks[1] = 1
     rks[d+1] = 1
 
-    # Initialize cores in parallel
-    @threads for k in 1:d
-        # each operator core: (n_k_out, n_k_in, r_k, r_{k+1})
+    for k in 1:d
         tto_vec[k] = zeros(T, x.tto_dims[k], x.tto_dims[k], rks[k], rks[k+1])
     end
 
     @inbounds begin
-        # first core: copy x and y into disjoint rank blocks
         tto_vec[1][:,:,:, 1:x.tto_rks[1+1]] = x.tto_vec[1]
         tto_vec[1][:,:,:, (x.tto_rks[2]+1):rks[2]] = y.tto_vec[1]
 
-        # interior cores: top-left block <- x, bottom-right block <- y
-        @threads for k in 2:(d-1)
+        for k in 2:(d-1)
             tto_vec[k][:,:, 1:x.tto_rks[k], 1:x.tto_rks[k+1]] = x.tto_vec[k]
             tto_vec[k][:,:, (x.tto_rks[k]+1):rks[k], (x.tto_rks[k+1]+1):rks[k+1]] = y.tto_vec[k]
         end
 
-        # last core
         tto_vec[d][:,:, 1:x.tto_rks[d], 1] = x.tto_vec[d]
         tto_vec[d][:,:, (x.tto_rks[d]+1):rks[d], 1] = y.tto_vec[d]
     end
@@ -382,6 +369,55 @@ function dot_par(A::TTvector{T,N}, B::TTvector{T,N}) where {T<:Number,N}
     end
 
     return C[1]::T
+end
+
+
+"""
+    dot_operator(ψ, H, φ) -> <ψ|H|φ>
+
+Compute the bilinear form <ψ|H|φ> via bidirectional transfer matrix contraction,
+without forming the (potentially huge) product H*φ.
+
+If either ψ or φ is in canonical form (exactly one site with `ttv_ot == 0`), the
+contraction pivots at that center site `c`:
+- Left environment built by a left-to-right sweep over sites 1..c-1.
+- Right environment built by a right-to-left sweep over sites N..c+1.
+- Combined at site c.
+
+When `c = 1` or `c = N` this reduces to a single one-sided sweep. Falls back to a
+full left-to-right sweep when no canonical structure is detected.
+"""
+function dot_operator(ψ::TTvector{T,N}, H::TToperator{T,N}, φ::TTvector{T,N}) where {T,N}
+    # Detect orthogonality center: first site with ot == 0, or N as fallback.
+    # `something` ensures the return type is always Int (type-stable).
+    _center(v) = something(findfirst(isequal(0), v.ttv_ot), N)
+    c = max(_center(ψ), _center(φ))
+
+    # Left environment: sites 1..c
+    L = ones(T, 1, 1, 1)
+    for k in 1:(c>1 ? c : 0)
+        A_k, H_k, B_k = ψ.ttv_vec[k], H.tto_vec[k], φ.ttv_vec[k]
+        @tensoropt L[α,β,γ] := L[α_prev,β_prev,γ_prev] *
+            conj(A_k[i,α_prev,α]) * H_k[i,j,β_prev,β] * B_k[j,γ_prev,γ]
+    end
+
+    # Right environment: sites N..c+1  (empty when c == N) or N...1 (if c == 1)
+    R = ones(T, 1, 1, 1)
+    r = (c<1 ? c+1 : 1)
+    for k in N:-1:r
+        A_k, H_k, B_k = ψ.ttv_vec[k], H.tto_vec[k], φ.ttv_vec[k]
+        @tensoropt R[α,β,γ] := conj(A_k[i,α,α_next]) * H_k[i,j,β,β_next] * B_k[j,γ,γ_next] * R[α_next,β_next,γ_next]
+    end
+
+    # Combine
+    if c == 1
+        result = R
+    elseif c == N
+        result = L
+    else
+        @tensoropt result[] := L[α,β,γ] * R[α,β,γ]
+    end
+    return result[]
 end
 
 
