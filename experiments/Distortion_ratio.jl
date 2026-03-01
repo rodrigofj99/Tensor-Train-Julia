@@ -7,7 +7,7 @@ include("sketches.jl")
 
 
 # Number of independent runs
-num_realizations = 10
+num_realizations = 100
 #Random.seed!(2)
 rng = MersenneTwister(2);
 
@@ -15,7 +15,7 @@ rng = MersenneTwister(2);
 ranks = [1, 2, 5, 10]
 rank_X = 10
 ds = 2#[10, 7, 2] # dimensions
-Ns = 10#[3, 7, 10] # cores
+Ns = 30#[3, 7, 10] # cores
 
 K_max = 10
 #Ks = round.(Int, logrange(1, K_max, length=300))
