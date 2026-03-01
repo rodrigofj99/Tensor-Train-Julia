@@ -204,83 +204,47 @@ println("HF energy (active space, n_cas=$n_cas): $E_hf")
 
 # ── Driver ────────────────────────────────────────────────────────────────────
 
-seed      = rand(Int)
-block_rks = 8
+block_rks  = 16
 orthogonal = true
 
-d1    = 10     # Krylov basis dimension
-rmax1 = 10     # max TT rank for sketching and Ritz vectors
+schedule = [
+    (d=10, rmax=10, sketch_size=200, k_trunc=10, label="rmax=10"),
+    (d=10, rmax=20, sketch_size=500, k_trunc=10, label="rmax=20 (I)"),
+    (d=10, rmax=20, sketch_size=200, k_trunc=10, label="rmax=20 (II)"),
+    (d=10, rmax=20, sketch_size=500, k_trunc=10, label="rmax=20 (III)"),
+    (d=10, rmax=50, sketch_size=200, k_trunc=20, label="rmax=50 (I)"),
+    (d=10, rmax=50, sketch_size=500, k_trunc=20, label="rmax=50 (II)"),
+    (d=10, rmax=50, sketch_size=1000, k_trunc=20, label="rmax=50 (III)"),
+    (d=10, rmax=100, sketch_size=1000, k_trunc=20, label="rmax=100")
+]
 
-d2    = 10     # Krylov basis dimension
-rmax2 = 20     # max TT rank
+e, ψ_rr, stages = sketched_rayleigh_ritz(H, ψ0, schedule;
+                    orthogonal=orthogonal, block_rks=block_rks,
+                    seed=rand(Int), e_nuc=E_nuc,
+                    validate_seed=true)
 
-d3    = 10     # Krylov basis dimension
-rmax3 = 20     # max TT rank
+println("Final energy:    ", e)
+println("True Ritz:       ", dot_operator(ψ_rr, H, ψ_rr) + E_nuc,
+        ";  Error: ", dot_operator(ψ_rr, H, ψ_rr) + E_nuc - e_tot)
+println("Particle number: ", dot_operator(ψ_rr, N, ψ_rr))
 
-e1, ψ_rr, hist1 = sketched_rayleigh_ritz(H, ψ0, d1, rmax1;
-                    orthogonal=orthogonal, block_rks=block_rks, seed=seed, k_trunc=10,
-                    e_nuc=E_nuc)
-println("Sketched ground state:  ", e1)
-println("True Ritz:  ", dot_operator(ψ_rr,H,ψ_rr) + E_nuc,
-        ";  Error: ", dot_operator(ψ_rr,H,ψ_rr) + E_nuc - e_tot)
-println("Particle number:  ", dot_operator(ψ_rr,N,ψ_rr))
-
-seed = seed + 1
-e2, ψ_rr, hist2 = sketched_rayleigh_ritz(H, tt_rounding(ψ_rr, rmax=rmax2), d2, rmax2;
-                    orthogonal=orthogonal, block_rks=block_rks, seed=seed, k_trunc=10,
-                    e_nuc=E_nuc)
-println("Sketched ground state:  ", e2)
-println("True Ritz:  ", dot_operator(ψ_rr,H,ψ_rr) + E_nuc,
-        ";  Error: ", dot_operator(ψ_rr,H,ψ_rr) + E_nuc - e_tot)
-println("Particle number:  ", dot_operator(ψ_rr,N,ψ_rr))
-
-
-seed = seed + 1
-e3, ψ_rr, hist3 = sketched_rayleigh_ritz(H, tt_rounding(ψ_rr, rmax=rmax3), d3, rmax3;
-                    orthogonal=orthogonal, block_rks=block_rks, seed=seed, k_trunc=10,
-                    e_nuc=E_nuc)
-println("Sketched ground state:  ", e3)
-println("True Ritz:  ", dot_operator(ψ_rr,H,ψ_rr) + E_nuc,
-        ";  Error: ", dot_operator(ψ_rr,H,ψ_rr) + E_nuc - e_tot)
-println("Particle number:  ", dot_operator(ψ_rr,N,ψ_rr))
-
-# d    = 10     # Krylov basis dimension
-# rmax = 100     # max TT rank
-# seed = seed + 1
-
-# e, ψ_rr, hist4 = sketched_rayleigh_ritz(H, tt_rounding(ψ_rr, rmax=rmax), d, rmax;
-#                     orthogonal=orthogonal, block_rks=block_rks, seed=seed, k_trunc=5,
-#                     e_nuc=E_nuc)
-# println("Sketched ground state:  ", e)
-# println("True Ritz:  ", dot_operator(ψ_rr,H,ψ_rr) + E_nuc,
-#         ";  Error: ", dot_operator(ψ_rr,H,ψ_rr) + E_nuc - e_tot)
-# println("Particle number:  ", dot_operator(ψ_rr,N,ψ_rr))
-
-v = tt_up_rks(ψ0, rmax1;ϵ_wn=1e-2)
-E_tt1, ψ_tt1, _ = dmrg_eigsolv(H,v;schedule=dmrg_schedule_default(rmax=rmax1)) 
-e_tt1 = E_tt1[end]
-
-v = tt_up_rks(ψ_tt1, rmax2;ϵ_wn=1e-2)
-E_tt2, ψ_tt2, _ = dmrg_eigsolv(H,v;schedule=dmrg_schedule_default(rmax=rmax2), verbose=false) 
-e_tt2 = E_tt2[end]
-
-v = tt_up_rks(ψ_tt2, rmax3;ϵ_wn=1e-2)
-E_tt3, ψ_tt3, _ = dmrg_eigsolv(H,v;schedule=dmrg_schedule_default(rmax=rmax3), verbose=false) 
-e_tt3 = E_tt3[end]
+# ── Optional DMRG reference ───────────────────────────────────────────────────
+rmax_vals = [s.rmax for s in schedule]
+v = tt_up_rks(ψ0, rmax_vals[1]; ϵ_wn=1e-2)
+E_tt, ψ_tt, _ = dmrg_eigsolv(H, v; schedule=dmrg_schedule_default(rmax=rmax_vals[1]))
+dmrg_refs = [E_tt[end] + E_nuc]
+for r in rmax_vals[2:end]
+    v = tt_up_rks(ψ_tt, r; ϵ_wn=1e-2)
+    E_tt, ψ_tt, _ = dmrg_eigsolv(H, v; schedule=dmrg_schedule_default(rmax=r), verbose=false)
+    push!(dmrg_refs, E_tt[end] + E_nuc)
+end
 
 using CairoMakie
 
-# ── Convergence plot (all stages combined) ────────────────────────────────────
-plot_sRR_convergence([
-        ("rmax=$(rmax1)",  hist1),
-        ("rmax=$(rmax2)",  hist2),
-        ("rmax=$(rmax3)",  hist3),
-        # ("rmax=$(rmax4)", hist4),
-    ]; e_ref=e_tot,
-       # dmrg_refs=[e_tt + E_nuc],
-       # dmrg_refs=[e_tt + E_nuc, e_tt3 + E_nuc],
-       dmrg_refs=[e_tt1 + E_nuc, e_tt2 + E_nuc, e_tt3 + E_nuc],
-       # dmrg_refs=[e_tt + E_nuc, e_tt2 + E_nuc, e_tt3 + E_nuc, e_tt4 + E_nuc],
-       filename="convergence.pdf")
+# ── Convergence plot ──────────────────────────────────────────────────────────
+plot_sRR_convergence(stages;
+    e_ref=e_tot,
+    dmrg_refs=dmrg_refs,
+    filename="convergence.pdf")
 
 

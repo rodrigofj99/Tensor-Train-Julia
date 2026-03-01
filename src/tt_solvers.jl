@@ -494,19 +494,14 @@ function sketched_rr(H::TToperator{T,N}, B::Vector{TTvector{T,N}}, C::Matrix{T},
         λs, Y = eigen(M)
         Y = real.(Y)
     end
-
     λs = real.(λs)
     res_sketch = norm(D*Y[:,1] - λs[1]*C*Y[:,1])
-
-    @show res_sketch
 
     # Assemble Ritz vector as TT linear combinations
     y = Y[:, 1] / norm(Y[:,1])
     X = ttrand_rounding(y, collect(B), 4rmax; orthogonal=orthogonal, seed=seed, block_rks=block_rks)
     X = tt_rounding(X; tol=res_sketch^2/2)
     X = X / norm(X)
-
-    @show X.ttv_rks
 
     # Sampled estimate of the true residual ‖H x₁ − λ₁ x₁‖ / ‖x₁‖
     rks_samp  = ones(Int, N+1); rks_samp[1:N] .= N
@@ -551,9 +546,7 @@ vectors is performed after the basis is complete.
 """
 function sketched_rayleigh_ritz(H::TToperator{T,N}, b0::TTvector{T,N}, d::Int, rmax::Int;
                            orthogonal::Bool=true, block_rks=8, seed::Int=1234,
-                           k_trunc::Int=d-1, e_nuc::Real=0.0) where {T,N}
-    sketch_size = 4d # minimum sketch size
-
+                           sketch_size = 4d, k_trunc::Int=d-1, e_nuc::Real=0.0) where {T,N}
     B         = Vector{TTvector{T,N}}(undef, d)
     sketch_b  = Vector{Vector{T}}(undef, d)
     sketch_Hb = Vector{Vector{T}}(undef, d)
@@ -590,20 +583,20 @@ function sketched_rayleigh_ritz(H::TToperator{T,N}, b0::TTvector{T,N}, d::Int, r
         λs, ψ_rr, res_sketch, res_sample = sketched_rr(H, B[1:j-1], C, D, rmax;
                                                      block_rks=block_rks, seed=seed)
         e_sketch = λs[1] + e_nuc
-        println(" dot product:")
         e_true   = dot_operator(ψ_rr, H, ψ_rr) + e_nuc
 
         push!(history, (iter=j-1, e_sketch=e_sketch, e_true=e_true,
                         res_sketch=res_sketch, res_sample=res_sample))
 
-        println("  Sketched Ritz:    ", e_sketch)
-        println("  True Ritz:        ", e_true)
+        println("  Sketched Ritz value:    ", e_sketch)
+        println("  True Ritz value:        ", e_true)
         println("  Sketch residual:  ", res_sketch)
         println("  Sampled residual: ", res_sample)
     end
 
     # ── Final sRR with all d basis vectors ────────────────────────────────────
 
+    println("─── k = $d (final) ─────────────────────────────────────────────")
     sketch_Hb[d], _ = tt_combined_sketch(T, H, B[d], 2rmax, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)
     C = reduce(hcat, sketch_b)
     D = reduce(hcat, sketch_Hb)
@@ -616,11 +609,77 @@ function sketched_rayleigh_ritz(H::TToperator{T,N}, b0::TTvector{T,N}, d::Int, r
     push!(history, (iter=d, e_sketch=e_sketch, e_true=e_true,
                     res_sketch=res_sketch, res_sample=res_sample))
 
-    println("─── k = $d (final) ─────────────────────────────────────────────")
     println("  Sketched Ritz:    ", e_sketch)
     println("  True Ritz:        ", e_true)
     println("  Sketch residual:  ", res_sketch)
     println("  Sampled residual: ", res_sample)
 
     return e_sketch, ψ_rr, history
+end
+
+"""
+    sketched_rayleigh_ritz(H, b0, schedule; ...) -> λ, ψ_rr, stages
+
+Multi-stage sketched Rayleigh-Ritz driven by a rank/dimension schedule.
+
+`schedule` is a `Vector` of `NamedTuple`. Each entry specifies one stage.
+Required fields per entry:
+- `d::Int`: Krylov dimension
+- `rmax::Int`: max TT rank for sketches and Ritz vectors
+
+Optional per-stage fields (fall back to global kwargs when absent):
+- `seed::Int`: random seed (default: global `seed` + stage index − 1)
+- `sketch_size::Int`: sketch dimension (default: `4d`)
+- `k_trunc::Int`: sliding window size (default: `d−1`)
+- `label::String`: legend label (default: `"d=\$d, rmax=\$rmax"`)
+
+At each stage transition the current best Ritz vector is truncated to the new
+`rmax` and used as the starting vector; the Krylov basis is rebuilt from scratch.
+When `validate_seed=true` the seed for each stage is retried (with fresh random
+draws) until the sketch of the initial vector has norm within 10% of 1.
+
+# Returns
+- `λ`: lowest Ritz value + `e_nuc` from the final stage
+- `ψ_rr`: corresponding Ritz vector
+- `stages`: `Vector{Tuple{String,Vector{NamedTuple}}}` — one `(label, history)` pair
+  per stage, directly passable to `plot_sRR_convergence`
+"""
+function sketched_rayleigh_ritz(H::TToperator{T,N}, b0::TTvector{T,N},
+                                  schedule::Vector{<:NamedTuple};
+                                  orthogonal::Bool=true, block_rks::Int=8,
+                                  seed::Int=1234, e_nuc::Real=0.0,
+                                  validate_seed::Bool=false) where {T,N}
+    stages = Tuple{String, Vector{NamedTuple}}[]
+    ψ_rr   = b0
+    λ      = 0.0
+
+    for (i, stage) in enumerate(schedule)
+        d    = stage.d
+        rmax = stage.rmax
+        s    = get(stage, :seed,        seed + i - 1)
+        sk   = get(stage, :sketch_size, 4 * d)
+        kt   = get(stage, :k_trunc,     d - 1)
+        lbl  = get(stage, :label,       "d=$d, rmax=$rmax")
+
+        b_init = i == 1 ? ψ_rr : tt_rounding(ψ_rr; rmax=rmax)
+
+        if validate_seed
+            while abs(norm(tt_combined_sketch(T, b_init, 2rmax, sk;
+                           orthogonal=orthogonal, reverse=true,
+                           seed=s, block_rks=block_rks)[1])^2 - 1) > 0.1
+                s = rand(Int)
+            end
+            println("Stage $i: using seed $s")
+        end
+
+        λ, ψ_rr, hist = sketched_rayleigh_ritz(H, b_init, d, rmax;
+                                                orthogonal=orthogonal,
+                                                block_rks=block_rks,
+                                                seed=s, k_trunc=kt,
+                                                sketch_size=sk,
+                                                e_nuc=e_nuc)
+        push!(stages, (lbl, hist))
+    end
+
+    return λ, ψ_rr, stages
 end
