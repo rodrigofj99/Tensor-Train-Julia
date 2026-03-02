@@ -10,6 +10,7 @@ using CairoMakie
 using Colors
 using JSON3
 using Dates
+using Base.Threads
 
 # Configure CairoMakie for publication-quality plots
 CairoMakie.activate!(type = "pdf")
@@ -152,19 +153,45 @@ function benchmark_structured_sketching(
     target_ranks = [16,32,48,64],
     block_rks_options = [1, 4, 16],
     n_trials = 3,
-    seed = 1234
+    seed = 1234,
+    run_parallel::Bool = true,
+    cluster::Bool = false,
+    verbose::Bool = false
 ) where {T,N}
+
+    # Thread parameter configuration
+    julia_threads = Threads.nthreads()
+
+
+    if julia_threads >1
+        println("Puto")
+    else
+        println("Putaso")
+    end
+
+
+    if run_parallel
+        if cluster
+            math_threads = max(1, floor(Int, julia_threads / n_trials)) 
+            LinearAlgebra.BLAS.set_num_threads(math_threads)
+        else
+            LinearAlgebra.BLAS.set_num_threads(1) # Avoid oversubscription in local runs
+        end
+    end   
     
     println("\n=== Structured Sketching Benchmark ===")
     println("Testing 3-term Hadamard product with structured sketching")
     println("Target ranks: $target_ranks")
     println("Block rank configurations: $block_rks_options")
-    println("Number of trials: $n_trials")
+    println("Number of trials: $n_trials (run_Parallelized)")
     
     exact_norm = norm(exact_solution)
     println("Reference norm: $(@sprintf "%.6e" exact_norm)")
     
     results = Dict{String, Any}()
+    
+    # Create a lock for thread-safe printing (only used if verbose=true)
+    print_lock = ReentrantLock()
     
     for target_rank in target_ranks
         println("\n" * "="^60)
@@ -200,23 +227,26 @@ function benchmark_structured_sketching(
                 println("    ✗ Warm-up failed: $e")
             end
         end
-        println("All warm-ups complete. Starting benchmark trials...\n")
         
+        println("All warm-ups complete. Starting benchmark trials...\n")
+
         # Test deterministic algorithm first
         println("--- Deterministic tt_rounding ---")
         
-        det_errors = Float64[]
-        det_times = Float64[]
-        det_achieved_ranks = Vector{Int}[]
-        det_memory_usage = Int[]
+        det_errors_all = zeros(Float64, n_trials)
+        det_times_all = zeros(Float64, n_trials)
+        det_achieved_ranks_all = Vector{Vector{Int}}(undef, n_trials)
+        det_memory_usage_all = zeros(Int, n_trials)
+        det_success = zeros(Bool, n_trials)
         
-        for trial in 1:n_trials
+        run_deterministic_trial = (trial) -> begin
             try
                 # Compute Hadamard product
                 product = ttvectors[1] * ttvectors[2] * ttvectors[3]
                 
                 # Deterministic rounding with timing
                 timer = TimerOutput()
+                local compressed 
                 @timeit timer "tt_rounding" begin
                     compressed = tt_rounding(product; rmax=target_rank)
                 end
@@ -229,26 +259,54 @@ function benchmark_structured_sketching(
                 
                 # Compute error against exact solution
                 error = norm(exact_solution - compressed) / exact_norm
-                
+
                 # Extract timing from TimerOutput
-                main_time = TimerOutputs.time(timer["tt_rounding"]) / 1e9  # Convert to seconds
+                main_time = TimerOutputs.time(timer["tt_rounding"]) / 1e9
                 
                 # Store results
-                push!(det_errors, error)
-                push!(det_times, main_time)
-                push!(det_achieved_ranks, compressed.ttv_rks)
-                push!(det_memory_usage, allocs)
+                det_errors_all[trial] = error
+                det_times_all[trial] = main_time
+                det_achieved_ranks_all[trial] = compressed.ttv_rks
+                det_memory_usage_all[trial] = allocs
+                det_success[trial] = true
                 
-                println("  Trial $trial:")
-                println("    Achieved ranks: $(compressed.ttv_rks)")
-                println("    Relative error: $(@sprintf "%.4e" error)")
-                println("    Total time: $(@sprintf "%.3f" main_time*1000) ms")
-                println("    Memory: $(@sprintf "%.2f" allocs/1024^2) MB")
+                # ONLY lock and print if verbose is requested
+                if verbose
+                    lock(print_lock) do
+                        println("  Trial $trial:")
+                        println("    Achieved ranks: $(compressed.ttv_rks)")
+                        println("    Relative error: $(@sprintf "%.4e" error)")
+                        println("    Total time: $(@sprintf "%.3f" main_time*1000) ms")
+                        println("    Memory: $(@sprintf "%.2f" allocs/1024^2) MB")
+                    end
+                end
                 
             catch e
-                println("  Trial $trial: ✗ Failed with error: $e")
+                if verbose
+                    lock(print_lock) do
+                        println("  Trial $trial: ✗ Failed with error: $e")
+                    end
+                end
             end
         end
+
+        if run_parallel
+            # Spawn multiple threads
+            Threads.@threads for trial in 1:n_trials
+                run_deterministic_trial(trial)
+            end
+        else
+            # Run strictly sequentially on the main thread
+            for trial in 1:n_trials
+                run_deterministic_trial(trial)
+            end
+        end
+        
+        valid_det_idxs = findall(det_success)
+        det_errors = det_errors_all[valid_det_idxs]
+        det_times = det_times_all[valid_det_idxs]
+        det_achieved_ranks = det_achieved_ranks_all[valid_det_idxs]
+        det_memory_usage = det_memory_usage_all[valid_det_idxs]
         
         if !isempty(det_errors)
             # Store deterministic results
@@ -285,17 +343,6 @@ function benchmark_structured_sketching(
         
         # Test structured sketching with different block rank configurations
         for block_rks in block_rks_options
-            """
-            block_name = if block_rks == 1
-                "Khatri-Rao (R=1)"
-            elseif block_rks == 4
-                "Small blocks (R=4)" 
-            elseif block_rks == 8
-                "Large blocks (R=8)"
-            else
-                "Custom (R=$block_rks)"
-            end
-            """
             block_name = if block_rks == 1
                 "R=1 (Khatri-Rao)"
             elseif block_rks == 4
@@ -311,15 +358,15 @@ function benchmark_structured_sketching(
             println("\n--- $block_name ---")
             
             # Test across multiple trials for stability
-            errors = Float64[]
-            timer_results = TimerOutput[]
-            achieved_ranks = Vector{Int}[]
-            memory_usage = Int[]
+            errors_all = zeros(Float64, n_trials)
+            timer_results_all = Vector{TimerOutput}(undef, n_trials)
+            achieved_ranks_all = Vector{Vector{Int}}(undef, n_trials)
+            memory_usage_all = zeros(Int, n_trials)
+            rand_success = zeros(Bool, n_trials)
             
-
             ttrand_rounding(ttvectors, target_rks; block_rks=block_rks, seed=seed) #Why is this here? It seems like a warm-up 
 
-            for trial in 1:n_trials
+            run_randomized_trial = (trial) -> begin
                 try
                     # Randomized sketching with detailed timing
                     timer = TimerOutput()
@@ -344,50 +391,92 @@ function benchmark_structured_sketching(
                     error = norm(exact_solution - compressed) / exact_norm
                     
                     # Store results
-                    push!(errors, error)
-                    push!(timer_results, timer)
-                    push!(achieved_ranks, compressed.ttv_rks)
-                    push!(memory_usage, allocs)
+                    errors_all[trial] = error
+                    timer_results_all[trial] = timer
+                    achieved_ranks_all[trial] = compressed.ttv_rks
+                    memory_usage_all[trial] = allocs
+                    rand_success[trial] = true
                     
                     # Extract main timing from TimerOutput
-                    main_time = TimerOutputs.time(timer["ttrand_rounding"]) / 1e9  # Convert to seconds
+                    main_time = TimerOutputs.time(timer["ttrand_rounding"]) / 1e9
                     
-                    println("  Trial $trial:")
-                    println("    Achieved ranks: $(compressed.ttv_rks)")
-                    println("    Relative error: $(@sprintf "%.4e" error)")
-                    println("    Total time: $(@sprintf "%.3f" main_time*1000) ms")
-                    println("    Memory: $(@sprintf "%.2f" allocs/1024^2) MB")
-                    
-                    # Show detailed timing breakdown for first trial
-                    if trial == 1
-                        println("    Timing breakdown:")
-                        for (name, nested_timer) in timer.inner_timers["ttrand_rounding"].inner_timers
-                            nested_time = TimerOutputs.time(nested_timer) / 1e9
-                            println("      $name: $(@sprintf "%.3f" nested_time*1000) ms")
+                    # ONLY lock and print if verbose is requested
+                    if verbose
+                        lock(print_lock) do
+                            println("  Trial $trial:")
+                            println("    Achieved ranks: $(compressed.ttv_rks)")
+                            println("    Relative error: $(@sprintf "%.4e" error)")
+                            println("    Total time: $(@sprintf "%.3f" main_time*1000) ms")
+                            println("    Memory: $(@sprintf "%.2f" allocs/1024^2) MB")
+                            
+                            # Show detailed timing breakdown for first trial
+                            if trial == 1
+                                println("    Timing breakdown:")
+                                for (name, nested_timer) in timer.inner_timers["ttrand_rounding"].inner_timers
+                                    nested_time = TimerOutputs.time(nested_timer) / 1e9
+                                    println("      $name: $(@sprintf "%.3f" nested_time*1000) ms")
+                                end
+                            end
                         end
                     end
                     
                 catch e
-                    println("  Trial $trial: ✗ Failed with error: $e")
+                    if verbose
+                        lock(print_lock) do
+                            println("  Trial $trial: ✗ Failed with error: $e")
+                        end
+                    end
+                end
+            end
+
+            if run_parallel
+                # Spawn multiple threads
+                Threads.@threads for trial in 1:n_trials
+                    run_randomized_trial(trial)
+                end
+            else
+                # Run strictly sequentially on the main thread
+                for trial in 1:n_trials
+                    run_randomized_trial(trial)
                 end
             end
             
+            valid_rand_idxs = findall(rand_success)
+            errors = errors_all[valid_rand_idxs]
+            timer_results = timer_results_all[valid_rand_idxs]
+            achieved_ranks = achieved_ranks_all[valid_rand_idxs]
+            memory_usage = memory_usage_all[valid_rand_idxs]
+            
             if !isempty(errors)
-                # Extract timing data from TimerOutput results
-                main_times = [TimerOutputs.time(timer["ttrand_rounding"]) / 1e9 for timer in timer_results]
-                sketch_times = Float64[]
-                orthog_times = Float64[]
+                n_valid = length(timer_results)
+                main_times = Vector{Float64}(undef, n_valid)
+                sketch_times = Vector{Float64}(undef, n_valid)
+                orthog_times = Vector{Float64}(undef, n_valid)
                 
-                # Extract detailed timing components
-                for timer in timer_results
-                    ttrand_timer = timer["ttrand_rounding"]
+                # Flags to track if the sub-timers actually exist
+                has_sketch = false
+                has_orthog = false
+                
+                # Extract data in a single, index-based pass
+                for i in 1:n_valid
+                    ttrand_timer = timer_results[i]["ttrand_rounding"]
+                    
+                    # Main time is guaranteed
+                    main_times[i] = TimerOutputs.time(ttrand_timer) / 1e9
+                    
+                    # Check and assign sketch time
                     if haskey(ttrand_timer.inner_timers, "reverse_sketch")
-                        push!(sketch_times, TimerOutputs.time(ttrand_timer["reverse_sketch"]) / 1e9)
+                        sketch_times[i] = TimerOutputs.time(ttrand_timer["reverse_sketch"]) / 1e9
+                        has_sketch = true
                     end
+                    
+                    # Check and assign orthogonalization time
                     if haskey(ttrand_timer.inner_timers, "orthogonalization sweep")
-                        push!(orthog_times, TimerOutputs.time(ttrand_timer["orthogonalization sweep"]) / 1e9)
+                        orthog_times[i] = TimerOutputs.time(ttrand_timer["orthogonalization sweep"]) / 1e9
+                        has_orthog = true
                     elseif haskey(ttrand_timer.inner_timers, "orthogonalization")
-                        push!(orthog_times, TimerOutputs.time(ttrand_timer["orthogonalization"]) / 1e9)
+                        orthog_times[i] = TimerOutputs.time(ttrand_timer["orthogonalization"]) / 1e9
+                        has_orthog = true
                     end
                 end
                 
@@ -397,8 +486,9 @@ function benchmark_structured_sketching(
                     "block_name" => block_name,
                     "errors" => errors,
                     "main_times" => main_times,
-                    "sketch_times" => sketch_times,
-                    "orthog_times" => orthog_times,
+                    # If keys didn't exist, store empty arrays instead of undef garbage
+                    "sketch_times" => has_sketch ? sketch_times : Float64[],
+                    "orthog_times" => has_orthog ? orthog_times : Float64[],
                     "memory_usage" => memory_usage,
                     "achieved_ranks" => achieved_ranks,
                     "timer_results" => timer_results,
@@ -406,8 +496,8 @@ function benchmark_structured_sketching(
                     "std_error" => std(errors),
                     "median_time" => median(main_times),
                     "std_time" => std(main_times),
-                    "median_sketch_time" => isempty(sketch_times) ? 0.0 : median(sketch_times),
-                    "median_orthog_time" => isempty(orthog_times) ? 0.0 : median(orthog_times),
+                    "median_sketch_time" => has_sketch ? median(sketch_times) : 0.0,
+                    "median_orthog_time" => has_orthog ? median(orthog_times) : 0.0,
                     "median_memory" => median(memory_usage),
                     "success_rate" => length(errors) / n_trials
                 )
@@ -416,12 +506,15 @@ function benchmark_structured_sketching(
                 println("  Summary:")
                 println("    median error: $(@sprintf "%.4e" median(errors)) ± $(@sprintf "%.3e" std(errors))")
                 println("    median total time: $(@sprintf "%.3f" median(main_times)*1000) ± $(@sprintf "%.3f" std(main_times)*1000) ms")
-                if !isempty(sketch_times)
+                
+                # Only print sub-times if they were actually recorded
+                if has_sketch
                     println("    median sketch time: $(@sprintf "%.3f" median(sketch_times)*1000) ms")
                 end
-                if !isempty(orthog_times)
+                if has_orthog
                     println("    median orthog time: $(@sprintf "%.3f" median(orthog_times)*1000) ms")
                 end
+                
                 println("    median memory: $(@sprintf "%.2f" median(memory_usage)/1024^2) MB")
                 println("    Success rate: $(length(errors))/$n_trials")
             else
@@ -779,22 +872,7 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
                     markersize = 8, strokewidth = 1, strokecolor = :white)
         end
     end
-    """
-    # Define colors and markers for consistent styling
-    colors = Dict(
-        :deterministic => :black,
-        :khatri_rao => :red,
-        :small_blocks => :blue,
-        :large_blocks => :green
-    )
-    
-    markers = Dict(
-        :deterministic => :star8,
-        :khatri_rao => :circle,
-        :small_blocks => :rect,
-        :large_blocks => :diamond
-    )"""
-    
+
     # Accuracy comparison plot
     println("Creating accuracy comparison plot...")
     
@@ -1219,8 +1297,8 @@ end
 """
 Load benchmark results from JSON file if it exists
 """
-function load_benchmark_results(save_dir="out/hadamard_benchmarks")
-    results_file = joinpath(save_dir, "hadamard_benchmark_results.json")
+function load_benchmark_results(load_dir="out/hadamard_benchmarks")
+    results_file = joinpath(load_dir, "hadamard_benchmark_results.json")
     
     if isfile(results_file)
         println("Found existing results file: $results_file")
@@ -1307,7 +1385,11 @@ function run_quantics_hadamard_benchmark(;
     block_rks_options = [1, 4, 8],      # Block rank configurations
     n_trials = 3,                        # Number of trials per configuration
     seed = 1234,
-    force_rerun = false                  # Force rerun experiments even if results exist
+    force_rerun = false,                  # Force rerun experiments even if results exist
+    dir = "out/hadamard_benchmarks",
+    run_parallel = true,
+    cluster = false,
+    verbose = false
 )
     Random.seed!(seed)
     
@@ -1327,7 +1409,7 @@ function run_quantics_hadamard_benchmark(;
     
     if !force_rerun
         println("Checking for existing benchmark results...")
-        existing_results, existing_metadata = load_benchmark_results()
+        existing_results, existing_metadata = load_benchmark_results(dir)
         
         # Verify that existing results match current parameters
         if existing_results !== nothing && existing_metadata !== nothing
@@ -1373,7 +1455,10 @@ function run_quantics_hadamard_benchmark(;
             target_ranks=target_ranks,
             block_rks_options=block_rks_options,
             n_trials=n_trials,
-            seed=seed
+            seed=seed,
+            run_parallel=run_parallel,
+            cluster=cluster,
+            verbose=verbose
         )
         
         # Step 4: Save new results
@@ -1388,7 +1473,7 @@ function run_quantics_hadamard_benchmark(;
             "description" => "QuanticsTCI Hadamard product sketching benchmark with block rank comparison"
         )
         
-        results_file = save_benchmark_results(results, metadata)
+        results_file = save_benchmark_results(results, metadata, dir)
         println("New benchmark data saved to: $results_file")
     end
     
@@ -1401,7 +1486,7 @@ function run_quantics_hadamard_benchmark(;
     println("CREATING VISUALIZATION PLOTS")
     println("="^60)
 
-    plot_files = create_hadamard_benchmark_plots(results)
+    plot_files = create_hadamard_benchmark_plots(results, dir)
     println("Plot files created: $(length(plot_files)) files")
     
     println("\n" * "="^80)
@@ -1412,13 +1497,58 @@ function run_quantics_hadamard_benchmark(;
         println("  • $file")
     end
     if results !== nothing
-        println("  • out/hadamard_benchmarks/hadamard_benchmark_results.json")
+        println("  • $dir/hadamard_benchmark_results.json")
     end
     
     return final_results, ttvectors, exact_solution
 end
 
-"""
+
+# Run benchmark when script is executed directly
+if abspath(PROGRAM_FILE) == @__FILE__
+    results, ttvectors, exact_solution = run_quantics_hadamard_benchmark(
+        R=20,  # Smaller scale for testing
+        target_ranks=[32, 64, 96, 128, 160, 192, 224, 256, 288, 320],
+        block_rks_options=[1, 4, 16, 32], 
+        n_trials=10,
+        run_parallel=false,
+        cluster=false,
+        verbose=false,
+        dir = "out/hadamard_benchmarks" #   Laptop
+        #dir = "/scratch/BSTT/hadamard_benchmarks" # Cluster
+    )
+end
+
+global results, ttvectors, exact_solution = run_quantics_hadamard_benchmark(
+        R=20,  # Smaller scale for testing
+        target_ranks=[32, 64, 96, 128, 160, 192, 224, 256, 288, 320],
+        block_rks_options=[1, 4, 16, 32], 
+        n_trials=10,
+        run_parallel=false,
+        cluster=false,
+        verbose=false,
+        dir = "out/hadamard_benchmarks" #   Laptop
+        #dir = "/scratch/BSTT/hadamard_benchmarks" # Cluster
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    """
 Create plots from existing results without running experiments
 """
 function create_plots_from_existing_results(save_dir="out/hadamard_benchmarks")
@@ -1452,24 +1582,3 @@ function create_plots_from_existing_results(save_dir="out/hadamard_benchmarks")
     
     return plot_files
 end
-
-# Run benchmark when script is executed directly
-if abspath(PROGRAM_FILE) == @__FILE__
-    results, ttvectors, exact_solution = run_quantics_hadamard_benchmark(
-        R=20,  # Smaller scale for testing
-        #target_ranks=[8,16,24,32,40,48,56,64,72,80],
-        #block_rks_options=[1, 4, 8], 
-        target_ranks=[32, 64, 96, 128, 160, 192, 224, 256, 288, 320],
-        block_rks_options=[1, 4, 16, 32], 
-        n_trials=100
-    )
-end
-
-global results, ttvectors, exact_solution = run_quantics_hadamard_benchmark(
-        R=20,  # Smaller scale for testing
-        #target_ranks=[8,16,24,32,40,48,56,64,72,80],
-        #block_rks_options=[1, 4, 8], 
-        target_ranks=[32, 64, 96, 128, 160, 192, 224, 256, 288, 320],
-        block_rks_options=[1, 4, 16, 32], 
-        n_trials=100
-    )
