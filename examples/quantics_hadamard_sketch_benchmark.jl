@@ -161,15 +161,6 @@ function benchmark_structured_sketching(
 
     # Thread parameter configuration
     julia_threads = Threads.nthreads()
-
-
-    if julia_threads >1
-        println("Puto")
-    else
-        println("Putaso")
-    end
-
-
     if run_parallel
         if cluster
             math_threads = max(1, floor(Int, julia_threads / n_trials)) 
@@ -187,6 +178,7 @@ function benchmark_structured_sketching(
     
     exact_norm = norm(exact_solution)
     println("Reference norm: $(@sprintf "%.6e" exact_norm)")
+    flush(stdout) # <--- Force the text to appear in the Slurm output file
     
     results = Dict{String, Any}()
     
@@ -232,7 +224,8 @@ function benchmark_structured_sketching(
 
         # Test deterministic algorithm first
         println("--- Deterministic tt_rounding ---")
-        
+        flush(stdout) # <--- Force the text to appear in the Slurm output file
+
         det_errors_all = zeros(Float64, n_trials)
         det_times_all = zeros(Float64, n_trials)
         det_achieved_ranks_all = Vector{Vector{Int}}(undef, n_trials)
@@ -292,7 +285,7 @@ function benchmark_structured_sketching(
 
         if run_parallel
             # Spawn multiple threads
-            Threads.@threads for trial in 1:n_trials
+            Threads.@threads :dynamic for trial in 1:n_trials
                 run_deterministic_trial(trial)
             end
         else
@@ -331,6 +324,7 @@ function benchmark_structured_sketching(
             println("    median total time: $(@sprintf "%.3f" median(det_times)*1000) ± $(@sprintf "%.3f" std(det_times)*1000) ms")
             println("    median memory: $(@sprintf "%.2f" median(det_memory_usage)/1024^2) MB")
             println("    Success rate: $(length(det_errors))/$n_trials")
+            flush(stdout) # <--- Force the text to appear in the Slurm output file
         else
             println("  ✗ All trials failed for deterministic method")
             rank_results["deterministic"] = Dict(
@@ -431,7 +425,7 @@ function benchmark_structured_sketching(
 
             if run_parallel
                 # Spawn multiple threads
-                Threads.@threads for trial in 1:n_trials
+                Threads.@threads :dynamic for trial in 1:n_trials
                     run_randomized_trial(trial)
                 end
             else
@@ -517,6 +511,8 @@ function benchmark_structured_sketching(
                 
                 println("    median memory: $(@sprintf "%.2f" median(memory_usage)/1024^2) MB")
                 println("    Success rate: $(length(errors))/$n_trials")
+
+                flush(stdout) # <--- Force the text to appear in the Slurm output file
             else
                 println("  ✗ All trials failed for $block_name")
                 rank_results["block_rks_$block_rks"] = Dict(
@@ -1510,12 +1506,12 @@ if abspath(PROGRAM_FILE) == @__FILE__
         R=20,  # Smaller scale for testing
         target_ranks=[32, 64, 96, 128, 160, 192, 224, 256, 288, 320],
         block_rks_options=[1, 4, 16, 32], 
-        n_trials=10,
-        run_parallel=false,
-        cluster=false,
+        n_trials=100,
+        run_parallel=true,
+        cluster=true,
         verbose=false,
-        dir = "out/hadamard_benchmarks" #   Laptop
-        #dir = "/scratch/BSTT/hadamard_benchmarks" # Cluster
+        #dir = "out/hadamard_benchmarks" #   Laptop
+        dir = "~/scratch/BSTT/out/hadamard_benchmarks" # Cluster
     )
 end
 
@@ -1523,12 +1519,12 @@ global results, ttvectors, exact_solution = run_quantics_hadamard_benchmark(
         R=20,  # Smaller scale for testing
         target_ranks=[32, 64, 96, 128, 160, 192, 224, 256, 288, 320],
         block_rks_options=[1, 4, 16, 32], 
-        n_trials=10,
-        run_parallel=false,
-        cluster=false,
+        n_trials=100,
+        run_parallel=true,
+        cluster=true,
         verbose=false,
-        dir = "out/hadamard_benchmarks" #   Laptop
-        #dir = "/scratch/BSTT/hadamard_benchmarks" # Cluster
+        #dir = "out/hadamard_benchmarks" #   Laptop
+        dir = "~/scratch/BSTT/out/hadamard_benchmarks" # Cluster
     )
 
 
