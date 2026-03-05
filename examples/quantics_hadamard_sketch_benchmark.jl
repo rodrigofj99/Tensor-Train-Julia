@@ -1504,27 +1504,25 @@ end
 if abspath(PROGRAM_FILE) == @__FILE__
     results, ttvectors, exact_solution = run_quantics_hadamard_benchmark(
         R=20,  # Smaller scale for testing
-        target_ranks=[32, 64, 96, 128, 160, 192, 224, 256, 288, 320],
-        block_rks_options=[1, 4, 16, 32], 
+        target_ranks=[16, 32, 48, 64, 80, 96],
+        block_rks_options=[1, 4, 8, 16], 
         n_trials=100,
-        run_parallel=true,
+        run_parallel=false,
         cluster=true,
         verbose=false,
-        #dir = "out/hadamard_benchmarks" #   Laptop
-        dir = "~/scratch/BSTT/out/hadamard_benchmarks" # Cluster
+        dir = "out/hadamard_benchmarks"
     )
 end
 
 global results, ttvectors, exact_solution = run_quantics_hadamard_benchmark(
         R=20,  # Smaller scale for testing
-        target_ranks=[32, 64, 96, 128, 160, 192, 224, 256, 288, 320],
-        block_rks_options=[1, 4, 16, 32], 
+        target_ranks=[16, 32, 48, 64, 80, 96],
+        block_rks_options=[1, 4, 8, 16], 
         n_trials=100,
-        run_parallel=true,
+        run_parallel=false,
         cluster=true,
         verbose=false,
-        #dir = "out/hadamard_benchmarks" #   Laptop
-        dir = "~/scratch/BSTT/out/hadamard_benchmarks" # Cluster
+        dir = "out/hadamard_benchmarks"
     )
 
 

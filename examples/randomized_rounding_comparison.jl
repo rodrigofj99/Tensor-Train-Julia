@@ -35,11 +35,12 @@ function synthetic_experiment(;
     block_rks_list = [1, 4, 8],                # Block ranks to test
     n_realizations = 10,                       # Realizations for randomized methods
     seed = 1234,
-    force_rerun = false
+    force_rerun = false,
+    dir = "out/randomized_rounding"
 )
     # Check if results already exist
-    mkpath("out/randomized_rounding")
-    filename = "out/randomized_rounding/rank$(base_rank)_summands$(n_summands)_N$(N)_d$(d).json"
+    mkpath(dir)
+    filename = "$dir/rank$(base_rank)_summands$(n_summands)_N$(N)_d$(d).json"
 
     if !force_rerun && isfile(filename)
         println("=== Perturbed Rank-$(base_rank) Experiment ===")
@@ -286,11 +287,11 @@ end
 """
 Create plot showing error vs Noise Level for all methods
 """
-function create_perturbation_plot(results, ε_list, block_rks_list)
+function create_perturbation_plot(results, ε_list, block_rks_list, dir = "out/randomized_rounding")
     # Ensure proper types for plotting
     ε_list = Float64.(ε_list)
     block_rks_list = Int.(block_rks_list)
-    mkpath("out/randomized_rounding/plots")
+    mkpath("$dir/plots")
 
     # Configure CairoMakie for publication-quality plots
     CairoMakie.activate!(type = "pdf")
@@ -442,7 +443,7 @@ function create_perturbation_plot(results, ε_list, block_rks_list)
         display(fig)
         
         # Save the plot
-        save("out/randomized_rounding/plots/rank$(results["base_rank"])_summands$(results["n_summands"])_N$(results["N"])_d$(results["d"]).pdf", fig)
+        save("$dir/plots/rank$(results["base_rank"])_summands$(results["n_summands"])_N$(results["N"])_d$(results["d"]).pdf", fig)
         println("Plot saved as PDF")
     end
 end
@@ -450,8 +451,8 @@ end
 """
 Create combined plot comparing both tensor structures
 """
-function create_combined_plot(results1, results2, ε_list, block_rks_list)
-    mkpath("out/randomized_rounding/plots")
+function create_combined_plot(results1, results2, ε_list, block_rks_list, dir = "out/randomized_rounding")
+    mkpath("$dir/plots")
 
     # Configure CairoMakie for publication-quality plots
     CairoMakie.activate!(type = "pdf")
@@ -616,7 +617,7 @@ function create_combined_plot(results1, results2, ε_list, block_rks_list)
         display(fig)
         
         # Save the combined plot
-        save("out/randomized_rounding/plots/combined_comparison_N$(results1["N"])_d$(results1["d"]).pdf", fig)
+        save("$dir/plots/combined_comparison_N$(results1["N"])_d$(results1["d"]).pdf", fig)
         println("Combined plot saved as PDF")
     end
 end
@@ -629,13 +630,14 @@ function run_randomized_rounding_experiments(; force_rerun = false)
     println("RANDOMIZED ROUNDING COMPARISON EXPERIMENTS")
     println("="^70)
 
-    N = 20
+    N = 50
     d = 4
-    base_rank = 32
-    block_rks_list = [1, 4, 16, 32]     #Embedding dimension m = base_rank/block_rks
+    base_rank = 16
+    block_rks_list = [1, 4, 8, 16]     #Embedding dimension m = base_rank/block_rks
     perturbation_strengths = 10.0.^(-6:-1)
     perturbation_rank = 50
     n_realizations = 100
+    dir = "out/randomized_rounding"
 
     # Run experiment 1: 8 summands of rank 1
     println("\n--- EXPERIMENT 1: 16 summands of rank 1 ---")
@@ -648,7 +650,8 @@ function run_randomized_rounding_experiments(; force_rerun = false)
         perturbation_rank = perturbation_rank,
         block_rks_list = block_rks_list,
         n_realizations = n_realizations,
-        force_rerun = force_rerun
+        force_rerun = force_rerun,
+        dir = dir
     )
     
     # Run experiment 2: 1 summand of rank 8
@@ -662,12 +665,13 @@ function run_randomized_rounding_experiments(; force_rerun = false)
         perturbation_rank = perturbation_rank,
         block_rks_list = block_rks_list,
         n_realizations = n_realizations,
-        force_rerun = force_rerun
+        force_rerun = force_rerun,
+        dir = dir
     )
 
     # Create combined plot
     println("\n--- Creating combined comparison plot ---")
-    create_combined_plot(results_16x1, results_1x16, perturbation_strengths, block_rks_list)
+    create_combined_plot(results_16x1, results_1x16, perturbation_strengths, block_rks_list, dir)
 
     println("\n" * "="^70)
     println("EXPERIMENTS COMPLETED")
