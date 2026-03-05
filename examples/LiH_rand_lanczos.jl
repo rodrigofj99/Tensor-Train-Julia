@@ -92,7 +92,55 @@ function load_or_build_mpo(fcidump::String, n_cas::Int, tol_mpo::Float64, μ::Fl
     return H, E_nuc-n_elec*μ, n_elec
 end
 
-# ── dot_operator, expand_basis!, sketched_rr, sketched_rayleigh_ritz are in TensorTrains ──
+
+"""
+    save_sRR_results(filename, stages, seeds, schedule, λ)
+
+Serialize sRR output to a JSON file.  The file stores:
+- `final_energy`: the last Ritz value (including `e_nuc`)
+- `seeds`: actual seeds used per stage
+- `schedule`: the stage parameters (NamedTuple fields)
+- `stages`: one object per stage with `label` and `history` array
+"""
+function save_sRR_results(filename::String,
+                          stages,
+                          seeds::Vector{Int},
+                          schedule::Vector{<:NamedTuple},
+                          λ::Real)
+    data = (
+        final_energy = λ,
+        seeds        = seeds,
+        schedule     = schedule,
+        stages       = [(label=lbl, history=hist) for (lbl, hist) in stages],
+    )
+    open(filename, "w") do io
+        JSON3.pretty(io, data)
+    end
+    println("sRR results saved to $filename")
+end
+
+"""
+    load_sRR_results(filename) -> stages, seeds, λ
+
+Load sRR results previously written by `save_sRR_results`.
+Returns `stages` in the format expected by `plot_sRR_convergence`.
+"""
+function load_sRR_results(filename::String)
+    raw = JSON3.read(read(filename, String))
+    stages = [
+        (String(s.label),
+         [(iter       = Int(h.iter),
+           e_sketch   = Float64(h.e_sketch),
+           e_true     = Float64(h.e_true),
+           res_sketch = Float64(h.res_sketch),
+           res_sample = Float64(h.res_sample))
+          for h in s.history])
+        for s in raw.stages
+    ]
+    seeds = Vector{Int}(raw.seeds)
+    return stages, seeds, Float64(raw.final_energy)
+end
+
 
 """
     plot_sRR_convergence(stages; e_ref, filename) -> Figure
@@ -119,70 +167,118 @@ function plot_sRR_convergence(stages; e_ref=nothing, dmrg_refs=nothing, filename
         stages = [("", stages)]
     end
 
-    palette = Makie.wong_colors()
+    n      = length(stages)
+    _cg    = cgrad(:plasma)
+    _cmap  = cgrad([_cg[t] for t in range(0.0, 0.85, length=256)])
+    colors = [_cg[t] for t in range(0.0, 0.85, length=n)]
 
-    fig = Figure(size=(860, 430), fontsize=12)
+    theme = Theme(
+        fontsize  = 12,
+        font      = "Computer Modern",
+        linewidth = 2,
+        Axis = (
+            titlesize          = 12,
+            xlabelsize         = 11,
+            ylabelsize         = 11,
+            xticklabelsize     = 10,
+            yticklabelsize     = 10,
+            spinewidth         = 1.5,
+            xtickwidth         = 1.5,
+            ytickwidth         = 1.5,
+            xgridwidth         = 0.75,
+            ygridwidth         = 0.75,
+            xgridcolor         = :gray90,
+            ygridcolor         = :gray90,
+            xgridvisible       = true,
+            ygridvisible       = true,
+            topspinevisible    = true,
+            rightspinevisible  = true,
+            leftspinecolor     = :black,
+            rightspinecolor    = :black,
+            topspinecolor      = :black,
+            bottomspinecolor   = :black,
+        ),
+        Legend = (
+            labelsize       = 11,
+            titlesize       = 11,
+            framevisible    = true,
+            backgroundcolor = (:white, 0.9),
+            framecolor      = :black,
+            framewidth      = 1,
+        ),
+    )
 
-    ylabel_left = isnothing(e_ref) ? "E  (Ha)" : "|E − Eref|  (Ha)"
-    title_left  = isnothing(e_ref) ? "Ground state energy" : "Ground state energy error"
-    yscale_left = isnothing(e_ref) ? identity : log10
+    with_theme(theme) do
+        ylabel_left = isnothing(e_ref) ? L"$E$ (Ha)" :
+                      L"$\langle \psi | H | \psi \rangle - E_\mathrm{ref}$ (Ha)"
+        title_left  = isnothing(e_ref) ? L"\text{Ground state energy}" : L"\text{Ground state energy error}"
+        yscale_left = isnothing(e_ref) ? identity : log10
 
-    ax1 = Axis(fig[1, 1], xlabel="Iteration count",
-               ylabel=ylabel_left, title=title_left, yscale=yscale_left)
-    ax2 = Axis(fig[1, 2], xlabel="Iteration count",
-               ylabel="Residual", title="Residual convergence", yscale=log10)
+        fig = Figure(size=(624, 380))
 
-    offset = 0
-    for (i, (label, history)) in enumerate(stages)
-        iters       = [h.iter + offset     for h in history]
-        vals_sketch = [h.e_sketch          for h in history]
-        vals_true   = [h.e_true            for h in history]
-        res_sketch  = [h.res_sketch        for h in history]
-        res_sample  = [h.res_sample        for h in history]
+        ax1 = Axis(fig[1, 1], xlabel=L"\text{Iteration count}",
+                   ylabel=ylabel_left, title=title_left, yscale=yscale_left)
+        ax2 = Axis(fig[1, 2], xlabel=L"\text{Iteration count}",
+                   ylabel=L"Estimated $\Vert H\psi - \lambda\psi \Vert^2$",
+                   title=L"\text{Residual convergence}", yscale=log10)
 
-        c = palette[i]
+        offset = 0
+        for (i, (label, history)) in enumerate(stages)
+            iters       = [h.iter + offset for h in history]
+            vals_sketch = [h.e_sketch      for h in history]
+            vals_true   = [h.e_true        for h in history]
+            res_sketch  = [h.res_sketch    for h in history]
+            res_sample  = [h.res_sample    for h in history]
 
-        if isnothing(e_ref)
-            scatterlines!(ax1, iters, vals_sketch, color=c)
-            scatterlines!(ax1, iters, vals_true,   color=c, linestyle=:dash)
-        else
-            nan_neg(v) = v > 0 ? v : NaN
-            scatterlines!(ax1, iters, abs.(vals_sketch .- e_ref), color=c)
-            scatterlines!(ax1, iters, nan_neg.(vals_true   .- e_ref), color=c, linestyle=:dash)
+            c = colors[i]
+
+            if isnothing(e_ref)
+                lines!(ax1, iters, vals_true,   color=c)
+                lines!(ax1, iters, vals_sketch, color=c, linestyle=:dash)
+            else
+                nan_pos(v) = v > 0 ? v : NaN
+                lines!(ax1, iters, nan_pos.(vals_true   .- e_ref), color=c)
+                lines!(ax1, iters, abs.(vals_sketch .- e_ref),     color=c, linestyle=:dash)
+            end
+            lines!(ax2, iters, res_sample.^2, color=c)
+            lines!(ax2, iters, res_sketch.^2, color=c, linestyle=:dash)
+
+            # DMRG reference line for this stage (left panel only)
+            if !isnothing(dmrg_refs) && i <= length(dmrg_refs) && !isnothing(dmrg_refs[i])
+                val = isnothing(e_ref) ? dmrg_refs[i] : dmrg_refs[i] - e_ref
+                val > 0 && lines!(ax1, [iters[1], iters[end]], [val, val],
+                                  color=c, linestyle=:dot, linewidth=1.5)
+            end
+
+            offset = iters[end]
         end
-        scatterlines!(ax2, iters, res_sketch, color=c)
-        scatterlines!(ax2, iters, res_sample, color=c, linestyle=:dash)
 
-        # DMRG reference line for this stage (left panel only, clipped to stage x-range)
-        if !isnothing(dmrg_refs) && i <= length(dmrg_refs) && !isnothing(dmrg_refs[i])
-            val = isnothing(e_ref) ? dmrg_refs[i] : dmrg_refs[i] - e_ref
-            val > 0 && lines!(ax1, [iters[1], iters[end]], [val, val], color=c, linestyle=:dot, linewidth=1.5)
+        # Line-type legend: solid = estimated/true, dashed = sketched
+        style_elems  = [LineElement(color=:black, linewidth=2, linestyle=:solid),
+                        LineElement(color=:black, linewidth=2, linestyle=:dash)]
+        style_labels = [L"\text{Estimated / True}", L"\text{Sketched}"]
+        if !isnothing(dmrg_refs) && any(!isnothing, dmrg_refs)
+            push!(style_elems,  LineElement(color=:black, linewidth=1.5, linestyle=:dot))
+            push!(style_labels, L"\text{DMRG bound}")
         end
 
-        offset = iters[end]
+        Legend(fig[2, 1], [style_elems], [style_labels], [L"\text{Line type}"],
+               orientation=:horizontal, tellwidth=false)
+
+        # Colorbar: color encodes rank
+        rank_labels = [label for (label, _) in stages]
+        rank_ticks  = LaTeXString.("\$" .* chopprefix.(rank_labels, "rmax=") .* "\$")
+        Colorbar(fig[2, 2], colormap=_cmap,
+                 limits=(0.5, n + 0.5),
+                 ticks=(collect(1:n), rank_ticks),
+                 label=L"\text{Rank}",
+                 vertical=false,
+                 flipaxis=false,
+                 tellwidth=false)
+
+        isnothing(filename) || save(filename, fig)
+        return fig
     end
-
-    # Single shared legend below both panels: one group for stages, one for line types
-    stage_elems  = [LineElement(color=palette[i], linewidth=2) for i in eachindex(stages)]
-    stage_labels = [label for (label, _) in stages]
-    style_elems  = [LineElement(color=:black, linewidth=2, linestyle=:solid),
-                    LineElement(color=:black, linewidth=2, linestyle=:dash)]
-    style_labels = ["Sketched", "True / Sampled"]
-    if !isnothing(dmrg_refs) && any(!isnothing, dmrg_refs)
-        push!(style_elems,  LineElement(color=:black, linewidth=1.5, linestyle=:dot))
-        push!(style_labels, "DMRG bound")
-    end
-
-    Legend(fig[2, 1:2],
-           [stage_elems,  style_elems],
-           [stage_labels, style_labels],
-           ["Stage", "Line type"],
-           orientation  = :horizontal,
-           tellwidth    = false,
-           framevisible = false)
-
-    isnothing(filename) || save(filename, fig)
-    return fig
 end
 
 
@@ -208,17 +304,17 @@ block_rks  = 16
 orthogonal = true
 
 schedule = [
-    (d=10, rmax=10, sketch_size=200, k_trunc=10, label="rmax=10"),
-    (d=10, rmax=20, sketch_size=500, k_trunc=10, label="rmax=20 (I)"),
-    (d=10, rmax=20, sketch_size=200, k_trunc=10, label="rmax=20 (II)"),
-    (d=10, rmax=20, sketch_size=500, k_trunc=10, label="rmax=20 (III)"),
-    (d=10, rmax=50, sketch_size=200, k_trunc=20, label="rmax=50 (I)"),
-    (d=10, rmax=50, sketch_size=500, k_trunc=20, label="rmax=50 (II)"),
-    (d=10, rmax=50, sketch_size=1000, k_trunc=20, label="rmax=50 (III)"),
-    (d=10, rmax=100, sketch_size=1000, k_trunc=20, label="rmax=100")
+    (d=10, rmax=10,  sketch_size=200,  k_trunc=5, label="rmax=10"),
+    (d=10, rmax=15,  sketch_size=200,  k_trunc=5, label="rmax=15"),
+    (d=10, rmax=20,  sketch_size=200,  k_trunc=5, label="rmax=20"),
+    (d=10, rmax=30,  sketch_size=200,  k_trunc=5, label="rmax=30"),
+    (d=10, rmax=40,  sketch_size=200,  k_trunc=5, label="rmax=40"),
+    (d=10, rmax=50,  sketch_size=200,  k_trunc=5, label="rmax=50"),
+    (d=10, rmax=75,  sketch_size=200,  k_trunc=5, label="rmax=75"),
+    (d=10, rmax=100, sketch_size=200,  k_trunc=5, label="rmax=100")
 ]
 
-e, ψ_rr, stages = sketched_rayleigh_ritz(H, ψ0, schedule;
+e, ψ_rr, stages, seeds = sketched_rayleigh_ritz(H, ψ0, schedule;
                     orthogonal=orthogonal, block_rks=block_rks,
                     seed=rand(Int), e_nuc=E_nuc,
                     validate_seed=true)
@@ -228,14 +324,16 @@ println("True Ritz:       ", dot_operator(ψ_rr, H, ψ_rr) + E_nuc,
         ";  Error: ", dot_operator(ψ_rr, H, ψ_rr) + E_nuc - e_tot)
 println("Particle number: ", dot_operator(ψ_rr, N, ψ_rr))
 
+save_sRR_results("lih_sRR_ncas$(n_cas).json", stages, seeds, schedule, e)
+
 # ── Optional DMRG reference ───────────────────────────────────────────────────
 rmax_vals = [s.rmax for s in schedule]
 v = tt_up_rks(ψ0, rmax_vals[1]; ϵ_wn=1e-2)
 E_tt, ψ_tt, _ = dmrg_eigsolv(H, v; schedule=dmrg_schedule_default(rmax=rmax_vals[1]))
 dmrg_refs = [E_tt[end] + E_nuc]
 for r in rmax_vals[2:end]
-    v = tt_up_rks(ψ_tt, r; ϵ_wn=1e-2)
-    E_tt, ψ_tt, _ = dmrg_eigsolv(H, v; schedule=dmrg_schedule_default(rmax=r), verbose=false)
+    global v = tt_up_rks(ψ_tt, r; ϵ_wn=1e-2)
+    global E_tt, ψ_tt, _ = dmrg_eigsolv(H, v; schedule=dmrg_schedule_default(rmax=r), verbose=false)
     push!(dmrg_refs, E_tt[end] + E_nuc)
 end
 
@@ -244,7 +342,7 @@ using CairoMakie
 # ── Convergence plot ──────────────────────────────────────────────────────────
 plot_sRR_convergence(stages;
     e_ref=e_tot,
-    dmrg_refs=dmrg_refs,
+    dmrg_refs=nothing, #dmrg_refs,
     filename="convergence.pdf")
 
 
