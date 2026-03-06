@@ -643,15 +643,18 @@ draws) until the sketch of the initial vector has norm within 10% of 1.
 - `ψ_rr`: corresponding Ritz vector
 - `stages`: `Vector{Tuple{String,Vector{NamedTuple}}}` — one `(label, history)` pair
   per stage, directly passable to `plot_sRR_convergence`
+- `seeds_used`: `Vector{Int}` — actual seed used for each stage (may differ from
+  the schedule when `validate_seed=true`)
 """
 function sketched_rayleigh_ritz(H::TToperator{T,N}, b0::TTvector{T,N},
                                   schedule::Vector{<:NamedTuple};
                                   orthogonal::Bool=true, block_rks::Int=8,
                                   seed::Int=1234, e_nuc::Real=0.0,
                                   validate_seed::Bool=false) where {T,N}
-    stages = Tuple{String, Vector{NamedTuple}}[]
-    ψ_rr   = b0
-    λ      = 0.0
+    stages     = Tuple{String, Vector{NamedTuple}}[]
+    seeds_used = Vector{Int}(undef, length(schedule))
+    ψ_rr       = b0
+    λ          = 0.0
 
     for (i, stage) in enumerate(schedule)
         d    = stage.d
@@ -672,6 +675,7 @@ function sketched_rayleigh_ritz(H::TToperator{T,N}, b0::TTvector{T,N},
             println("Stage $i: using seed $s")
         end
 
+        seeds_used[i] = s
         λ, ψ_rr, hist = sketched_rayleigh_ritz(H, b_init, d, rmax;
                                                 orthogonal=orthogonal,
                                                 block_rks=block_rks,
@@ -681,5 +685,5 @@ function sketched_rayleigh_ritz(H::TToperator{T,N}, b0::TTvector{T,N},
         push!(stages, (lbl, hist))
     end
 
-    return λ, ψ_rr, stages
+    return λ, ψ_rr, stages, seeds_used
 end

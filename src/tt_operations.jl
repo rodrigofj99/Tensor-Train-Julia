@@ -403,7 +403,7 @@ function dot_operator(ψ::TTvector{T,N}, H::TToperator{T,N}, φ::TTvector{T,N}) 
 
     # Right environment: sites N..c+1  (empty when c == N) or N...1 (if c == 1)
     R = ones(T, 1, 1, 1)
-    r = (c<1 ? c+1 : 1)
+    r = (c>1 ? c+1 : 1)
     for k in N:-1:r
         A_k, H_k, B_k = ψ.ttv_vec[k], H.tto_vec[k], φ.ttv_vec[k]
         @tensoropt R[α,β,γ] := conj(A_k[i,α,α_next]) * H_k[i,j,β,β_next] * B_k[j,γ,γ_next] * R[α_next,β_next,γ_next]

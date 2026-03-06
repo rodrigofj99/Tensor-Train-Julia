@@ -34,13 +34,14 @@ function injectivity_vs_dimension(;
     n_realizations = 10,                # Number of realizations
     seed = 1234,
     test_types = [Float64],
-    force_rerun = false                 # Force rerun even if results exist
+    force_rerun = false,                 # Force rerun even if results exist
+    dir = "out/block_rank_experiments"
 )
     results = Dict{String,Any}()
     for μ_rk in base_ranks
         # Check if results already exist
-        mkpath("out/block_rank_experiments")
-        filename = "out/block_rank_experiments/scaling_vs_dimension_mu$(μ)_rank-$(μ_rk).json"
+        mkpath(dir)
+        filename = "$dir/scaling_vs_dimension_mu$(μ)_rank-$(μ_rk).json"
 
         if !force_rerun && isfile(filename)
             println("=== Scenario 1: Injectivity vs Dimension N ===")
@@ -88,6 +89,8 @@ function injectivity_vs_dimension(;
         results["block_rks_list"] = block_rks_list
         results["n_realizations"] = n_realizations
 
+        flush(stdout) # <--- Force the text to appear in the Slurm output file
+
         # Test all 4 combinations
         for T in test_types
             type_name = T == Float64 ? "Float64" : "ComplexF64"
@@ -97,6 +100,7 @@ function injectivity_vs_dimension(;
                 approach_name = "$(type_name)_$(orth_name)_rank-$(μ_rk)"
 
                 println("\n--- Testing $approach_name ---")
+                flush(stdout) # <--- Force the text to appear in the Slurm output file
 
                 # Storage: [N_index, block_rks_index, realization]
                 injectivity_data = zeros(length(N_list), length(block_rks_list), n_realizations)
@@ -128,6 +132,7 @@ function injectivity_vs_dimension(;
                     # Test each block rank
                     for (i_blk, block_rks) in enumerate(block_rks_list)
                         print("    block_rks=$block_rks: ")
+                        flush(stdout) # <--- Force the text to appear in the Slurm output file
 
                         # Get sketch dimension
                         _, sketch_rks = tt_recursive_sketch(T, X[1], 2μ;
@@ -185,11 +190,11 @@ function injectivity_vs_dimension(;
         # Note: Individual plots handled by combined plotting function
 
         # Save results
-        mkpath("out/block_rank_experiments")
-        filename = "out/block_rank_experiments/scaling_vs_dimension_mu$(μ)_rank-$(μ_rk).json"
+        mkpath(dir)
+        filename = "$dir/scaling_vs_dimension_mu$(μ)_rank-$(μ_rk).json"
         open(io -> JSON3.write(io, results, allow_inf=true), filename, "w")
         println("Results saved to: $filename")
-
+        flush(stdout) # <--- Force the text to appear in the Slurm output file
     end
 
     return results
@@ -207,13 +212,14 @@ function injectivity_vs_subspace_size(;
     n_realizations = 10,                # Number of realizations
     seed = 1234,
     test_types = [Float64],
-    force_rerun = false                 # Force rerun even if results exist
+    force_rerun = false,                 # Force rerun even if results exist
+    dir = "out/block_rank_experiments"
 )
     results = Dict{String,Any}()
     for μ_rk in base_ranks
         # Check if results already exist
-        mkpath("out/block_rank_experiments")
-        filename = "out/block_rank_experiments/scaling_vs_subspace_N$(N)_rank-$(μ_rk).json"
+        mkpath(dir)
+        filename = "$dir/scaling_vs_subspace_N$(N)_rank-$(μ_rk).json"
 
         if !force_rerun && isfile(filename)
             println("=== Scenario 2: Injectivity vs Subspace Size μ ===")
@@ -255,6 +261,7 @@ function injectivity_vs_subspace_size(;
         println("Physical dimension per core: $d")
         println("Realizations: $n_realizations")
         println()
+        flush(stdout) # <--- Force the text to appear in the Slurm output file
 
         dims = ntuple(i -> d, N)
 
@@ -273,6 +280,7 @@ function injectivity_vs_subspace_size(;
                 approach_name = "$(type_name)_$(orth_name)_rank-$(μ_rk)"
 
                 println("\n--- Testing $approach_name ---")
+                flush(stdout) # <--- Force the text to appear in the Slurm output file
 
                 # Storage: [μ_index, block_rks_index, realization]
                 injectivity_data = zeros(length(μ_list), length(block_rks_list), n_realizations)
@@ -303,6 +311,7 @@ function injectivity_vs_subspace_size(;
                     # Test each block rank
                     for (i_blk, block_rks) in enumerate(block_rks_list)
                         print("    block_rks=$block_rks: ")
+                        flush(stdout) # <--- Force the text to appear in the Slurm output file
 
                         # Get sketch dimension
                         _, sketch_rks = tt_recursive_sketch(T, X[1], 2μ;
@@ -360,10 +369,11 @@ function injectivity_vs_subspace_size(;
         # Note: Individual plots handled by combined plotting function
 
         # Save results
-        mkpath("out/block_rank_experiments")
-        filename = "out/block_rank_experiments/scaling_vs_subspace_N$(N)_rank-$(μ_rk).json"
+        mkpath(dir)
+        filename = "$dir/scaling_vs_subspace_N$(N)_rank-$(μ_rk).json"
         open(io -> JSON3.write(io, results, allow_inf=true), filename, "w")
         println("Results saved to: $filename")
+        flush(stdout) # <--- Force the text to appear in the Slurm output file
 
     end
     return results
@@ -372,8 +382,8 @@ end
 """
 Create combined side-by-side plot comparing orthogonal vs non-orthogonal approaches
 """
-function create_combined_scaling_plots(results1, results2, N_list, μ_list, block_rks_list, μ_fixed, N_fixed, base_ranks)
-    mkpath("out/block_rank_experiments/plots")
+function create_combined_scaling_plots(results1, results2, N_list, μ_list, block_rks_list, μ_fixed, N_fixed, base_ranks; dir = "out/block_rank_experiments")
+    mkpath("$dir/plots")
 
     # Configure CairoMakie for publication-quality plots
     CairoMakie.activate!(type = "pdf")
@@ -608,7 +618,7 @@ function create_combined_scaling_plots(results1, results2, N_list, μ_list, bloc
             sleep(2)
 
             # Save the combined plot
-            save("out/block_rank_experiments/plots/combined_scaling_comparison_rank-$μ_rk.pdf", fig)
+            save("$dir/plots/combined_scaling_comparison_rank-$μ_rk.pdf", fig)
             println("Combined scaling plot saved as PDF")
         end
     end
@@ -622,14 +632,16 @@ function run_all_scaling_experiments(; force_rerun = false)
     println("="^70)
     println("RUNNING BLOCK RANK SCALING EXPERIMENTS")
     println("="^70)
+    flush(stdout) # <--- Force the text to appear in the Slurm output file
 
     N_list = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-    N = 20
+    N = 50
     μ_list = [8, 16, 32, 64, 128]
     μ = 16
     block_rks_list = [1, 4, 16, 32]
     n_realizations = 100
-    base_ranks = [1, 32]
+    base_ranks = [1, 10]
+    dir = "out/block_rank_experiments"
 
     # Scenario 1: Injectivity vs Dimension N
     results1 = injectivity_vs_dimension(
@@ -638,7 +650,8 @@ function run_all_scaling_experiments(; force_rerun = false)
         base_ranks = base_ranks,
         block_rks_list = block_rks_list,
         n_realizations = n_realizations,
-        force_rerun = force_rerun
+        force_rerun = force_rerun,
+        dir = dir
     )
 
     println("\n" * "="^70)
@@ -650,7 +663,8 @@ function run_all_scaling_experiments(; force_rerun = false)
         base_ranks = base_ranks,
         block_rks_list = block_rks_list,
         n_realizations = n_realizations,
-        force_rerun = force_rerun
+        force_rerun = force_rerun,
+        dir = dir
     )
 
     # Save results before plotting
@@ -659,6 +673,7 @@ function run_all_scaling_experiments(; force_rerun = false)
     
     # Create combined side-by-side plot
     println("\n--- Creating combined comparison plot ---")
+    flush(stdout) # <--- Force the text to appear in the Slurm output file
     create_combined_scaling_plots(results1, results2, 
                                   N_list, 
                                   μ_list,

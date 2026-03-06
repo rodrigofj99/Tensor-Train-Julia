@@ -35,11 +35,12 @@ function synthetic_experiment(;
     block_rks_list = [1, 4, 8],                # Block ranks to test
     n_realizations = 10,                       # Realizations for randomized methods
     seed = 1234,
-    force_rerun = false
+    force_rerun = false,
+    dir = "out/randomized_rounding"
 )
     # Check if results already exist
-    mkpath("out/randomized_rounding")
-    filename = "out/randomized_rounding/rank$(base_rank)_summands$(n_summands)_N$(N)_d$(d).json"
+    mkpath(dir)
+    filename = "$dir/rank$(base_rank)_summands$(n_summands)_N$(N)_d$(d).json"
 
     if !force_rerun && isfile(filename)
         println("=== Perturbed Rank-$(base_rank) Experiment ===")
@@ -188,7 +189,7 @@ function synthetic_experiment(;
                 for real = 1:n_realizations
                     sketch_seed = seed + real + 1000*i_ε + 10000*block_rks
 
-                    x = x_perturbed[i_ε] #Is there a reason for separating x_perturbed[i_ε] into x here? We could just pass x_perturbed
+                    x = x_perturbed[i_ε] 
                     x_rounded = ttrand_rounding([1, ε], [x0, noise], base_rank;
                                                orthogonal=orthogonal,
                                                block_rks=block_rks,
@@ -286,11 +287,11 @@ end
 """
 Create plot showing error vs Noise Level for all methods
 """
-function create_perturbation_plot(results, ε_list, block_rks_list)
+function create_perturbation_plot(results, ε_list, block_rks_list, dir = "out/randomized_rounding")
     # Ensure proper types for plotting
     ε_list = Float64.(ε_list)
     block_rks_list = Int.(block_rks_list)
-    mkpath("out/randomized_rounding/plots")
+    mkpath("$dir/plots")
 
     # Configure CairoMakie for publication-quality plots
     CairoMakie.activate!(type = "pdf")
@@ -329,7 +330,7 @@ function create_perturbation_plot(results, ε_list, block_rks_list)
     
     with_theme(PLOT_THEME) do
         # Color scheme for block ranks - use specific colors for clarity
-        colors_blk = Dict(1 => :blue, 4 => :orange, 16 => :green, 32 => :red)
+        colors_blk = Dict(1 => :blue, 4 => :orange, 8 => :green, 16 => :red)
 
         # Line styles
         style_det = nothing
@@ -349,15 +350,16 @@ function create_perturbation_plot(results, ε_list, block_rks_list)
                   ylabel = LaTeXString("Relative Error"),
                   xscale = log10,
                   yscale = log10,
-                  xticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1], [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
-                  yticks = ([1e-6, 1e-3, 1, 1e3], [L"10^{-6}", L"10^{-3}", L"10^0", L"10^3"]),
+                  #xticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1], [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
+                  xticks = ([1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], [L"10^{-1}", L"10^{-2}", L"10^{-3}", L"10^{-4}", L"10^{-5}", L"10^{-6}"]),
+                  yticks = ([1e-5, 1e-3, 1, 1e1], [L"10^{-5}", L"10^{-3}", L"10^0", L"10^1"]),
                   title = title_str)
 
         # Skip deterministic rounding - only plot randomized methods
 
         # Plot selected methods: RandOrth (ttrand orthogonal) and STTA orthogonal
         # Plot selected blocks
-        selected_block_rks = [1, 4, 16, 32]
+        selected_block_rks = [1, 4, 8, 16]
         
         for block_rks in selected_block_rks
             if block_rks in block_rks_list  # Only plot if data exists
@@ -442,7 +444,7 @@ function create_perturbation_plot(results, ε_list, block_rks_list)
         display(fig)
         
         # Save the plot
-        save("out/randomized_rounding/plots/rank$(results["base_rank"])_summands$(results["n_summands"])_N$(results["N"])_d$(results["d"]).pdf", fig)
+        save("$dir/plots/rank$(results["base_rank"])_summands$(results["n_summands"])_N$(results["N"])_d$(results["d"]).pdf", fig)
         println("Plot saved as PDF")
     end
 end
@@ -450,8 +452,8 @@ end
 """
 Create combined plot comparing both tensor structures
 """
-function create_combined_plot(results1, results2, ε_list, block_rks_list)
-    mkpath("out/randomized_rounding/plots")
+function create_combined_plot(results1, results2, ε_list, block_rks_list, dir = "out/randomized_rounding")
+    mkpath("$dir/plots")
 
     # Configure CairoMakie for publication-quality plots
     CairoMakie.activate!(type = "pdf")
@@ -494,7 +496,7 @@ function create_combined_plot(results1, results2, ε_list, block_rks_list)
         block_rks_list = Int.(block_rks_list)
         
         # Color scheme for block ranks - use specific colors for clarity
-        colors_blk = Dict(1 => :blue, 4 => :orange, 16 => :green, 32 => :red)
+        colors_blk = Dict(1 => :blue, 4 => :orange, 8 => :green, 16 => :red)
 
         # Line styles
         style_ttrand_orth = nothing
@@ -506,12 +508,13 @@ function create_combined_plot(results1, results2, ε_list, block_rks_list)
         # Create two subplots side by side
         ax1 = Axis(fig[1, 1],
                    xlabel = L"Noise Level $\varepsilon$",
-                   ylabel = L"Relative Error $\Vert \mathrm{trunc}_{32}(\mathbf{x}_\varepsilon) - \mathbf{x}_\varepsilon \Vert /\Vert \mathbf{x} \Vert $",
+                   ylabel = L"Relative Error $\Vert \mathrm{trunc}_{16}(\mathbf{x}_\varepsilon) - \mathbf{x}_\varepsilon \Vert /\Vert \mathbf{x} \Vert $",
                    xscale = log10,
                    yscale = log10,
-                   xticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1], [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
-                   yticks = ([1e-6, 1e-3, 1, 1e3], [L"10^{-6}", L"10^{-3}", L"10^0", L"10^3"]),
-                   title = L"$\mathbf{x}$ sum of $32$ Gaussian Kronecker vectors")
+                   #xticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1], [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
+                   xticks = ([1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], [L"10^{-1}", L"10^{-2}", L"10^{-3}", L"10^{-4}", L"10^{-5}", L"10^{-6}"]),
+                   yticks = ([1e-5, 1e-3, 1, 1e1], [L"10^{-5}", L"10^{-3}", L"10^0", L"10^1"]),
+                   title = L"$\mathbf{x}$ sum of $16$ Gaussian Kronecker vectors")
                  
         ylims!(1e-6,1e3)
         ax2 = Axis(fig[1, 2],
@@ -519,13 +522,13 @@ function create_combined_plot(results1, results2, ε_list, block_rks_list)
                    ylabel = "",
                    xscale = log10,
                    yscale = log10,
-                   xticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1], [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
-                   yticks = ([1e-6, 1e-3, 1, 1e3], [L"10^{-6}", L"10^{-3}", L"10^0", L"10^3"]),
-                   title = L"Gaussian $\mathbf{x}$ with uniform TT ranks $32$")
+                   xticks = ([1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], [L"10^{-1}", L"10^{-2}", L"10^{-3}", L"10^{-4}", L"10^{-5}", L"10^{-6}"]),
+                   yticks = ([1e-5, 1e-3, 1, 1e1], [L"10^{-5}", L"10^{-3}", L"10^0", L"10^1"]),
+                   title = L"Gaussian $\mathbf{x}$ with uniform TT ranks $16$")
         ylims!(1e-6,1e3)
 
         # Plot selected methods for both cases
-        selected_block_rks = [1, 4, 16, 32]
+        selected_block_rks = [1, 4, 8, 16]
         
         for (ax, results) in [(ax1, results1), (ax2, results2)]
             for block_rks in selected_block_rks
@@ -593,7 +596,7 @@ function create_combined_plot(results1, results2, ε_list, block_rks_list)
             LineElement(color = :red, linewidth = 3)
         ]
         #color_labels = [L"Khatri-Rao: TT($16$,$1$)", L"TT($4$,$4$)", L"Gaussian TT-DRM: TT($1$,$16$)"]
-        color_labels = [L"R=1 (Khatri-Rao)", L"R=4", L"R=16", L"R=32 (Gaussian TT)"]
+        color_labels = [L"R=1 (Khatri-Rao)", L"R=4", L"R=8", L"R=16 (Gaussian TT)"]
         
         ref_elements = [LineElement(color = :gray, linestyle = :dashdot, linewidth = 1)]
         ref_labels = [L"$\varepsilon$ (reference)"]
@@ -616,7 +619,7 @@ function create_combined_plot(results1, results2, ε_list, block_rks_list)
         display(fig)
         
         # Save the combined plot
-        save("out/randomized_rounding/plots/combined_comparison_N$(results1["N"])_d$(results1["d"]).pdf", fig)
+        save("$dir/plots/combined_comparison_N$(results1["N"])_d$(results1["d"]).pdf", fig)
         println("Combined plot saved as PDF")
     end
 end
@@ -629,13 +632,14 @@ function run_randomized_rounding_experiments(; force_rerun = false)
     println("RANDOMIZED ROUNDING COMPARISON EXPERIMENTS")
     println("="^70)
 
-    N = 20
+    N = 50
     d = 4
-    base_rank = 32
-    block_rks_list = [1, 4, 16, 32]     #Embedding dimension m = base_rank/block_rks
-    perturbation_strengths = 10.0.^(-6:-1)
+    base_rank = 16
+    block_rks_list = [1, 4, 8, 16]     # Number of blocks P = base_rank/block_rks => embedding dimension = base_rank
+    perturbation_strengths = 10.0.^(-1:-1:-6)#10.0.^(-6:-1)
     perturbation_rank = 50
     n_realizations = 100
+    dir = "out/randomized_rounding"
 
     # Run experiment 1: 8 summands of rank 1
     println("\n--- EXPERIMENT 1: 16 summands of rank 1 ---")
@@ -643,16 +647,17 @@ function run_randomized_rounding_experiments(; force_rerun = false)
         N = N,
         d = d,
         base_rank = base_rank,
-        n_summands = 32,
+        n_summands = 16,
         perturbation_strengths = perturbation_strengths,
         perturbation_rank = perturbation_rank,
         block_rks_list = block_rks_list,
         n_realizations = n_realizations,
-        force_rerun = force_rerun
+        force_rerun = force_rerun,
+        dir = dir
     )
     
     # Run experiment 2: 1 summand of rank 8
-    println("\n--- EXPERIMENT 2: 1 summand of rank 32 ---")
+    println("\n--- EXPERIMENT 2: 1 summand of rank 16 ---")
     results_1x16 = synthetic_experiment(
         N = N,
         d = d,
@@ -662,12 +667,13 @@ function run_randomized_rounding_experiments(; force_rerun = false)
         perturbation_rank = perturbation_rank,
         block_rks_list = block_rks_list,
         n_realizations = n_realizations,
-        force_rerun = force_rerun
+        force_rerun = force_rerun,
+        dir = dir
     )
 
     # Create combined plot
     println("\n--- Creating combined comparison plot ---")
-    create_combined_plot(results_16x1, results_1x16, perturbation_strengths, block_rks_list)
+    create_combined_plot(results_16x1, results_1x16, perturbation_strengths, block_rks_list, dir)
 
     println("\n" * "="^70)
     println("EXPERIMENTS COMPLETED")
