@@ -172,7 +172,7 @@ numerical stability and consistent spectral properties across different rank reg
 - Randomized tensor train decomposition with block sketching
 - See ttrand_rounding, stta for usage examples
 """
-function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, oversampling=1, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N}
+function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, oversampling=1, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N}
   @timeit timer "tt_recursive_sketch" begin
     rng = Random.default_rng()
     Random.seed!(rng, seed)
@@ -190,7 +190,9 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
           block_rks_vec[k] = min(block_rks_vec[k], dims[k]*block_rks_vec[k+1])
         end
 
-        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
+        if p == 0
+          p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
+        end
         if oversampling ≠ 1
           p[1:N] .= ceil.(Int, oversampling .* p[1:N])
         end
@@ -245,7 +247,10 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
           block_rks_vec[k+1] = min(block_rks_vec[k+1], dims[k]*block_rks_vec[k])
         end
 
-        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
+        if p == 0
+          p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
+        end      
+        
         if oversampling ≠ 1
           p[2:N+1] .= ceil.(Int, oversampling .* p[2:N+1])
         end
@@ -299,17 +304,17 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
   end
 end
 
-function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rmax::Int; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N}
+function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rmax::Int; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N}
   rks = rmax*ones(Int,N+1)
   rks[(reverse ? N+1 : 1)] = 1
-  return tt_recursive_sketch(T,A,rks; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, timer=timer)
+  return tt_recursive_sketch(T,A,rks; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, p=p, timer=timer)
 end
 
-function tt_recursive_sketch(A::TTvector{T,N},rks_or_rmax; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T<:Number,N}
-  return tt_recursive_sketch(Float64,A,rks_or_rmax; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, timer=timer)
+function tt_recursive_sketch(A::TTvector{T,N},rks_or_rmax; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, timer::TimerOutput = TimerOutput()) where {T<:Number,N}
+  return tt_recursive_sketch(Float64,A,rks_or_rmax; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, p=p, timer=timer)
 end
 
-function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, oversampling=1, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,TH<:Number,N}
+function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, oversampling=1, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,TH<:Number,N}
   @timeit timer "tt_recursive_sketch" begin
     rng = Random.default_rng()
     Random.seed!(rng, seed)
@@ -327,7 +332,9 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
           block_rks_vec[k] = min(block_rks_vec[k], dims[k]*block_rks_vec[k+1])
         end
 
-        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
+        if p == 0
+          p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
+        end
         if oversampling ≠ 1
           p[1:N] .= ceil.(Int, oversampling .* p[1:N])
         end
@@ -389,7 +396,10 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
           block_rks_vec[k+1] = min(block_rks_vec[k+1], dims[k]*block_rks_vec[k])
         end
 
-        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
+        if p == 0
+          p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
+        end
+        # No oversampling?
 
         W[1] = ones(TW,1,1,1,1)
 
@@ -450,18 +460,18 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
   end
 end
 
-function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, rmax::Int; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,TH<:Number,N}
+function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, rmax::Int; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,TH<:Number,N}
   d = A.N
   rks = rmax*ones(Int,d+1)
   rks[(reverse ? d+1 : 1)] = 1
-  return tt_recursive_sketch(T,H,A,rks; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, timer=timer)
+  return tt_recursive_sketch(T,H,A,rks; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, p=p, timer=timer)
 end
 
-function tt_recursive_sketch(H::TToperator{TH,N}, A::TTvector{TA,N}, rks_or_rmax; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {TA<:Number,TH<:Number,N}
-  return tt_recursive_sketch(Float64, H, A, rks_or_rmax; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, timer=timer)
+function tt_recursive_sketch(H::TToperator{TH,N}, A::TTvector{TA,N}, rks_or_rmax; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, timer::TimerOutput = TimerOutput()) where {TA<:Number,TH<:Number,N}
+  return tt_recursive_sketch(Float64, H, A, rks_or_rmax; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, p=p, timer=timer)
 end
 
-function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, oversampling=1, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N,M}
+function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, oversampling=1, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N,M}
   @timeit timer "tt_recursive_sketch" begin
     rng = Random.default_rng()
     Random.seed!(rng, seed)
@@ -480,7 +490,9 @@ function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rks; orthog
           block_rks_vec[k] = min(block_rks_vec[k], dims[k]*block_rks_vec[k+1])
         end
 
-        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
+        if p == 0
+          p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=true)
+        end
         if oversampling ≠ 1
           p[1:N] .= ceil.(Int, oversampling .* p[1:N])
         end
@@ -535,7 +547,9 @@ function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rks; orthog
           block_rks_vec[k+1] = min(block_rks_vec[k+1], dims[k]*block_rks_vec[k])
         end
 
-        p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
+        if p == 0
+          p = compute_sketch_blocks_heuristic(rks, block_rks_vec, N; reverse=false)
+        end
         if oversampling ≠ 1
           p[2:N+1] .= ceil.(Int, oversampling .* p[2:N+1])
         end
@@ -589,14 +603,14 @@ function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rks; orthog
   end
 end
 
-function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rmax::Int; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N,M}
+function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rmax::Int; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N,M}
   rks = rmax*ones(Int,N+1)
   rks[(reverse ? N+1 : 1)] = 1
-  return tt_recursive_sketch(T,A,rks; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, timer=timer)
+  return tt_recursive_sketch(T,A,rks; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, p=p, timer=timer)
 end
 
-function tt_recursive_sketch(A::NTuple{M,TTvector{T,N}},rks_or_rmax; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T<:Number,N,M}
-  return tt_recursive_sketch(Float64,A,rks_or_rmax; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, timer=timer)
+function tt_recursive_sketch(A::NTuple{M,TTvector{T,N}},rks_or_rmax; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, timer::TimerOutput = TimerOutput()) where {T<:Number,N,M}
+  return tt_recursive_sketch(Float64,A,rks_or_rmax; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, p=p, timer=timer)
 end
 
 

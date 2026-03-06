@@ -337,16 +337,9 @@ function benchmark_structured_sketching(
         
         # Test structured sketching with different block rank configurations
         for block_rks in block_rks_options
-            block_name = if block_rks == 1
-                "R=1 (Khatri-Rao)"
-            elseif block_rks == 4
-                "R=4" 
-            elseif block_rks == 16
-                 "R=16"
-            elseif block_rks == 32
-                "R=32"
-            else
-                "Custom (R=$block_rks)"
+            block_name = "R=$block_rks"
+            if block_rks == 1
+                block_name = block_name*"(Khatri-Rao)"
             end
             
             println("\n--- $block_name ---")
@@ -725,7 +718,7 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     large_blocks_times = Float64[]
     xlarge_blocks_times = Float64[]
     
-    # Error bar data (for 20th and 80th percentiles)
+    # Error bar data (for 25th and 75th percentiles)
     deterministic_error_bars = Tuple{Float64, Float64}[]
     khatri_rao_error_bars = Tuple{Float64, Float64}[]
     small_blocks_error_bars = Tuple{Float64, Float64}[]
@@ -750,7 +743,7 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
                 push!(deterministic_errors, det_data["median_error"])
                 push!(deterministic_times, det_data["median_time"] * 1000)  # Convert to ms
                 
-                # Calculate error bars (20th and 80th percentiles)
+                # Calculate error bars (25th and 75th percentiles)
                 if haskey(det_data, "errors") && length(det_data["errors"]) > 1
                     errors_sorted = sort(det_data["errors"])
                     times_sorted = sort(det_data["main_times"]) * 1000  # Convert to ms
@@ -777,8 +770,8 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
             for (block_rks, data_array, time_array, error_bars_array, time_bars_array) in [
                 (1, khatri_rao_errors, khatri_rao_times, khatri_rao_error_bars, khatri_rao_time_bars),
                 (4, small_blocks_errors, small_blocks_times, small_blocks_error_bars, small_blocks_time_bars), 
-                (16, large_blocks_errors, large_blocks_times, large_blocks_error_bars, large_blocks_time_bars),
-                (32, xlarge_blocks_errors, xlarge_blocks_times, xlarge_blocks_error_bars, xlarge_blocks_time_bars)
+                (8, large_blocks_errors, large_blocks_times, large_blocks_error_bars, large_blocks_time_bars),
+                (16, xlarge_blocks_errors, xlarge_blocks_times, xlarge_blocks_error_bars, xlarge_blocks_time_bars)
             ]
                 block_key = "block_rks_$block_rks"
                 if haskey(rank_data, block_key) && rank_data[block_key]["success_rate"] > 0
@@ -901,9 +894,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax1, target_ranks, small_blocks_errors, valid_sb, 
                     "R=4", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax1, target_ranks, large_blocks_errors, valid_lb, 
-                    "R=16", colors[:large_blocks], markers[:large_blocks])
-    plot_valid_data!(ax1, target_ranks, xlarge_blocks_errors, valid_lb, 
-                    "R=32", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=8", colors[:large_blocks], markers[:large_blocks])
+    plot_valid_data!(ax1, target_ranks, xlarge_blocks_errors, valid_xlb, 
+                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
     
     # Add legend
     axislegend(ax1, position = :rt)
@@ -943,9 +936,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax2, target_ranks, small_blocks_times, valid_sb_time, 
                     "R=4", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax2, target_ranks, large_blocks_times, valid_lb_time, 
-                    "R=16", colors[:large_blocks], markers[:large_blocks])
+                    "R=8", colors[:large_blocks], markers[:large_blocks])
     plot_valid_data!(ax2, target_ranks, xlarge_blocks_times, valid_xlb_time, 
-                    "R=32", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
     
     # Add legend
     axislegend(ax2, position = :lt)
@@ -981,9 +974,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax_acc, target_ranks, small_blocks_errors, valid_sb, 
                     "R=4", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax_acc, target_ranks, large_blocks_errors, valid_lb, 
-                    "R=16", colors[:large_blocks], markers[:large_blocks])
+                    "R=8", colors[:large_blocks], markers[:large_blocks])
     plot_valid_data!(ax_acc, target_ranks, xlarge_blocks_errors, valid_xlb, 
-                    "R=32", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
     
     # Timing subplot
     ax_time = Axis(fig_combined[1, 2], 
@@ -1005,9 +998,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax_time, target_ranks, small_blocks_times, valid_sb_time, 
                     "R=4", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax_time, target_ranks, large_blocks_times, valid_lb_time, 
-                    "R=16", colors[:large_blocks], markers[:large_blocks])
+                    "R=8", colors[:large_blocks], markers[:large_blocks])
     plot_valid_data!(ax_time, target_ranks, xlarge_blocks_times, valid_xlb_time, 
-                    "R=32", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
     
     # Add horizontal legend below both subplots
     Legend(fig_combined[2, 1:2], ax_acc, 
@@ -1050,8 +1043,8 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
             for (block_rks, sketch_array, orthog_array, sketch_bars_array, orthog_bars_array) in [
                 (1, sketch_times_kr, orthog_times_kr, sketch_error_bars_kr, orthog_error_bars_kr),
                 (4, sketch_times_sb, orthog_times_sb, sketch_error_bars_sb, orthog_error_bars_sb),
-                (16, sketch_times_lb, orthog_times_lb, sketch_error_bars_lb, orthog_error_bars_lb),
-                (32, sketch_times_xlb, orthog_times_xlb, sketch_error_bars_xlb, orthog_error_bars_xlb)
+                (8, sketch_times_lb, orthog_times_lb, sketch_error_bars_lb, orthog_error_bars_lb),
+                (16, sketch_times_xlb, orthog_times_xlb, sketch_error_bars_xlb, orthog_error_bars_xlb)
             ]
                 block_key = "block_rks_$block_rks"
                 if haskey(rank_data, block_key) && rank_data[block_key]["success_rate"] > 0
@@ -1145,9 +1138,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax3, target_ranks, sketch_times_sb, valid_sketch_sb, 
                     "R=4 (sketch)", colors[:small_blocks], markers[:small_blocks]; linestyle=:dash)
     plot_valid_data!(ax3, target_ranks, sketch_times_lb, valid_sketch_lb, 
-                    "R=16 (sketch)", colors[:large_blocks], markers[:large_blocks]; linestyle=:dash)
+                    "R=8 (sketch)", colors[:large_blocks], markers[:large_blocks]; linestyle=:dash)
     plot_valid_data!(ax3, target_ranks, sketch_times_xlb, valid_sketch_xlb, 
-                    "R=32 (sketch)", colors[:xlarge_blocks], markers[:xlarge_blocks]; linestyle=:dash)
+                    "R=16 (sketch)", colors[:xlarge_blocks], markers[:xlarge_blocks]; linestyle=:dash)
     
     # Plot orthogonalization times (solid lines)
     plot_valid_data!(ax3, target_ranks, orthog_times_kr, valid_orthog_kr, 
@@ -1155,9 +1148,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax3, target_ranks, orthog_times_sb, valid_orthog_sb, 
                     "R=4 (QR)", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax3, target_ranks, orthog_times_lb, valid_orthog_lb, 
-                    "R=16 (QR)", colors[:large_blocks], markers[:large_blocks])
+                    "R=8 (QR)", colors[:large_blocks], markers[:large_blocks])
     plot_valid_data!(ax3, target_ranks, orthog_times_xlb, valid_orthog_xlb, 
-                    "R=32 (QR)", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=16 (QR)", colors[:xlarge_blocks], markers[:xlarge_blocks])
     
     # Add legend
     axislegend(ax3, position = :lt)
@@ -1209,8 +1202,8 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
             for (block_rks, memory_array, memory_bars_array) in [
                 (1, khatri_rao_memory, khatri_rao_memory_bars),
                 (4, small_blocks_memory, small_blocks_memory_bars),
-                (16, large_blocks_memory, large_blocks_memory_bars),
-                (32, xlarge_blocks_memory, xlarge_blocks_memory_bars)
+                (8, large_blocks_memory, large_blocks_memory_bars),
+                (16, xlarge_blocks_memory, xlarge_blocks_memory_bars)
             ]
                 block_key = "block_rks_$block_rks"
                 if haskey(rank_data, block_key) && rank_data[block_key]["success_rate"] > 0
@@ -1276,9 +1269,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax4, target_ranks, small_blocks_memory, valid_sb_memory, 
                     "R=4", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax4, target_ranks, large_blocks_memory, valid_lb_memory, 
-                    "R=16", colors[:large_blocks], markers[:large_blocks])
+                    "R=8", colors[:large_blocks], markers[:large_blocks])
     plot_valid_data!(ax4, target_ranks, xlarge_blocks_memory, valid_xlb_memory, 
-                    "R=32", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
 
     # Add legend
     axislegend(ax4, position = :lt)
@@ -1476,7 +1469,6 @@ function run_quantics_hadamard_benchmark(;
     # Step 6: Analyze results
     ###final_results = analyze_sketching_results(results)
     final_results = nothing
-    
     # Step 7: Create plots
     println("\n" * "="^60)
     println("CREATING VISUALIZATION PLOTS")
@@ -1504,27 +1496,25 @@ end
 if abspath(PROGRAM_FILE) == @__FILE__
     results, ttvectors, exact_solution = run_quantics_hadamard_benchmark(
         R=20,  # Smaller scale for testing
-        target_ranks=[32, 64, 96, 128, 160, 192, 224, 256, 288, 320],
-        block_rks_options=[1, 4, 16, 32], 
+        target_ranks=[16, 32, 48, 64, 80, 96],
+        block_rks_options=[1, 4, 8, 16], 
         n_trials=100,
-        run_parallel=true,
+        run_parallel=false,
         cluster=true,
         verbose=false,
-        #dir = "out/hadamard_benchmarks" #   Laptop
-        dir = "~/scratch/BSTT/out/hadamard_benchmarks" # Cluster
+        dir = "out/hadamard_benchmarks"
     )
 end
 
 global results, ttvectors, exact_solution = run_quantics_hadamard_benchmark(
         R=20,  # Smaller scale for testing
-        target_ranks=[32, 64, 96, 128, 160, 192, 224, 256, 288, 320],
-        block_rks_options=[1, 4, 16, 32], 
+        target_ranks=[16, 32, 48, 64, 80, 96],
+        block_rks_options=[1, 4, 8, 16], 
         n_trials=100,
-        run_parallel=true,
+        run_parallel=false,
         cluster=true,
         verbose=false,
-        #dir = "out/hadamard_benchmarks" #   Laptop
-        dir = "~/scratch/BSTT/out/hadamard_benchmarks" # Cluster
+        dir = "out/hadamard_benchmarks"
     )
 
 
