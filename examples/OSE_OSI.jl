@@ -252,11 +252,10 @@ function create_combined_scaling_plots(results1, N_list, P_list, μ_fixed, base_
             P_list = Int.(P_list)
 
             # Color scheme for block ranks - extended for rank 16
-            colors_P = Dict(1 => :blue, 4 => :orange, 16 => :green, 32 => :red)
-            markers_P = Dict(1 => :circle, 4 => :rect, 16 => :diamond, 32 => :utriangle)
+            colors_P = Dict(22 => :blue, 30 => :orange, 44 => :green, 88 => :red)
+            markers_P = Dict(22 => :circle, 30 => :rect, 44 => :diamond, 88 => :utriangle)
 
-            #fig = Figure(size = (624, 300))  # 6.5" wide, 4.5" tall (72 DPI equivalent)
-            fig = Figure()#size = (624, 624))
+            fig = Figure(size = (624, 300))
 
             ax1 = Axis(fig[1, 1],
                     xlabel = L"Dimension $d$",
@@ -348,7 +347,6 @@ function create_combined_scaling_plots(results1, N_list, P_list, μ_fixed, base_
             all_labels = [color_labels..., style_labels...]
 
             # Add horizontal legend below both subplots
-            #Legend(fig[2, 1:4], all_elements, all_labels,
             Legend(fig[1, 1:2], all_elements, all_labels,
                 orientation = :horizontal,
                 tellheight = true,
@@ -385,12 +383,12 @@ function run_all_scaling_experiments(; force_rerun = false)
     δ = 0.05
     P = ceil(Int, (μ + log(μ/δ)) / ε^2)
     P_list = [ceil(Int, P/i) for i in 4:-1:1]
-    n_realizations = 1
+    n_realizations = 100
     base_ranks = [1, 10]
     dir = "out/block_rank_experiments"
 
     # Scenario 1: Injectivity vs Dimension N
-    results1 = injectivity_vs_dimension(
+    results = injectivity_vs_dimension(
         N_list = N_list,
         μ = μ,
         base_ranks = base_ranks,
@@ -409,7 +407,7 @@ function run_all_scaling_experiments(; force_rerun = false)
     # Create combined side-by-side plot
     println("\n--- Creating combined comparison plot ---")
     flush(stdout) # <--- Force the text to appear in the Slurm output file
-    create_combined_scaling_plots(results1, 
+    create_combined_scaling_plots(results, 
                                   N_list, 
                                   P_list, 
                                   μ,
@@ -419,7 +417,7 @@ function run_all_scaling_experiments(; force_rerun = false)
     println("ALL EXPERIMENTS COMPLETED")
     println("="^70)
 
-    return results1, results2
+    return results
 end
 
 # Run experiments automatically when file is included or executed
