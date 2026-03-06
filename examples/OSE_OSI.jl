@@ -393,7 +393,7 @@ function run_all_scaling_experiments(; force_rerun = false)
     #P_list = [ceil(Int, P/i) for i in 4:-1:1]
     #P_list = [5, 10, 15, 20]
     P_list = [1, 2, 4, 8]
-    n_realizations = 10
+    n_realizations = 100
     base_ranks = [1, 10]
     dir = "out/block_rank_experiments"
 
