@@ -165,6 +165,8 @@ function benchmark_structured_sketching(
     println("Reference norm: $(@sprintf "%.6e" exact_norm)")
     
     results = Dict{String, Any}()
+    results["target_ranks"] = target_ranks
+    results["block_rks_options"] = block_rks_options
     
     for target_rank in target_ranks
         println("\n" * "="^60)
@@ -285,27 +287,9 @@ function benchmark_structured_sketching(
         
         # Test structured sketching with different block rank configurations
         for block_rks in block_rks_options
-            """
-            block_name = if block_rks == 1
-                "Khatri-Rao (R=1)"
-            elseif block_rks == 4
-                "Small blocks (R=4)" 
-            elseif block_rks == 8
-                "Large blocks (R=8)"
-            else
-                "Custom (R=$block_rks)"
-            end
-            """
-            block_name = if block_rks == 1
-                "R=1 (Khatri-Rao)"
-            elseif block_rks == 4
-                "R=4" 
-            elseif block_rks == 16
-                 "R=16"
-            elseif block_rks == 32
-                "R=32"
-            else
-                "Custom (R=$block_rks)"
+            block_name = "R=$block_rks"
+            if block_rks == 1
+                block_name = block_name*"(Khatri-Rao)"
             end
             
             println("\n--- $block_name ---")
@@ -688,8 +672,8 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
             for (block_rks, data_array, time_array, error_bars_array, time_bars_array) in [
                 (1, khatri_rao_errors, khatri_rao_times, khatri_rao_error_bars, khatri_rao_time_bars),
                 (4, small_blocks_errors, small_blocks_times, small_blocks_error_bars, small_blocks_time_bars), 
-                (16, large_blocks_errors, large_blocks_times, large_blocks_error_bars, large_blocks_time_bars),
-                (32, xlarge_blocks_errors, xlarge_blocks_times, xlarge_blocks_error_bars, xlarge_blocks_time_bars)
+                (8, large_blocks_errors, large_blocks_times, large_blocks_error_bars, large_blocks_time_bars),
+                (16, xlarge_blocks_errors, xlarge_blocks_times, xlarge_blocks_error_bars, xlarge_blocks_time_bars)
             ]
                 block_key = "block_rks_$block_rks"
                 if haskey(rank_data, block_key) && rank_data[block_key]["success_rate"] > 0
@@ -779,21 +763,6 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
                     markersize = 8, strokewidth = 1, strokecolor = :white)
         end
     end
-    """
-    # Define colors and markers for consistent styling
-    colors = Dict(
-        :deterministic => :black,
-        :khatri_rao => :red,
-        :small_blocks => :blue,
-        :large_blocks => :green
-    )
-    
-    markers = Dict(
-        :deterministic => :star8,
-        :khatri_rao => :circle,
-        :small_blocks => :rect,
-        :large_blocks => :diamond
-    )"""
     
     # Accuracy comparison plot
     println("Creating accuracy comparison plot...")
@@ -827,9 +796,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax1, target_ranks, small_blocks_errors, valid_sb, 
                     "R=4", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax1, target_ranks, large_blocks_errors, valid_lb, 
-                    "R=16", colors[:large_blocks], markers[:large_blocks])
-    plot_valid_data!(ax1, target_ranks, xlarge_blocks_errors, valid_lb, 
-                    "R=32", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=8", colors[:large_blocks], markers[:large_blocks])
+    plot_valid_data!(ax1, target_ranks, xlarge_blocks_errors, valid_xlb, 
+                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
     
     # Add legend
     axislegend(ax1, position = :rt)
@@ -869,9 +838,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax2, target_ranks, small_blocks_times, valid_sb_time, 
                     "R=4", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax2, target_ranks, large_blocks_times, valid_lb_time, 
-                    "R=16", colors[:large_blocks], markers[:large_blocks])
+                    "R=8", colors[:large_blocks], markers[:large_blocks])
     plot_valid_data!(ax2, target_ranks, xlarge_blocks_times, valid_xlb_time, 
-                    "R=32", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
     
     # Add legend
     axislegend(ax2, position = :lt)
@@ -907,9 +876,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax_acc, target_ranks, small_blocks_errors, valid_sb, 
                     "R=4", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax_acc, target_ranks, large_blocks_errors, valid_lb, 
-                    "R=16", colors[:large_blocks], markers[:large_blocks])
+                    "R=8", colors[:large_blocks], markers[:large_blocks])
     plot_valid_data!(ax_acc, target_ranks, xlarge_blocks_errors, valid_xlb, 
-                    "R=32", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
     
     # Timing subplot
     ax_time = Axis(fig_combined[1, 2], 
@@ -931,9 +900,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax_time, target_ranks, small_blocks_times, valid_sb_time, 
                     "R=4", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax_time, target_ranks, large_blocks_times, valid_lb_time, 
-                    "R=16", colors[:large_blocks], markers[:large_blocks])
+                    "R=8", colors[:large_blocks], markers[:large_blocks])
     plot_valid_data!(ax_time, target_ranks, xlarge_blocks_times, valid_xlb_time, 
-                    "R=32", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
     
     # Add horizontal legend below both subplots
     Legend(fig_combined[2, 1:2], ax_acc, 
@@ -976,8 +945,8 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
             for (block_rks, sketch_array, orthog_array, sketch_bars_array, orthog_bars_array) in [
                 (1, sketch_times_kr, orthog_times_kr, sketch_error_bars_kr, orthog_error_bars_kr),
                 (4, sketch_times_sb, orthog_times_sb, sketch_error_bars_sb, orthog_error_bars_sb),
-                (16, sketch_times_lb, orthog_times_lb, sketch_error_bars_lb, orthog_error_bars_lb),
-                (32, sketch_times_xlb, orthog_times_xlb, sketch_error_bars_xlb, orthog_error_bars_xlb)
+                (8, sketch_times_lb, orthog_times_lb, sketch_error_bars_lb, orthog_error_bars_lb),
+                (16, sketch_times_xlb, orthog_times_xlb, sketch_error_bars_xlb, orthog_error_bars_xlb)
             ]
                 block_key = "block_rks_$block_rks"
                 if haskey(rank_data, block_key) && rank_data[block_key]["success_rate"] > 0
@@ -1071,9 +1040,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax3, target_ranks, sketch_times_sb, valid_sketch_sb, 
                     "R=4 (sketch)", colors[:small_blocks], markers[:small_blocks]; linestyle=:dash)
     plot_valid_data!(ax3, target_ranks, sketch_times_lb, valid_sketch_lb, 
-                    "R=16 (sketch)", colors[:large_blocks], markers[:large_blocks]; linestyle=:dash)
+                    "R=8 (sketch)", colors[:large_blocks], markers[:large_blocks]; linestyle=:dash)
     plot_valid_data!(ax3, target_ranks, sketch_times_xlb, valid_sketch_xlb, 
-                    "R=32 (sketch)", colors[:xlarge_blocks], markers[:xlarge_blocks]; linestyle=:dash)
+                    "R=16 (sketch)", colors[:xlarge_blocks], markers[:xlarge_blocks]; linestyle=:dash)
     
     # Plot orthogonalization times (solid lines)
     plot_valid_data!(ax3, target_ranks, orthog_times_kr, valid_orthog_kr, 
@@ -1081,9 +1050,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax3, target_ranks, orthog_times_sb, valid_orthog_sb, 
                     "R=4 (QR)", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax3, target_ranks, orthog_times_lb, valid_orthog_lb, 
-                    "R=16 (QR)", colors[:large_blocks], markers[:large_blocks])
+                    "R=8 (QR)", colors[:large_blocks], markers[:large_blocks])
     plot_valid_data!(ax3, target_ranks, orthog_times_xlb, valid_orthog_xlb, 
-                    "R=32 (QR)", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=16 (QR)", colors[:xlarge_blocks], markers[:xlarge_blocks])
     
     # Add legend
     axislegend(ax3, position = :lt)
@@ -1135,8 +1104,8 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
             for (block_rks, memory_array, memory_bars_array) in [
                 (1, khatri_rao_memory, khatri_rao_memory_bars),
                 (4, small_blocks_memory, small_blocks_memory_bars),
-                (16, large_blocks_memory, large_blocks_memory_bars),
-                (32, xlarge_blocks_memory, xlarge_blocks_memory_bars)
+                (8, large_blocks_memory, large_blocks_memory_bars),
+                (16, xlarge_blocks_memory, xlarge_blocks_memory_bars)
             ]
                 block_key = "block_rks_$block_rks"
                 if haskey(rank_data, block_key) && rank_data[block_key]["success_rate"] > 0
@@ -1202,9 +1171,9 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     plot_valid_data!(ax4, target_ranks, small_blocks_memory, valid_sb_memory, 
                     "R=4", colors[:small_blocks], markers[:small_blocks])
     plot_valid_data!(ax4, target_ranks, large_blocks_memory, valid_lb_memory, 
-                    "R=16", colors[:large_blocks], markers[:large_blocks])
+                    "R=8", colors[:large_blocks], markers[:large_blocks])
     plot_valid_data!(ax4, target_ranks, xlarge_blocks_memory, valid_xlb_memory, 
-                    "R=32", colors[:xlarge_blocks], markers[:xlarge_blocks])
+                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
 
     # Add legend
     axislegend(ax4, position = :lt)
