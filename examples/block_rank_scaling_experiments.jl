@@ -227,7 +227,14 @@ function injectivity_vs_subspace_size(;
             println("Loading existing results... (use force_rerun=true to recompute)")
 
             # Load and return existing results
-            results = JSON3.read(read(filename, String), Dict{String,Any})
+            if isempty(results)
+                results = JSON3.read(read(filename, String), Dict{String,Any})
+            else
+                tmp = JSON3.read(read(filename, String), Dict{String,Any})
+                for key in keys(tmp)
+                    results[key] = tmp[key]
+                end
+            end
             # Convert arrays to proper format (JSON converts them to nested structures)
             μ_list_loaded = collect(results["μ_list"])
             block_rks_list_loaded = collect(results["block_rks_list"])
@@ -247,134 +254,127 @@ function injectivity_vs_subspace_size(;
                     end
                 end
             end
+        else
+            println("=== Scenario 2: Injectivity vs Subspace Size μ ===")
+            println("Fixed dimension N = $N")
+            println("Subspace size μ values: $μ_list")
+            println("Subspace spanned rank: $μ_rk")
+            println("Block ranks: $block_rks_list")
+            println("Physical dimension per core: $d")
+            println("Realizations: $n_realizations")
+            println()
+            flush(stdout) # <--- Force the text to appear in the Slurm output file
 
-            # Note: Individual plots replaced by combined plotting function
+            dims = ntuple(i -> d, N)
 
-            return results
-        end
+            results["N"] = N
+            results["d"] = d
+            results["μ_list"] = μ_list
+            results["block_rks_list"] = block_rks_list
+            results["n_realizations"] = n_realizations
 
-        println("=== Scenario 2: Injectivity vs Subspace Size μ ===")
-        println("Fixed dimension N = $N")
-        println("Subspace size μ values: $μ_list")
-        println("Subspace spanned rank: $μ_rk")
-        println("Block ranks: $block_rks_list")
-        println("Physical dimension per core: $d")
-        println("Realizations: $n_realizations")
-        println()
-        flush(stdout) # <--- Force the text to appear in the Slurm output file
+            # Test all 4 combinations
+            for T in test_types
+                type_name = T == Float64 ? "Float64" : "ComplexF64"
 
-        dims = ntuple(i -> d, N)
+                for orthogonal in [true, false]
+                    orth_name = orthogonal ? "orthogonal" : "non_orthogonal"
+                    approach_name = "$(type_name)_$(orth_name)_rank-$(μ_rk)"
 
-        results["N"] = N
-        results["d"] = d
-        results["μ_list"] = μ_list
-        results["block_rks_list"] = block_rks_list
-        results["n_realizations"] = n_realizations
+                    println("\n--- Testing $approach_name ---")
+                    flush(stdout) # <--- Force the text to appear in the Slurm output file
 
-        # Test all 4 combinations
-        for T in test_types
-            type_name = T == Float64 ? "Float64" : "ComplexF64"
+                    # Storage: [μ_index, block_rks_index, realization]
+                    injectivity_data = zeros(length(μ_list), length(block_rks_list), n_realizations)
+                    dilation_data = zeros(length(μ_list), length(block_rks_list), n_realizations)
 
-            for orthogonal in [true, false]
-                orth_name = orthogonal ? "orthogonal" : "non_orthogonal"
-                approach_name = "$(type_name)_$(orth_name)_rank-$(μ_rk)"
+                    for (i_μ, μ) in enumerate(μ_list)
+                        println("  μ = $μ:")
 
-                println("\n--- Testing $approach_name ---")
-                flush(stdout) # <--- Force the text to appear in the Slurm output file
-
-                # Storage: [μ_index, block_rks_index, realization]
-                injectivity_data = zeros(length(μ_list), length(block_rks_list), n_realizations)
-                dilation_data = zeros(length(μ_list), length(block_rks_list), n_realizations)
-
-                for (i_μ, μ) in enumerate(μ_list)
-                    println("  μ = $μ:")
-
-                    # Generate rank-μ_rk subspace
-                    X = Vector{TTvector{T,N}}(undef, μ)
-                    for j = 1:μ
-                        rks_1 = ntuple(i -> μ_rk, N+1)
-                        X[j] = rand_tt(T, dims, rks_1; orthogonal=true, normalise=false, seed=seed + j)
-                        X[j] = X[j] / norm(X[j])
-                    end
-
-                    # Compute Cholesky orthogonalization
-                    A = zeros(T, μ, μ)
-                    for j1 = 1:μ
-                        A[j1,j1] = dot(X[j1], X[j1])
-                        for j2 = j1+1:μ
-                            A[j1,j2] = dot(X[j1], X[j2])
+                        # Generate rank-μ_rk subspace
+                        X = Vector{TTvector{T,N}}(undef, μ)
+                        for j = 1:μ
+                            rks_1 = ntuple(i -> μ_rk, N+1)
+                            X[j] = rand_tt(T, dims, rks_1; orthogonal=true, normalise=false, seed=seed + j)
+                            X[j] = X[j] / norm(X[j])
                         end
-                    end
-                    A = Hermitian(A, :L)
-                    C = inv(cholesky(A).U)
 
-                    # Test each block rank
-                    for (i_blk, block_rks) in enumerate(block_rks_list)
-                        print("    block_rks=$block_rks: ")
-                        flush(stdout) # <--- Force the text to appear in the Slurm output file
-
-                        # Get sketch dimension
-                        _, sketch_rks = tt_recursive_sketch(T, X[1], 2μ;
-                                                            orthogonal=orthogonal, reverse=false,
-                                                            block_rks=block_rks, seed=seed)
-                        sketch_dim = sketch_rks[N+1]
-
-                        for real = 1:n_realizations
-                            # Build sketch matrix
-                            Ω_matrix = zeros(T, sketch_dim, μ)
-                            sketch_seed = seed + real + 1000*i_blk + 10000*i_μ
-
-                            for j = 1:μ
-                                W, _ = tt_recursive_sketch(T, X[j], 2μ;
-                                                        orthogonal=orthogonal, reverse=false,
-                                                        seed=sketch_seed, block_rks=block_rks)
-                                Ω_matrix[:, j] = W[N+1]'
+                        # Compute Cholesky orthogonalization
+                        A = zeros(T, μ, μ)
+                        for j1 = 1:μ
+                            A[j1,j1] = dot(X[j1], X[j1])
+                            for j2 = j1+1:μ
+                                A[j1,j2] = dot(X[j1], X[j2])
                             end
-
-                            # Apply orthogonalization and compute SVD
-                            Ω_orth = Ω_matrix * C
-                            σ = svdvals(Ω_orth)
-                            injectivity_data[i_μ, i_blk, real] = σ[end]^2
-                            dilation_data[i_μ, i_blk, real] = σ[1]^2
-
-                            print(".")
                         end
-                        println()
+                        A = Hermitian(A, :L)
+                        C = inv(cholesky(A).U)
+
+                        # Test each block rank
+                        for (i_blk, block_rks) in enumerate(block_rks_list)
+                            print("    block_rks=$block_rks: ")
+                            flush(stdout) # <--- Force the text to appear in the Slurm output file
+
+                            # Get sketch dimension
+                            _, sketch_rks = tt_recursive_sketch(T, X[1], 2μ;
+                                                                orthogonal=orthogonal, reverse=false,
+                                                                block_rks=block_rks, seed=seed)
+                            sketch_dim = sketch_rks[N+1]
+
+                            for real = 1:n_realizations
+                                # Build sketch matrix
+                                Ω_matrix = zeros(T, sketch_dim, μ)
+                                sketch_seed = seed + real + 1000*i_blk + 10000*i_μ
+
+                                for j = 1:μ
+                                    W, _ = tt_recursive_sketch(T, X[j], 2μ;
+                                                            orthogonal=orthogonal, reverse=false,
+                                                            seed=sketch_seed, block_rks=block_rks)
+                                    Ω_matrix[:, j] = W[N+1]'
+                                end
+
+                                # Apply orthogonalization and compute SVD
+                                Ω_orth = Ω_matrix * C
+                                σ = svdvals(Ω_orth)
+                                injectivity_data[i_μ, i_blk, real] = σ[end]^2
+                                dilation_data[i_μ, i_blk, real] = σ[1]^2
+
+                                print(".")
+                            end
+                            println()
+                        end
                     end
+
+                    # Compute statistics
+                    results[approach_name] = Dict(
+                        "injectivity" => injectivity_data,
+                        "dilation" => dilation_data,
+                        "median_injectivity" => [median(injectivity_data[i, j, :])
+                                                for i in 1:length(μ_list), j in 1:length(block_rks_list)],
+                        "q25_injectivity" => [quantile(injectivity_data[i, j, :], 0.25)
+                                            for i in 1:length(μ_list), j in 1:length(block_rks_list)],
+                        "q75_injectivity" => [quantile(injectivity_data[i, j, :], 0.75)
+                                            for i in 1:length(μ_list), j in 1:length(block_rks_list)],
+
+
+
+                        "median_dilation" => [median(dilation_data[i, j, :])
+                                                for i in 1:length(μ_list), j in 1:length(block_rks_list)],
+                        "q25_dilation" => [quantile(dilation_data[i, j, :], 0.25)
+                                            for i in 1:length(μ_list), j in 1:length(block_rks_list)],
+                        "q75_dilation" => [quantile(dilation_data[i, j, :], 0.75)
+                                            for i in 1:length(μ_list), j in 1:length(block_rks_list)]
+                    )
                 end
-
-                # Compute statistics
-                results[approach_name] = Dict(
-                    "injectivity" => injectivity_data,
-                    "dilation" => dilation_data,
-                    "median_injectivity" => [median(injectivity_data[i, j, :])
-                                            for i in 1:length(μ_list), j in 1:length(block_rks_list)],
-                    "q25_injectivity" => [quantile(injectivity_data[i, j, :], 0.25)
-                                        for i in 1:length(μ_list), j in 1:length(block_rks_list)],
-                    "q75_injectivity" => [quantile(injectivity_data[i, j, :], 0.75)
-                                        for i in 1:length(μ_list), j in 1:length(block_rks_list)],
-
-
-
-                    "median_dilation" => [median(dilation_data[i, j, :])
-                                            for i in 1:length(μ_list), j in 1:length(block_rks_list)],
-                    "q25_dilation" => [quantile(dilation_data[i, j, :], 0.25)
-                                        for i in 1:length(μ_list), j in 1:length(block_rks_list)],
-                    "q75_dilation" => [quantile(dilation_data[i, j, :], 0.75)
-                                        for i in 1:length(μ_list), j in 1:length(block_rks_list)]
-                )
             end
+
+            # Note: Individual plots handled by combined plotting function
+
+            # Save results
+            open(io -> JSON3.write(io, results, allow_inf=true), filename, "w")
+            println("Results saved to: $filename")
+            flush(stdout) # <--- Force the text to appear in the Slurm output file
         end
-
-        # Note: Individual plots handled by combined plotting function
-
-        # Save results
-        mkpath(dir)
-        filename = "$dir/scaling_vs_subspace_N$(N)_rank-$(μ_rk).json"
-        open(io -> JSON3.write(io, results, allow_inf=true), filename, "w")
-        println("Results saved to: $filename")
-        flush(stdout) # <--- Force the text to appear in the Slurm output file
-
     end
     return results
 end
