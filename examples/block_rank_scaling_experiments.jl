@@ -420,7 +420,7 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
             colors_blk = Dict{Int, Symbol}()
             markers_blk = Dict{Int, Symbol}()
             color_elements = MarkerElement[]
-            color_labels = LaTeXString[]
+            color_labels = []
 
             for (i, rk) in enumerate(block_rks_list)
                 c = base_colors[mod1(i, length(base_colors))]
@@ -430,7 +430,7 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
                 
                 push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
                 label_str = rk == 1 ? "R=1(Khatri-Rao)" : "R = $rk"
-                push!(color_labels, LaTeXString(label_str))
+                push!(color_labels, label_str)
             end
 
             fig = Figure(size = (624, 600))

@@ -337,7 +337,7 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
         colors_blk = Dict{Int, Symbol}()
         markers_blk = Dict{Int, Symbol}()
         color_elements = MarkerElement[]
-        color_labels = LaTeXString[]
+        color_labels = []
 
         for (i, rk) in enumerate(block_rks_list)
             c = base_colors[mod1(i, length(base_colors))]
@@ -347,7 +347,7 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
             
             push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
             label_str = rk == 1 ? "Rank 1 (Khatri-Rao)" : "Rank $rk"
-            push!(color_labels, LaTeXString(label_str))
+            push!(color_labels, label_str)
         end
 
         # Create title with interpolated values
@@ -358,7 +358,7 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
         fig = Figure(size = (800, 600))
         ax = Axis(fig[1, 1],
                   xlabel = L"Noise Level $\varepsilon$",
-                  ylabel = LaTeXString("Relative Error"),
+                  ylabel = "Relative Error",
                   xscale = log10,
                   yscale = log10,
                   limits = (nothing, (1e-5, 1e3)),
@@ -487,7 +487,7 @@ function create_combined_plot(results1, results2; dir = "out/randomized_rounding
         colors_blk = Dict{Int, Symbol}()
         markers_blk = Dict{Int, Symbol}()
         color_elements = MarkerElement[]
-        color_labels = LaTeXString[]
+        color_labels = []
 
         for (i, rk) in enumerate(block_rks_list)
             c = base_colors[mod1(i, length(base_colors))]
