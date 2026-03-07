@@ -347,7 +347,7 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
             
             push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
             label_str = rk == 1 ? "Rank 1 (Khatri-Rao)" : "Rank $rk"
-            push!(color_labels, label_str)
+            push!(color_labels, LaTeXString(label_str))
         end
 
         # Create title with interpolated values

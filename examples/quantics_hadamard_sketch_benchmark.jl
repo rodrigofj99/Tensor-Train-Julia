@@ -613,7 +613,7 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, dir="out/ha
     colors[:deterministic] = :black
     markers[:deterministic] = :star8
     push!(color_elements, MarkerElement(marker = :star8, color = :black, markersize = 10, strokecolor = :transparent))
-    push!(color_labels, "Deterministic")
+    push!(color_labels, LaTeXString("Deterministic"))
 
     for (i, rk) in enumerate(all_block_rks)
         c = base_colors[mod1(i, length(base_colors))]
@@ -623,7 +623,7 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, dir="out/ha
 
         push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
         label_str = rk == 1 ? "R=1(Khatri-Rao)" : "R = $rk"
-        push!(color_labels, label_str)
+        push!(color_labels, LaTeXString(label_str))
     end
     
     # Extract data for plotting
@@ -1183,7 +1183,7 @@ function save_benchmark_results(results::Dict{String, Any}, metadata::Dict{Strin
         "timestamp" => string(now())
     )
     
-    results_file = joinpath(save_dir, "hadamard_benchmark_results.json")
+    results_file = joinpath(dir, "hadamard_benchmark_results.json")
     open(results_file, "w") do io
         JSON3.write(io, full_results, allow_inf=true)
     end

@@ -430,7 +430,7 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
                 
                 push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
                 label_str = rk == 1 ? "R=1(Khatri-Rao)" : "R = $rk"
-                push!(color_labels, label_str)
+                push!(color_labels, LaTeXString(label_str))
             end
 
             fig = Figure(size = (624, 600))
