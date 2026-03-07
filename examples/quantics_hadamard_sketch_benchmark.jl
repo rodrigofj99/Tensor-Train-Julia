@@ -613,7 +613,7 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, dir="out/ha
     colors[:deterministic] = :black
     markers[:deterministic] = :star8
     push!(color_elements, MarkerElement(marker = :star8, color = :black, markersize = 10, strokecolor = :transparent))
-    push!(color_labels, LaTeXString("Deterministic"))
+    push!(color_labels, "Deterministic")
 
     for (i, rk) in enumerate(all_block_rks)
         c = base_colors[mod1(i, length(base_colors))]
@@ -623,7 +623,7 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, dir="out/ha
 
         push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
         label_str = rk == 1 ? "R=1(Khatri-Rao)" : "R = $rk"
-        push!(color_labels, LaTeXString(label_str))
+        push!(color_labels, label_str)
     end
     
     # Extract data for plotting

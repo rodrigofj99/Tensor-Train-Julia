@@ -347,7 +347,7 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
             
             push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
             label_str = rk == 1 ? "Rank 1 (Khatri-Rao)" : "Rank $rk"
-            push!(color_labels, LaTeXString(label_str))
+            push!(color_labels, label_str)
         end
 
         # Create title with interpolated values
@@ -372,7 +372,7 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
             color = colors_blk[block_rks]
             marker = markers_blk[block_rks]
 
-            for (linestyle, method_name) in [(:solid, "ttrand_orthogonal_blk"), (:dash, "stta_orthogonal_blk")]
+            for (linestyle, method_name) in [((:dash, :dense), "ttrand_orthogonal_blk"), ((:dot, :dense), "stta_orthogonal_blk")]
                 full_key = method_name*"$(block_rks)"
                 if !haskey(results, full_key)
                     continue
@@ -402,10 +402,10 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
         
         # Create custom legend elements
         line_elements = [
-            LineElement(color = :black, linestyle = nothing, linewidth = 2),
+            LineElement(color = :black, linestyle = :dash, linewidth = 2),
             LineElement(color = :black, linestyle = :dot, linewidth = 2)
         ]
-        line_labels = [LaTeXString("RandOrth (solid)"), LaTeXString("STTA (dotted)")]
+        line_labels = ["RandOrth (solid)", "STTA (dotted)"]
         
         ref_elements = [LineElement(color = :gray, linestyle = :dashdot, linewidth = 1)]
         ref_labels = [L"$\varepsilon$ (reference)"]
@@ -497,7 +497,7 @@ function create_combined_plot(results1, results2; dir = "out/randomized_rounding
             
             push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
             label_str = rk == 1 ? "R=1 (Khatri-Rao)" : "R=$rk"
-            push!(color_labels, LaTeXString(label_str))
+            push!(color_labels, label_str)
         end
 
         fig = Figure(size = (624, 300))  # 6.5" wide, 4.5" tall (72 DPI equivalent)
@@ -524,7 +524,7 @@ function create_combined_plot(results1, results2; dir = "out/randomized_rounding
 
         # Plot selected methods for both cases
         for (ax, results) in [(ax1, results1), (ax2, results2)]
-            for (linestyle, method_name) in [(:solid, "ttrand_orthogonal_blk"), (:dash, "stta_orthogonal_blk")]
+            for (linestyle, method_name) in [((:dash, :dense), "ttrand_orthogonal_blk"), ((:dot, :dense), "stta_orthogonal_blk")]
                 for block_rks in block_rks_list
                     full_key = method_name*"$(block_rks)"
                     if !haskey(results, full_key)
@@ -559,10 +559,10 @@ function create_combined_plot(results1, results2; dir = "out/randomized_rounding
         
         # Create custom legend elements
         line_elements = [
-            LineElement(color = :black, linestyle = nothing, linewidth = 2),
+            LineElement(color = :black, linestyle = :dash, linewidth = 2),
             LineElement(color = :black, linestyle = :dot, linewidth = 2)
         ]
-        line_labels = [LaTeXString("RandOrth"), LaTeXString("STTA")]
+        line_labels = ["RandOrth", "STTA"]
         
         
         ref_elements = [LineElement(color = :gray, linestyle = :dashdot, linewidth = 1)]

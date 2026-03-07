@@ -430,7 +430,7 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
                 
                 push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
                 label_str = rk == 1 ? "R=1(Khatri-Rao)" : "R = $rk"
-                push!(color_labels, LaTeXString(label_str))
+                push!(color_labels, label_str)
             end
 
             fig = Figure(size = (624, 600))
@@ -440,7 +440,7 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
                     ylabel = L"Injectivity $\sigma^2_{\mathrm{min}}$",
                     yscale = log10,
                     limits = (nothing, (1e-7, 1e0)),
-                    title = LaTeXString("Injectivity vs d (r = $μ_fixed)"))
+                    title = "Injectivity vs d (r = $μ_fixed)")
 
             ax2 = Axis(fig[1, 2],
                     xlabel = L"Subspace Size $r$",
@@ -448,14 +448,14 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
                     yscale = log10,
                     limits = (nothing, (1e-7, 1e0)),
                     xticks = ([8, 16, 32, 64, 128], ["8", "16", "32", "64", "128"]),
-                    title = LaTeXString("Injectivity vs r (d = $N_fixed)"))
+                    title = "Injectivity vs r (d = $N_fixed)")
 
             ax3 = Axis(fig[2, 1],
                     xlabel = L"Dimension $d$",
                     ylabel = L"Dilation $\sigma^2_{\mathrm{max}}$",
                     yscale = log10,
                     limits = (nothing, (1e-2, 1e2)),
-                    title = LaTeXString("Dilation vs d (r = $μ_fixed)"))
+                    title = "Dilation vs d (r = $μ_fixed)")
 
             ax4 = Axis(fig[2, 2],
                     xlabel = L"Subspace Size $r$",
@@ -463,7 +463,7 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
                     yscale = log10,
                     limits = (nothing, (1e-2, 1e2)),
                     xticks = ([8, 16, 32, 64, 128], ["8", "16", "32", "64", "128"]),
-                    title = LaTeXString("Dilation vs r (d = $N_fixed)"))
+                    title = "Dilation vs r (d = $N_fixed)")
 
             # Link axis for consistent scaling
             linkyaxes!(ax1, ax2)
