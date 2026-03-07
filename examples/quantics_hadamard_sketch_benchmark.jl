@@ -581,57 +581,79 @@ end
 """
 Create plots comparing different block rank configurations using Makie
 """
-function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="out/hadamard_benchmarks")
+function create_hadamard_benchmark_plots(results::Dict{String, Any}, dir="out/hadamard_benchmarks")
     println("Creating benchmark comparison plots...")
-    
+    save_dir = "$dir/plots"
     mkpath(save_dir)
     
-    # Define colors and markers for consistent styling
+    # Base palettes for dynamic generation
+    base_colors = [:blue, :orange, :green, :red, :purple, :cyan, :brown, :magenta]
+    base_markers = [:circle, :rect, :diamond, :utriangle, :dtriangle, :star5, :xcross, :hexagon]
+
+    # Find all unique block ranks present in results
+    all_block_rks = Int[]
+    for (rank_key, rank_data) in results
+        if startswith(rank_key, "target_rank_")
+            for key in keys(rank_data)
+                if startswith(key, "block_rks_")
+                    push!(all_block_rks, rank_data[key]["block_rks"])
+                end
+            end
+        end
+    end
+    unique!(all_block_rks)
+    sort!(all_block_rks)
+
+    # Dynamically build mapping dictionaries
+    colors = Dict{Any, Symbol}()
+    markers = Dict{Any, Symbol}()
+    color_elements = MarkerElement[]
+    color_labels = LaTeXString[]
     
-    colors = Dict(
-        :deterministic => :black,
-        :khatri_rao => :blue,
-        :small_blocks => :yellow,
-        :large_blocks => :green,
-        :xlarge_blocks => :red
-    )
-    
-    markers = Dict(
-        :deterministic => :star8,
-        :khatri_rao => :circle,
-        :small_blocks => :rect,
-        :large_blocks => :diamond,
-        :xlarge_blocks => :cross
-    )
+    colors[:deterministic] = :black
+    markers[:deterministic] = :star8
+    push!(color_elements, MarkerElement(marker = :star8, color = :black, markersize = 10, strokecolor = :transparent))
+    push!(color_labels, LaTeXString("Deterministic"))
+
+    for (i, rk) in enumerate(all_block_rks)
+        c = base_colors[mod1(i, length(base_colors))]
+        m = base_markers[mod1(i, length(base_markers))]
+        colors[rk] = c
+        markers[rk] = m
+
+        push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
+        label_str = rk == 1 ? "R=1(Khatri-Rao)" : "R = $rk"
+        push!(color_labels, LaTeXString(label_str))
+    end
     
     # Extract data for plotting
     target_ranks = Int[]
     
     # Data arrays for each configuration
     deterministic_errors = Float64[]
-    khatri_rao_errors = Float64[]
-    small_blocks_errors = Float64[]
-    large_blocks_errors = Float64[]
-    xlarge_blocks_errors = Float64[]
+    block_errors = Dict{Int, Vector{Float64}}()
+    for rk in all_block_rks
+        block_errors[rk] = Float64[]
+    end
     
     deterministic_times = Float64[]
-    khatri_rao_times = Float64[]
-    small_blocks_times = Float64[]
-    large_blocks_times = Float64[]
-    xlarge_blocks_times = Float64[]
+    block_times = Dict{Int, Vector{Float64}}()
+    for rk in all_block_rks
+        block_times[rk] = Float64[]
+    end
     
     # Error bar data (for 25th and 75th percentiles)
     deterministic_error_bars = Tuple{Float64, Float64}[]
-    khatri_rao_error_bars = Tuple{Float64, Float64}[]
-    small_blocks_error_bars = Tuple{Float64, Float64}[]
-    large_blocks_error_bars = Tuple{Float64, Float64}[]
-    xlarge_blocks_error_bars = Tuple{Float64, Float64}[]
+    block_error_bars = Dict{Int, Vector{Tuple{Float64, Float64}}}()
+    for rk in all_block_rks
+        block_error_bars[rk] = Tuple{Float64, Float64}[]
+    end
     
     deterministic_time_bars = Tuple{Float64, Float64}[]
-    khatri_rao_time_bars = Tuple{Float64, Float64}[]
-    small_blocks_time_bars = Tuple{Float64, Float64}[]
-    large_blocks_time_bars = Tuple{Float64, Float64}[]
-    xlarge_blocks_time_bars = Tuple{Float64, Float64}[]
+    block_time_bars = Dict{Int, Vector{Tuple{Float64, Float64}}}()
+    for rk in all_block_rks
+        block_time_bars[rk] = Tuple{Float64, Float64}[]
+    end
     
     # Extract data from results
     for (rank_key, rank_data) in results
@@ -669,17 +691,12 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
             end
             
             # Extract error and timing data for each block configuration
-            for (block_rks, data_array, time_array, error_bars_array, time_bars_array) in [
-                (1, khatri_rao_errors, khatri_rao_times, khatri_rao_error_bars, khatri_rao_time_bars),
-                (4, small_blocks_errors, small_blocks_times, small_blocks_error_bars, small_blocks_time_bars), 
-                (8, large_blocks_errors, large_blocks_times, large_blocks_error_bars, large_blocks_time_bars),
-                (16, xlarge_blocks_errors, xlarge_blocks_times, xlarge_blocks_error_bars, xlarge_blocks_time_bars)
-            ]
+            for block_rks in all_block_rks
                 block_key = "block_rks_$block_rks"
                 if haskey(rank_data, block_key) && rank_data[block_key]["success_rate"] > 0
                     block_data = rank_data[block_key]
-                    push!(data_array, block_data["median_error"])
-                    push!(time_array, block_data["median_time"] * 1000)  # Convert to ms
+                    push!(block_errors[block_rks], block_data["median_error"])
+                    push!(block_times[block_rks], block_data["median_time"] * 1000)  # Convert to ms
                     
                     # Calculate error bars (25th and 75th percentiles)
                     if haskey(block_data, "errors") && length(block_data["errors"]) > 1
@@ -691,17 +708,17 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
                         time_25 = quantile(times_sorted, 0.25)
                         time_75 = quantile(times_sorted, 0.75)
                         
-                        push!(error_bars_array, (error_25, error_75))
-                        push!(time_bars_array, (time_25, time_75))
+                        push!(block_error_bars[block_rks], (error_25, error_75))
+                        push!(block_time_bars[block_rks], (time_25, time_75))
                     else
-                        push!(error_bars_array, (block_data["median_error"], block_data["median_error"]))
-                        push!(time_bars_array, (block_data["median_time"] * 1000, block_data["median_time"] * 1000))
+                        push!(block_error_bars[block_rks], (block_data["median_error"], block_data["median_error"]))
+                        push!(block_time_bars[block_rks], (block_data["median_time"] * 1000, block_data["median_time"] * 1000))
                     end
                 else
-                    push!(data_array, NaN)
-                    push!(time_array, NaN)
-                    push!(error_bars_array, (NaN, NaN))
-                    push!(time_bars_array, (NaN, NaN))
+                    push!(block_errors[block_rks], NaN)
+                    push!(block_times[block_rks], NaN)
+                    push!(block_error_bars[block_rks], (NaN, NaN))
+                    push!(block_time_bars[block_rks], (NaN, NaN))
                 end
             end
         end
@@ -711,29 +728,17 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     sort_idx = sortperm(target_ranks)
     target_ranks = target_ranks[sort_idx]
     deterministic_errors = deterministic_errors[sort_idx]
-    khatri_rao_errors = khatri_rao_errors[sort_idx]
-    small_blocks_errors = small_blocks_errors[sort_idx]
-    large_blocks_errors = large_blocks_errors[sort_idx]
-    xlarge_blocks_errors = xlarge_blocks_errors[sort_idx]
-
     deterministic_times = deterministic_times[sort_idx]
-    khatri_rao_times = khatri_rao_times[sort_idx]
-    small_blocks_times = small_blocks_times[sort_idx]
-    large_blocks_times = large_blocks_times[sort_idx]
-    xlarge_blocks_times = xlarge_blocks_times[sort_idx]
-    
-    # Sort error bar arrays
     deterministic_error_bars = deterministic_error_bars[sort_idx]
-    khatri_rao_error_bars = khatri_rao_error_bars[sort_idx]
-    small_blocks_error_bars = small_blocks_error_bars[sort_idx]
-    large_blocks_error_bars = large_blocks_error_bars[sort_idx]
-    xlarge_blocks_error_bars = xlarge_blocks_error_bars[sort_idx]
-
     deterministic_time_bars = deterministic_time_bars[sort_idx]
-    khatri_rao_time_bars = khatri_rao_time_bars[sort_idx]
-    small_blocks_time_bars = small_blocks_time_bars[sort_idx]
-    large_blocks_time_bars = large_blocks_time_bars[sort_idx]
-    xlarge_blocks_time_bars = xlarge_blocks_time_bars[sort_idx]
+
+    for rk in all_block_rks
+        block_errors[rk] = block_errors[rk][sort_idx]
+        block_times[rk] = block_times[rk][sort_idx]
+        block_error_bars[rk] = block_error_bars[rk][sort_idx]
+        block_time_bars[rk] = block_time_bars[rk][sort_idx]
+    end
+    
     
     # Helper function to add error bands with CairoMakie
     function add_error_band!(ax, x_vals, y_vals, error_bars, valid_mask, color, alpha=0.3)
@@ -776,29 +781,22 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     
     # Filter out NaN values for plotting
     valid_det = .!isnan.(deterministic_errors)
-    valid_kr = .!isnan.(khatri_rao_errors)
-    valid_sb = .!isnan.(small_blocks_errors)
-    valid_lb = .!isnan.(large_blocks_errors)
-    valid_xlb = .!isnan.(xlarge_blocks_errors)
     
     # Add error bands first (so they appear behind the lines)
     add_error_band!(ax1, target_ranks, deterministic_errors, deterministic_error_bars, valid_det, colors[:deterministic])
-    add_error_band!(ax1, target_ranks, khatri_rao_errors, khatri_rao_error_bars, valid_kr, colors[:khatri_rao])
-    add_error_band!(ax1, target_ranks, small_blocks_errors, small_blocks_error_bars, valid_sb, colors[:small_blocks])
-    add_error_band!(ax1, target_ranks, large_blocks_errors, large_blocks_error_bars, valid_lb, colors[:large_blocks])
-    add_error_band!(ax1, target_ranks, xlarge_blocks_errors, xlarge_blocks_error_bars, valid_lb, colors[:xlarge_blocks])
+    for rk in all_block_rks
+        valid = .!isnan.(block_errors[rk])
+        add_error_band!(ax1, target_ranks, block_errors[rk], block_error_bars[rk], valid, colors[rk])
+    end
     
     # Plot data with lines and markers
     plot_valid_data!(ax1, target_ranks, deterministic_errors, valid_det, 
                     "Deterministic (tt_rounding)", colors[:deterministic], markers[:deterministic])
-    plot_valid_data!(ax1, target_ranks, khatri_rao_errors, valid_kr, 
-                    "R=1 (Khatri-Rao)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax1, target_ranks, small_blocks_errors, valid_sb, 
-                    "R=4", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax1, target_ranks, large_blocks_errors, valid_lb, 
-                    "R=8", colors[:large_blocks], markers[:large_blocks])
-    plot_valid_data!(ax1, target_ranks, xlarge_blocks_errors, valid_xlb, 
-                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
+    for rk in all_block_rks
+        valid = .!isnan.(block_errors[rk])
+        label = rk == 1 ? "R=1 (Khatri-Rao)" : "R=$rk"
+        plot_valid_data!(ax1, target_ranks, block_errors[rk], valid, label, colors[rk], markers[rk])
+    end
     
     # Add legend
     axislegend(ax1, position = :rt)
@@ -818,29 +816,22 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     
     # Filter out NaN values for timing plot
     valid_det_time = .!isnan.(deterministic_times)
-    valid_kr_time = .!isnan.(khatri_rao_times)
-    valid_sb_time = .!isnan.(small_blocks_times)
-    valid_lb_time = .!isnan.(large_blocks_times)
-    valid_xlb_time = .!isnan.(xlarge_blocks_times)
     
     # Add timing error bands
     add_error_band!(ax2, target_ranks, deterministic_times, deterministic_time_bars, valid_det_time, colors[:deterministic])
-    add_error_band!(ax2, target_ranks, khatri_rao_times, khatri_rao_time_bars, valid_kr_time, colors[:khatri_rao])
-    add_error_band!(ax2, target_ranks, small_blocks_times, small_blocks_time_bars, valid_sb_time, colors[:small_blocks])
-    add_error_band!(ax2, target_ranks, large_blocks_times, large_blocks_time_bars, valid_lb_time, colors[:large_blocks])
-    add_error_band!(ax2, target_ranks, xlarge_blocks_times, xlarge_blocks_time_bars, valid_xlb_time, colors[:xlarge_blocks])
+    for rk in all_block_rks
+        valid = .!isnan.(block_times[rk])
+        add_error_band!(ax2, target_ranks, block_times[rk], block_time_bars[rk], valid, colors[rk])
+    end
     
     # Plot timing data
     plot_valid_data!(ax2, target_ranks, deterministic_times, valid_det_time, 
                     "Deterministic (tt_rounding)", colors[:deterministic], markers[:deterministic])
-    plot_valid_data!(ax2, target_ranks, khatri_rao_times, valid_kr_time, 
-                    "R=1 (Khatri-Rao)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax2, target_ranks, small_blocks_times, valid_sb_time, 
-                    "R=4", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax2, target_ranks, large_blocks_times, valid_lb_time, 
-                    "R=8", colors[:large_blocks], markers[:large_blocks])
-    plot_valid_data!(ax2, target_ranks, xlarge_blocks_times, valid_xlb_time, 
-                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
+    for rk in all_block_rks
+        valid = .!isnan.(block_times[rk])
+        label = rk == 1 ? "R=1 (Khatri-Rao)" : "R=$rk"
+        plot_valid_data!(ax2, target_ranks, block_times[rk], valid, label, colors[rk], markers[rk])
+    end
     
     # Add legend
     axislegend(ax2, position = :lt)
@@ -864,21 +855,18 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     
     # Add error bands and data for accuracy
     add_error_band!(ax_acc, target_ranks, deterministic_errors, deterministic_error_bars, valid_det, colors[:deterministic])
-    add_error_band!(ax_acc, target_ranks, khatri_rao_errors, khatri_rao_error_bars, valid_kr, colors[:khatri_rao])
-    add_error_band!(ax_acc, target_ranks, small_blocks_errors, small_blocks_error_bars, valid_sb, colors[:small_blocks])
-    add_error_band!(ax_acc, target_ranks, large_blocks_errors, large_blocks_error_bars, valid_lb, colors[:large_blocks])
-    add_error_band!(ax_acc, target_ranks, xlarge_blocks_errors, xlarge_blocks_error_bars, valid_xlb, colors[:xlarge_blocks])
+    for rk in all_block_rks
+        valid = .!isnan.(block_errors[rk])
+        add_error_band!(ax_acc, target_ranks, block_errors[rk], block_error_bars[rk], valid, colors[rk])
+    end
     
     plot_valid_data!(ax_acc, target_ranks, deterministic_errors, valid_det, 
                     "Deterministic", colors[:deterministic], markers[:deterministic])
-    plot_valid_data!(ax_acc, target_ranks, khatri_rao_errors, valid_kr, 
-                    "R=1 (Khatri-Rao)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax_acc, target_ranks, small_blocks_errors, valid_sb, 
-                    "R=4", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax_acc, target_ranks, large_blocks_errors, valid_lb, 
-                    "R=8", colors[:large_blocks], markers[:large_blocks])
-    plot_valid_data!(ax_acc, target_ranks, xlarge_blocks_errors, valid_xlb, 
-                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
+    for rk in all_block_rks
+        valid = .!isnan.(block_errors[rk])
+        label = rk == 1 ? "R=1 (Khatri-Rao)" : "R=$rk"
+        plot_valid_data!(ax_acc, target_ranks, block_errors[rk], valid, label, colors[rk], markers[rk])
+    end
     
     # Timing subplot
     ax_time = Axis(fig_combined[1, 2], 
@@ -888,28 +876,29 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     
     # Add error bands and data for timing
     add_error_band!(ax_time, target_ranks, deterministic_times, deterministic_time_bars, valid_det_time, colors[:deterministic])
-    add_error_band!(ax_time, target_ranks, khatri_rao_times, khatri_rao_time_bars, valid_kr_time, colors[:khatri_rao])
-    add_error_band!(ax_time, target_ranks, small_blocks_times, small_blocks_time_bars, valid_sb_time, colors[:small_blocks])
-    add_error_band!(ax_time, target_ranks, large_blocks_times, large_blocks_time_bars, valid_lb_time, colors[:large_blocks])
-    add_error_band!(ax_time, target_ranks, xlarge_blocks_times, xlarge_blocks_time_bars, valid_xlb_time, colors[:xlarge_blocks])
+    for rk in all_block_rks
+        valid = .!isnan.(block_times[rk])
+        add_error_band!(ax_time, target_ranks, block_times[rk], block_time_bars[rk], valid, colors[rk])
+    end
     
     plot_valid_data!(ax_time, target_ranks, deterministic_times, valid_det_time, 
                     "Deterministic", colors[:deterministic], markers[:deterministic])
-    plot_valid_data!(ax_time, target_ranks, khatri_rao_times, valid_kr_time, 
-                    "R=1 (Khatri-Rao)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax_time, target_ranks, small_blocks_times, valid_sb_time, 
-                    "R=4", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax_time, target_ranks, large_blocks_times, valid_lb_time, 
-                    "R=8", colors[:large_blocks], markers[:large_blocks])
-    plot_valid_data!(ax_time, target_ranks, xlarge_blocks_times, valid_xlb_time, 
-                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
+    for rk in all_block_rks
+        valid = .!isnan.(block_times[rk])
+        label = rk == 1 ? "R=1 (Khatri-Rao)" : "R=$rk"
+        plot_valid_data!(ax_time, target_ranks, block_times[rk], valid, label, colors[rk], markers[rk])
+    end
     
     # Add horizontal legend below both subplots
-    Legend(fig_combined[2, 1:2], ax_acc, 
-           orientation = :horizontal, 
-           tellheight = true, 
-           framevisible = true,
-           halign = :center)
+    Legend(fig_combined[2, 1:2], color_elements, color_labels,
+            orientation = :horizontal, 
+            tellheight = true, 
+            framevisible = true,
+            halign = :center,
+            nbanks = 1,  # Single row
+            padding = (4, 4, 2, 2),
+            colgap = 8,
+            labelsize = 9)
     
     combined_file = joinpath(save_dir, "hadamard_benchmark_comparison.pdf")
     save(combined_file, fig_combined)
@@ -919,92 +908,65 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
     println("Creating timing breakdown plot...")
     
     # Extract sketch and orthogonalization times with error bars
-    sketch_times_kr = Float64[]
-    sketch_times_sb = Float64[]
-    sketch_times_lb = Float64[]
-    sketch_times_xlb = Float64[]
-    
-    orthog_times_kr = Float64[]
-    orthog_times_sb = Float64[]
-    orthog_times_lb = Float64[]
-    orthog_times_xlb = Float64[]
-    
-    # Error bar data for sketch and orthog times
-    sketch_error_bars_kr = Tuple{Float64, Float64}[]
-    sketch_error_bars_sb = Tuple{Float64, Float64}[]
-    sketch_error_bars_lb = Tuple{Float64, Float64}[]
-    sketch_error_bars_xlb = Tuple{Float64, Float64}[]
+    sketch_times = Dict{Int, Vector{Float64}}()
+    orthog_times = Dict{Int, Vector{Float64}}()
+    sketch_error_bars = Dict{Int, Vector{Tuple{Float64, Float64}}}()
+    orthog_error_bars = Dict{Int, Vector{Tuple{Float64, Float64}}}()
 
-    orthog_error_bars_kr = Tuple{Float64, Float64}[]
-    orthog_error_bars_sb = Tuple{Float64, Float64}[]
-    orthog_error_bars_lb = Tuple{Float64, Float64}[]
-    orthog_error_bars_xlb = Tuple{Float64, Float64}[]
+    for rk in all_block_rks
+        sketch_times[rk] = Float64[]
+        orthog_times[rk] = Float64[]
+        sketch_error_bars[rk] = Tuple{Float64, Float64}[]
+        orthog_error_bars[rk] = Tuple{Float64, Float64}[]
+    end
+    
     
     for (rank_key, rank_data) in results
         if startswith(rank_key, "target_rank_")
-            for (block_rks, sketch_array, orthog_array, sketch_bars_array, orthog_bars_array) in [
-                (1, sketch_times_kr, orthog_times_kr, sketch_error_bars_kr, orthog_error_bars_kr),
-                (4, sketch_times_sb, orthog_times_sb, sketch_error_bars_sb, orthog_error_bars_sb),
-                (8, sketch_times_lb, orthog_times_lb, sketch_error_bars_lb, orthog_error_bars_lb),
-                (16, sketch_times_xlb, orthog_times_xlb, sketch_error_bars_xlb, orthog_error_bars_xlb)
-            ]
+            for block_rks in all_block_rks
                 block_key = "block_rks_$block_rks"
                 if haskey(rank_data, block_key) && rank_data[block_key]["success_rate"] > 0
                     data = rank_data[block_key]
-                    push!(sketch_array, get(data, "median_sketch_time", 0.0) * 1000)  # Convert to ms
-                    push!(orthog_array, get(data, "median_orthog_time", 0.0) * 1000)  # Convert to ms
+                    push!(sketch_times[block_rks], get(data, "median_sketch_time", 0.0) * 1000)  # Convert to ms
+                    push!(orthog_times[block_rks], get(data, "median_orthog_time", 0.0) * 1000)  # Convert to ms
                     
                     # Calculate error bars for sketch and orthog times
                     if haskey(data, "sketch_times") && length(data["sketch_times"]) > 1
                         sketch_times_sorted = sort(data["sketch_times"]) * 1000  # Convert to ms
                         sketch_25 = quantile(sketch_times_sorted, 0.25)
                         sketch_75 = quantile(sketch_times_sorted, 0.75)
-                        push!(sketch_bars_array, (sketch_25, sketch_75))
+                        push!(sketch_error_bars[block_rks], (sketch_25, sketch_75))
                     else
                         median_sketch = get(data, "median_sketch_time", 0.0) * 1000
-                        push!(sketch_bars_array, (median_sketch, median_sketch))
+                        push!(sketch_error_bars[block_rks], (median_sketch, median_sketch))
                     end
                     
                     if haskey(data, "orthog_times") && length(data["orthog_times"]) > 1
                         orthog_times_sorted = sort(data["orthog_times"]) * 1000  # Convert to ms
                         orthog_25 = quantile(orthog_times_sorted, 0.25)
                         orthog_75 = quantile(orthog_times_sorted, 0.75)
-                        push!(orthog_bars_array, (orthog_25, orthog_75))
+                        push!(orthog_error_bars[block_rks], (orthog_25, orthog_75))
                     else
                         median_orthog = get(data, "median_orthog_time", 0.0) * 1000
-                        push!(orthog_bars_array, (median_orthog, median_orthog))
+                        push!(orthog_error_bars[block_rks], (median_orthog, median_orthog))
                     end
                 else
-                    push!(sketch_array, NaN)
-                    push!(orthog_array, NaN)
-                    push!(sketch_bars_array, (NaN, NaN))
-                    push!(orthog_bars_array, (NaN, NaN))
+                    push!(sketch_times[block_rks], NaN)
+                    push!(orthog_times[block_rks], NaN)
+                    push!(sketch_error_bars[block_rks], (NaN, NaN))
+                    push!(orthog_error_bars[block_rks], (NaN, NaN))
                 end
             end
         end
     end
     
     # Sort timing breakdown data
-    sketch_times_kr = sketch_times_kr[sort_idx]
-    sketch_times_sb = sketch_times_sb[sort_idx]  
-    sketch_times_lb = sketch_times_lb[sort_idx]
-    sketch_times_xlb = sketch_times_xlb[sort_idx]
-
-    orthog_times_kr = orthog_times_kr[sort_idx]
-    orthog_times_sb = orthog_times_sb[sort_idx]
-    orthog_times_lb = orthog_times_lb[sort_idx]
-    orthog_times_xlb = orthog_times_xlb[sort_idx]
-    
-    # Sort error bar arrays for timing breakdown
-    sketch_error_bars_kr = sketch_error_bars_kr[sort_idx]
-    sketch_error_bars_sb = sketch_error_bars_sb[sort_idx]
-    sketch_error_bars_lb = sketch_error_bars_lb[sort_idx]
-    sketch_error_bars_xlb = sketch_error_bars_xlb[sort_idx]
-
-    orthog_error_bars_kr = orthog_error_bars_kr[sort_idx]
-    orthog_error_bars_sb = orthog_error_bars_sb[sort_idx]
-    orthog_error_bars_lb = orthog_error_bars_lb[sort_idx]
-    orthog_error_bars_xlb = orthog_error_bars_xlb[sort_idx]
+    for rk in all_block_rks
+        sketch_times[rk] = sketch_times[rk][sort_idx]
+        orthog_times[rk] = orthog_times[rk][sort_idx]
+        sketch_error_bars[rk] = sketch_error_bars[rk][sort_idx]
+        orthog_error_bars[rk] = orthog_error_bars[rk][sort_idx]
+    end
     
     fig3 = Figure(size = (312, 254))
     ax3 = Axis(fig3[1, 1], 
@@ -1012,47 +974,27 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
               xlabel = "Target Rank r", 
               ylabel = "Time (milliseconds)")
     
-    # Filter out NaN values for timing breakdown
-    valid_sketch_kr = .!isnan.(sketch_times_kr)
-    valid_sketch_sb = .!isnan.(sketch_times_sb)
-    valid_sketch_lb = .!isnan.(sketch_times_lb)
-    valid_sketch_xlb = .!isnan.(sketch_times_xlb)
-
-    valid_orthog_kr = .!isnan.(orthog_times_kr)
-    valid_orthog_sb = .!isnan.(orthog_times_sb)
-    valid_orthog_lb = .!isnan.(orthog_times_lb)
-    valid_orthog_xlb = .!isnan.(orthog_times_xlb)
-    
     # Add error bands first (so they appear behind the lines)
-    add_error_band!(ax3, target_ranks, sketch_times_kr, sketch_error_bars_kr, valid_sketch_kr, colors[:khatri_rao], 0.15)
-    add_error_band!(ax3, target_ranks, sketch_times_sb, sketch_error_bars_sb, valid_sketch_sb, colors[:small_blocks], 0.15)
-    add_error_band!(ax3, target_ranks, sketch_times_lb, sketch_error_bars_lb, valid_sketch_lb, colors[:large_blocks], 0.15)
-    add_error_band!(ax3, target_ranks, sketch_times_xlb, sketch_error_bars_xlb, valid_sketch_xlb, colors[:xlarge_blocks], 0.15)
-    
-    add_error_band!(ax3, target_ranks, orthog_times_kr, orthog_error_bars_kr, valid_orthog_kr, colors[:khatri_rao], 0.15)
-    add_error_band!(ax3, target_ranks, orthog_times_sb, orthog_error_bars_sb, valid_orthog_sb, colors[:small_blocks], 0.15)
-    add_error_band!(ax3, target_ranks, orthog_times_lb, orthog_error_bars_lb, valid_orthog_lb, colors[:large_blocks], 0.15)
-    add_error_band!(ax3, target_ranks, orthog_times_xlb, orthog_error_bars_xlb, valid_orthog_xlb, colors[:xlarge_blocks], 0.15)
+    for rk in all_block_rks
+        valid_sketch = .!isnan.(sketch_times[rk])
+        valid_orthog = .!isnan.(orthog_times[rk])
+        add_error_band!(ax3, target_ranks, sketch_times[rk], sketch_error_bars[rk], valid_sketch, colors[rk], 0.15)
+        add_error_band!(ax3, target_ranks, orthog_times[rk], orthog_error_bars[rk], valid_orthog, colors[rk], 0.15)
+    end
     
     # Plot sketch times (dashed lines)
-    plot_valid_data!(ax3, target_ranks, sketch_times_kr, valid_sketch_kr, 
-                    "R=1 (sketch)", colors[:khatri_rao], markers[:khatri_rao]; linestyle=:dash)
-    plot_valid_data!(ax3, target_ranks, sketch_times_sb, valid_sketch_sb, 
-                    "R=4 (sketch)", colors[:small_blocks], markers[:small_blocks]; linestyle=:dash)
-    plot_valid_data!(ax3, target_ranks, sketch_times_lb, valid_sketch_lb, 
-                    "R=8 (sketch)", colors[:large_blocks], markers[:large_blocks]; linestyle=:dash)
-    plot_valid_data!(ax3, target_ranks, sketch_times_xlb, valid_sketch_xlb, 
-                    "R=16 (sketch)", colors[:xlarge_blocks], markers[:xlarge_blocks]; linestyle=:dash)
+    for rk in all_block_rks
+        valid = .!isnan.(sketch_times[rk])
+        label = rk == 1 ? "R=1 (sketch)" : "R=$rk (sketch)"
+        plot_valid_data!(ax3, target_ranks, sketch_times[rk], valid, label, colors[rk], markers[rk]; linestyle=:dash)
+    end
     
     # Plot orthogonalization times (solid lines)
-    plot_valid_data!(ax3, target_ranks, orthog_times_kr, valid_orthog_kr, 
-                    "R=1 (QR)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax3, target_ranks, orthog_times_sb, valid_orthog_sb, 
-                    "R=4 (QR)", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax3, target_ranks, orthog_times_lb, valid_orthog_lb, 
-                    "R=8 (QR)", colors[:large_blocks], markers[:large_blocks])
-    plot_valid_data!(ax3, target_ranks, orthog_times_xlb, valid_orthog_xlb, 
-                    "R=16 (QR)", colors[:xlarge_blocks], markers[:xlarge_blocks])
+    for rk in all_block_rks
+        valid = .!isnan.(orthog_times[rk])
+        label = rk == 1 ? "R=1 (QR)" : "R=$rk (QR)"
+        plot_valid_data!(ax3, target_ranks, orthog_times[rk], valid, label, colors[rk], markers[rk])
+    end
     
     # Add legend
     axislegend(ax3, position = :lt)
@@ -1066,17 +1008,17 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
 
     # Extract memory usage data
     deterministic_memory = Float64[]
-    khatri_rao_memory = Float64[]
-    small_blocks_memory = Float64[]
-    large_blocks_memory = Float64[]
-    xlarge_blocks_memory = Float64[]
+    block_memory = Dict{Int, Vector{Float64}}()
+    for rk in all_block_rks
+        block_memory[rk] = Float64[]
+    end
 
-    # Error bar data for memory (20th and 80th percentiles)
+    # Error bar data for memory (25th and 75th percentiles)
     deterministic_memory_bars = Tuple{Float64, Float64}[]
-    khatri_rao_memory_bars = Tuple{Float64, Float64}[]
-    small_blocks_memory_bars = Tuple{Float64, Float64}[]
-    large_blocks_memory_bars = Tuple{Float64, Float64}[]
-    xlarge_blocks_memory_bars = Tuple{Float64, Float64}[]
+    block_memory_bars = Dict{Int, Vector{Tuple{Float64, Float64}}}()
+    for rk in all_block_rks
+        block_memory_bars[rk] = Tuple{Float64, Float64}[]
+    end
 
     for (rank_key, rank_data) in results
         if startswith(rank_key, "target_rank_")
@@ -1101,30 +1043,25 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
             end
 
             # Extract memory data for each block configuration
-            for (block_rks, memory_array, memory_bars_array) in [
-                (1, khatri_rao_memory, khatri_rao_memory_bars),
-                (4, small_blocks_memory, small_blocks_memory_bars),
-                (8, large_blocks_memory, large_blocks_memory_bars),
-                (16, xlarge_blocks_memory, xlarge_blocks_memory_bars)
-            ]
+            for block_rks in all_block_rks
                 block_key = "block_rks_$block_rks"
                 if haskey(rank_data, block_key) && rank_data[block_key]["success_rate"] > 0
                     block_data = rank_data[block_key]
-                    push!(memory_array, block_data["median_memory"] / 1024^2)  # Convert to MB
+                    push!(block_memory[block_rks], block_data["median_memory"] / 1024^2)  # Convert to MB
 
                     # Calculate error bars
                     if haskey(block_data, "memory_usage") && length(block_data["memory_usage"]) > 1
                         memory_sorted = sort(block_data["memory_usage"]) / 1024^2  # Convert to MB
                         memory_25 = quantile(memory_sorted, 0.25)
                         memory_75 = quantile(memory_sorted, 0.75)
-                        push!(memory_bars_array, (memory_25, memory_75))
+                        push!(block_memory_bars[block_rks], (memory_25, memory_75))
                     else
                         median_mem = block_data["median_memory"] / 1024^2
-                        push!(memory_bars_array, (median_mem, median_mem))
+                        push!(block_memory_bars[block_rks], (median_mem, median_mem))
                     end
                 else
-                    push!(memory_array, NaN)
-                    push!(memory_bars_array, (NaN, NaN))
+                    push!(block_memory[block_rks], NaN)
+                    push!(block_memory_bars[block_rks], (NaN, NaN))
                 end
             end
         end
@@ -1132,16 +1069,12 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
 
     # Sort memory data
     deterministic_memory = deterministic_memory[sort_idx]
-    khatri_rao_memory = khatri_rao_memory[sort_idx]
-    small_blocks_memory = small_blocks_memory[sort_idx]
-    large_blocks_memory = large_blocks_memory[sort_idx]
-    xlarge_blocks_memory = xlarge_blocks_memory[sort_idx]
-
     deterministic_memory_bars = deterministic_memory_bars[sort_idx]
-    khatri_rao_memory_bars = khatri_rao_memory_bars[sort_idx]
-    small_blocks_memory_bars = small_blocks_memory_bars[sort_idx]
-    large_blocks_memory_bars = large_blocks_memory_bars[sort_idx]
-    xlarge_blocks_memory_bars = xlarge_blocks_memory_bars[sort_idx]
+
+    for rk in all_block_rks
+        block_memory[rk] = block_memory[rk][sort_idx]
+        block_memory_bars[rk] = block_memory_bars[rk][sort_idx]
+    end
 
     fig4 = Figure(size = (312, 254))
     ax4 = Axis(fig4[1, 1], 
@@ -1151,29 +1084,22 @@ function create_hadamard_benchmark_plots(results::Dict{String, Any}, save_dir="o
 
     # Filter out NaN values for memory plot
     valid_det_memory = .!isnan.(deterministic_memory)
-    valid_kr_memory = .!isnan.(khatri_rao_memory)
-    valid_sb_memory = .!isnan.(small_blocks_memory)
-    valid_lb_memory = .!isnan.(large_blocks_memory)
-    valid_xlb_memory = .!isnan.(xlarge_blocks_memory)
 
     # Add memory error bands first
     add_error_band!(ax4, target_ranks, deterministic_memory, deterministic_memory_bars, valid_det_memory, colors[:deterministic])
-    add_error_band!(ax4, target_ranks, khatri_rao_memory, khatri_rao_memory_bars, valid_kr_memory, colors[:khatri_rao])
-    add_error_band!(ax4, target_ranks, small_blocks_memory, small_blocks_memory_bars, valid_sb_memory, colors[:small_blocks])
-    add_error_band!(ax4, target_ranks, large_blocks_memory, large_blocks_memory_bars, valid_lb_memory, colors[:large_blocks])
-    add_error_band!(ax4, target_ranks, xlarge_blocks_memory, xlarge_blocks_memory_bars, valid_xlb_memory, colors[:xlarge_blocks])
+    for rk in all_block_rks
+        valid = .!isnan.(block_memory[rk])
+        add_error_band!(ax4, target_ranks, block_memory[rk], block_memory_bars[rk], valid, colors[rk])
+    end
 
     # Plot memory data
     plot_valid_data!(ax4, target_ranks, deterministic_memory, valid_det_memory, 
                     "Deterministic (tt_rounding)", colors[:deterministic], markers[:deterministic])
-    plot_valid_data!(ax4, target_ranks, khatri_rao_memory, valid_kr_memory, 
-                    "R=1 (Khatri-Rao)", colors[:khatri_rao], markers[:khatri_rao])
-    plot_valid_data!(ax4, target_ranks, small_blocks_memory, valid_sb_memory, 
-                    "R=4", colors[:small_blocks], markers[:small_blocks])
-    plot_valid_data!(ax4, target_ranks, large_blocks_memory, valid_lb_memory, 
-                    "R=8", colors[:large_blocks], markers[:large_blocks])
-    plot_valid_data!(ax4, target_ranks, xlarge_blocks_memory, valid_xlb_memory, 
-                    "R=16", colors[:xlarge_blocks], markers[:xlarge_blocks])
+    for rk in all_block_rks
+        valid = .!isnan.(block_memory[rk])
+        label = rk == 1 ? "R=1 (Khatri-Rao)" : "R=$rk"
+        plot_valid_data!(ax4, target_ranks, block_memory[rk], valid, label, colors[rk], markers[rk])
+    end
 
     # Add legend
     axislegend(ax4, position = :lt)
@@ -1188,8 +1114,8 @@ end
 """
 Load benchmark results from JSON file if it exists
 """
-function load_benchmark_results(save_dir="out/hadamard_benchmarks")
-    results_file = joinpath(save_dir, "hadamard_benchmark_results.json")
+function load_benchmark_results(dir="out/hadamard_benchmarks")
+    results_file = joinpath(dir, "hadamard_benchmark_results.json")
     
     if isfile(results_file)
         println("Found existing results file: $results_file")
@@ -1228,8 +1154,8 @@ end
 Save benchmark results to JSON file
 """
 function save_benchmark_results(results::Dict{String, Any}, metadata::Dict{String, Any}, 
-                               save_dir="out/hadamard_benchmarks")
-    mkpath(save_dir)
+                               dir="out/hadamard_benchmarks")
+    mkpath(dir)
     
     # Prepare data for JSON serialization (remove TimerOutput objects)
     json_results = Dict{String, Any}()
@@ -1389,11 +1315,11 @@ end
 """
 Create plots from existing results without running experiments
 """
-function create_plots_from_existing_results(save_dir="out/hadamard_benchmarks")
+function create_plots_from_existing_results(dir="out/hadamard_benchmarks")
     println("Loading existing results and creating plots...")
     
     # Load existing results
-    results, metadata = load_benchmark_results(save_dir)
+    results, metadata = load_benchmark_results(dir)
     
     if results === nothing
         println("❌ No existing results found. Please run the benchmark first.")
@@ -1408,7 +1334,7 @@ function create_plots_from_existing_results(save_dir="out/hadamard_benchmarks")
     
     # Create plots
     println("\nCreating visualization plots...")
-    plot_files = create_hadamard_benchmark_plots(results, save_dir)
+    plot_files = create_hadamard_benchmark_plots(results, dir)
     
     println("\n" * "="^60)
     println("PLOTS CREATED SUCCESSFULLY")
@@ -1425,9 +1351,7 @@ end
 if abspath(PROGRAM_FILE) == @__FILE__
     results, ttvectors, exact_solution = run_quantics_hadamard_benchmark(
         R=20,  # Smaller scale for testing
-        #target_ranks=[8,16,24,32,40,48,56,64,72,80],
-        #block_rks_options=[1, 4, 8], 
-        target_ranks=[8, 16, 32, 48, 64, 80, 96],
+        target_ranks=[16, 32, 48, 64, 80, 96, 112, 128, 144, 160],
         block_rks_options=[1, 4, 8, 16], 
         n_trials=100
     )
@@ -1435,9 +1359,7 @@ end
 
 global results, ttvectors, exact_solution = run_quantics_hadamard_benchmark(
         R=20,  # Smaller scale for testing
-        #target_ranks=[8,16,24,32,40,48,56,64,72,80],
-        #block_rks_options=[1, 4, 8], 
-        target_ranks=[8, 16, 32, 48, 64, 80, 96],
+        target_ranks=[16, 32, 48, 64, 80, 96, 112, 128, 144, 160],
         block_rks_options=[1, 4, 8, 16], 
         n_trials=100
     )

@@ -98,7 +98,7 @@ function synthetic_experiment(;
 
             # Recreate plots
             println("Recreating plots from existing data...")
-            create_perturbation_plot(results, ε_list, block_rks_loaded)
+            create_perturbation_plot(results, dir=dir)
 
             return results
         end
@@ -279,7 +279,7 @@ function synthetic_experiment(;
 
     # Create plots
     println("\n--- Creating plots ---")
-    create_perturbation_plot(results, perturbation_strengths, block_rks_list)
+    create_perturbation_plot(results)
     
     return results
 end
@@ -287,10 +287,10 @@ end
 """
 Create plot showing error vs Noise Level for all methods
 """
-function create_perturbation_plot(results, ε_list, block_rks_list, dir = "out/randomized_rounding")
+function create_perturbation_plot(results; dir = "out/randomized_rounding")
     # Ensure proper types for plotting
-    ε_list = Float64.(ε_list)
-    block_rks_list = Int.(block_rks_list)
+    ε_list = Float64.(results["perturbation_strengths"])
+    block_rks_list = Int.(results["block_rks_list"])
     mkpath("$dir/plots")
 
     # Configure CairoMakie for publication-quality plots
@@ -329,20 +329,31 @@ function create_perturbation_plot(results, ε_list, block_rks_list, dir = "out/r
     )
     
     with_theme(PLOT_THEME) do
-        # Color scheme for block ranks - use specific colors for clarity
-        colors_blk = Dict(1 => :blue, 4 => :orange, 8 => :green, 16 => :red)
+        # Base palettes for dynamic generation
+        base_colors = [:blue, :orange, :green, :red, :purple, :cyan, :brown, :magenta]
+        base_markers = [:circle, :rect, :diamond, :utriangle, :dtriangle, :star5, :xcross, :hexagon]
 
-        # Line styles
-        style_det = nothing
-        style_ttrand_orth = nothing
-        style_ttrand_nonorth = :dash
-        style_stta_orth = :dot
-        style_stta_nonorth = :dashdot
+        # Dynamically build mapping dictionaries and legend elements
+        colors_blk = Dict{Int, Symbol}()
+        markers_blk = Dict{Int, Symbol}()
+        color_elements = MarkerElement[]
+        color_labels = LaTeXString[]
+
+        for (i, rk) in enumerate(block_rks_list)
+            c = base_colors[mod1(i, length(base_colors))]
+            m = base_markers[mod1(i, length(base_markers))]
+            colors_blk[rk] = c
+            markers_blk[rk] = m
+            
+            push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
+            label_str = rk == 1 ? "Rank 1 (Khatri-Rao)" : "Rank $rk"
+            push!(color_labels, LaTeXString(label_str))
+        end
 
         # Create title with interpolated values
         N_val = results["N"]
         d_val = results["d"]
-        title_str = L"Randomized Rounding: Error vs Perturbation ($N=%$N_val$, $d=%$(d_val)$)"
+        title_str = "Randomized Rounding: Error vs Perturbation (N=$N_val, d=$(d_val))"
         
         fig = Figure(size = (800, 600))
         ax = Axis(fig[1, 1],
@@ -350,58 +361,39 @@ function create_perturbation_plot(results, ε_list, block_rks_list, dir = "out/r
                   ylabel = LaTeXString("Relative Error"),
                   xscale = log10,
                   yscale = log10,
-                  #xticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1], [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
+                  limits = (nothing, (1e-5, 1e3)),
                   xticks = ([1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], [L"10^{-1}", L"10^{-2}", L"10^{-3}", L"10^{-4}", L"10^{-5}", L"10^{-6}"]),
-                  yticks = ([1e-5, 1e-3, 1, 1e1], [L"10^{-5}", L"10^{-3}", L"10^0", L"10^1"]),
                   title = title_str)
 
         # Skip deterministic rounding - only plot randomized methods
 
         # Plot selected methods: RandOrth (ttrand orthogonal) and STTA orthogonal
-        # Plot selected blocks
-        selected_block_rks = [1, 4, 8, 16]
-        
-        for block_rks in selected_block_rks
-            if block_rks in block_rks_list  # Only plot if data exists
+        for block_rks in block_rks_list
+            color = colors_blk[block_rks]
+            marker = markers_blk[block_rks]
+
+            for (linestyle, method_name) in [(:solid, "ttrand_orthogonal_blk"), (:dash, "stta_orthogonal_blk")]
+                full_key = method_name*"$(block_rks)"
+                if !haskey(results, full_key)
+                    continue
+                end
+
+                data = results[full_key]
+                med = Float64.(data["median_error"])
+                err_low = Float64.(data["q25_error"])
+                err_high = Float64.(data["q75_error"])
+
                 color = colors_blk[block_rks]
-
-                # RandOrth (ttrand orthogonal)
-                method_name = "ttrand_orthogonal_blk$(block_rks)"
-                if haskey(results, method_name)
-                    data = results[method_name]
-                    med = Float64.(data["median_error"])
-                    err_low = Float64.(data["q25_error"])
-                    err_high = Float64.(data["q75_error"])
-                    
-                    band!(ax, ε_list, err_low, err_high,
-                         color=(color, 0.3))
-                    scatterlines!(ax, ε_list, med,
-                          label=(block_rks==1 ? LaTeXString("RandOrth Khatri-Rao") : latexstring("RandOrth \$R=$(block_rks)\$")),
-                          color=color,
-                          linewidth=2,
-                          linestyle=style_ttrand_orth,
-                          marker=:circle,
-                          markersize=6)
-                end
-
-                # STTA orthogonal
-                method_name = "stta_orthogonal_blk$(block_rks)"
-                if haskey(results, method_name)
-                    data = results[method_name]
-                    med = Float64.(data["median_error"])
-                    err_low = Float64.(data["q25_error"])
-                    err_high = Float64.(data["q75_error"])
-                    
-                    band!(ax, ε_list, err_low, err_high,
-                         color=(color, 0.3))
-                    scatterlines!(ax, ε_list, med,
-                          label=(block_rks==1 ? LaTeXString("STTA Khatri-Rao") : latexstring("STTA \$R=$(block_rks)\$")),
-                          color=color,
-                          linewidth=2,
-                          linestyle=style_stta_orth,
-                          marker=:diamond,
-                          markersize=6)
-                end
+                marker = markers_blk[block_rks]
+                
+                band!(ax, ε_list, err_low, err_high,
+                        color=(color, 0.3))
+                scatterlines!(ax, ε_list, med,
+                        color=color,
+                        linewidth=2,
+                        linestyle=linestyle,
+                        marker=marker,
+                        markersize=5)
             end
         end
 
@@ -414,14 +406,6 @@ function create_perturbation_plot(results, ε_list, block_rks_list, dir = "out/r
             LineElement(color = :black, linestyle = :dot, linewidth = 2)
         ]
         line_labels = [LaTeXString("RandOrth (solid)"), LaTeXString("STTA (dotted)")]
-        
-        color_elements = [
-            LineElement(color = :blue, linewidth = 3),
-            LineElement(color = :orange, linewidth = 3),
-            LineElement(color = :green, linewidth = 3),
-            LineElement(color = :red, linewidth = 3)
-        ]
-        color_labels = [LaTeXString("Rank 1 (Khatri-Rao)"), LaTeXString("Rank 4"), LaTeXString("Rank 16"), LaTeXString("Rank 32 (Gaussian TT)")]
         
         ref_elements = [LineElement(color = :gray, linestyle = :dashdot, linewidth = 1)]
         ref_labels = [L"$\varepsilon$ (reference)"]
@@ -438,7 +422,7 @@ function create_perturbation_plot(results, ε_list, block_rks_list, dir = "out/r
                halign = :center,
                nbanks = 1,  # Single row
                padding = (4, 4, 2, 2),
-               colgap = 10,
+               colgap = 8,
                labelsize = 9)
 
         display(fig)
@@ -452,7 +436,7 @@ end
 """
 Create combined plot comparing both tensor structures
 """
-function create_combined_plot(results1, results2, ε_list, block_rks_list, dir = "out/randomized_rounding")
+function create_combined_plot(results1, results2; dir = "out/randomized_rounding")
     mkpath("$dir/plots")
 
     # Configure CairoMakie for publication-quality plots
@@ -492,18 +476,32 @@ function create_combined_plot(results1, results2, ε_list, block_rks_list, dir =
     
     with_theme(PLOT_THEME) do
         # Ensure proper types for plotting
-        ε_list = Float64.(ε_list)
-        block_rks_list = Int.(block_rks_list)
+        ε_list = Float64.(results1["perturbation_strengths"])
+        block_rks_list = Int.(results1["block_rks_list"])
         
-        # Color scheme for block ranks - use specific colors for clarity
-        colors_blk = Dict(1 => :blue, 4 => :orange, 8 => :green, 16 => :red)
+        # Base palettes for dynamic generation
+        base_colors = [:blue, :orange, :green, :red, :purple, :cyan, :brown, :magenta]
+        base_markers = [:circle, :rect, :diamond, :utriangle, :dtriangle, :star5, :xcross, :hexagon]
+        
+        # Dynamically build mapping dictionaries and legend elements
+        colors_blk = Dict{Int, Symbol}()
+        markers_blk = Dict{Int, Symbol}()
+        color_elements = MarkerElement[]
+        color_labels = LaTeXString[]
 
-        # Line styles
-        style_ttrand_orth = nothing
-        style_stta_orth = :dot
+        for (i, rk) in enumerate(block_rks_list)
+            c = base_colors[mod1(i, length(base_colors))]
+            m = base_markers[mod1(i, length(base_markers))]
+            colors_blk[rk] = c
+            markers_blk[rk] = m
+            
+            push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
+            label_str = rk == 1 ? "R=1 (Khatri-Rao)" : "R=$rk"
+            push!(color_labels, LaTeXString(label_str))
+        end
 
-        #fig = Figure(size = (624, 300))  # 6.5" wide, 4.5" tall (72 DPI equivalent)
-        fig = Figure(size = (700, 400)) 
+        fig = Figure(size = (624, 300))  # 6.5" wide, 4.5" tall (72 DPI equivalent)
+        s = 16
         
         # Create two subplots side by side
         ax1 = Axis(fig[1, 1],
@@ -511,67 +509,44 @@ function create_combined_plot(results1, results2, ε_list, block_rks_list, dir =
                    ylabel = L"Relative Error $\Vert \mathrm{trunc}_{16}(\mathbf{x}_\varepsilon) - \mathbf{x}_\varepsilon \Vert /\Vert \mathbf{x} \Vert $",
                    xscale = log10,
                    yscale = log10,
-                   #xticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1], [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
+                   limits = (nothing, (1e-5, 1e3)),
                    xticks = ([1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], [L"10^{-1}", L"10^{-2}", L"10^{-3}", L"10^{-4}", L"10^{-5}", L"10^{-6}"]),
-                   yticks = ([1e-5, 1e-3, 1, 1e1], [L"10^{-5}", L"10^{-3}", L"10^0", L"10^1"]),
-                   title = L"$\mathbf{x}$ sum of $16$ Gaussian Kronecker vectors")
-                 
-        ylims!(1e-6,1e3)
+                   title = "Sum of $s Kronecker Bases")
+
         ax2 = Axis(fig[1, 2],
                    xlabel = L"Noise Level $\varepsilon$",
                    ylabel = "",
                    xscale = log10,
                    yscale = log10,
+                   limits = (nothing, (1e-5, 1e3)),
                    xticks = ([1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], [L"10^{-1}", L"10^{-2}", L"10^{-3}", L"10^{-4}", L"10^{-5}", L"10^{-6}"]),
-                   yticks = ([1e-5, 1e-3, 1, 1e1], [L"10^{-5}", L"10^{-3}", L"10^0", L"10^1"]),
-                   title = L"Gaussian $\mathbf{x}$ with uniform TT ranks $16$")
-        ylims!(1e-6,1e3)
+                   title = "Single Rank-$s Basis")
 
         # Plot selected methods for both cases
-        selected_block_rks = [1, 4, 8, 16]
-        
         for (ax, results) in [(ax1, results1), (ax2, results2)]
-            for block_rks in selected_block_rks
-                if block_rks in block_rks_list  # Only plot if data exists
+            for (linestyle, method_name) in [(:solid, "ttrand_orthogonal_blk"), (:dash, "stta_orthogonal_blk")]
+                for block_rks in block_rks_list
+                    full_key = method_name*"$(block_rks)"
+                    if !haskey(results, full_key)
+                        continue
+                    end
+
+                    data = results[full_key]
+                    med = Float64.(data["median_error"])
+                    err_low = Float64.(data["q25_error"])
+                    err_high = Float64.(data["q75_error"])
+
                     color = colors_blk[block_rks]
-
-                    # RandOrth (ttrand orthogonal)
-                    method_name = "ttrand_orthogonal_blk$(block_rks)"
-                    if haskey(results, method_name)
-                        data = results[method_name]
-                        med = Float64.(data["median_error"])
-                        err_low = Float64.(data["q25_error"])
-                        err_high = Float64.(data["q75_error"])
-                        
-                        band!(ax, ε_list, err_low, err_high,
-                             color=(color, 0.3))
-                        scatterlines!(ax, ε_list, med,
-                              label=(block_rks==1 ? LaTeXString("RandOrth Khatri-Rao") : latexstring("RandOrth \$R=$(block_rks)\$")),
-                              color=color,
-                              linewidth=2,
-                              linestyle=style_ttrand_orth,
-                              marker=:circle,
-                              markersize=5)
-                    end
-
-                    # STTA orthogonal
-                    method_name = "stta_orthogonal_blk$(block_rks)"
-                    if haskey(results, method_name)
-                        data = results[method_name]
-                        med = Float64.(data["median_error"])
-                        err_low = Float64.(data["q25_error"])
-                        err_high = Float64.(data["q75_error"])
-                        
-                        band!(ax, ε_list, err_low, err_high,
-                             color=(color, 0.3))
-                        scatterlines!(ax, ε_list, med,
-                              label=(block_rks==1 ? LaTeXString("STTA Khatri-Rao") : latexstring("STTA \$R=$(block_rks)\$")),
-                              color=color,
-                              linewidth=2,
-                              linestyle=style_stta_orth,
-                              marker=:diamond,
-                              markersize=5)
-                    end
+                    marker = markers_blk[block_rks]
+                    
+                    band!(ax, ε_list, err_low, err_high,
+                            color=(color, 0.3))
+                    scatterlines!(ax, ε_list, med,
+                            color=color,
+                            linewidth=2,
+                            linestyle=linestyle,
+                            marker=marker,
+                            markersize=5)
                 end
             end
 
@@ -589,14 +564,6 @@ function create_combined_plot(results1, results2, ε_list, block_rks_list, dir =
         ]
         line_labels = [LaTeXString("RandOrth"), LaTeXString("STTA")]
         
-        color_elements = [
-            LineElement(color = :blue, linewidth = 3),
-            LineElement(color = :orange, linewidth = 3),
-            LineElement(color = :green, linewidth = 3),
-            LineElement(color = :red, linewidth = 3)
-        ]
-        #color_labels = [L"Khatri-Rao: TT($16$,$1$)", L"TT($4$,$4$)", L"Gaussian TT-DRM: TT($1$,$16$)"]
-        color_labels = [L"R=1 (Khatri-Rao)", L"R=4", L"R=8", L"R=16 (Gaussian TT)"]
         
         ref_elements = [LineElement(color = :gray, linestyle = :dashdot, linewidth = 1)]
         ref_labels = [L"$\varepsilon$ (reference)"]
@@ -673,7 +640,7 @@ function run_randomized_rounding_experiments(; force_rerun = false)
 
     # Create combined plot
     println("\n--- Creating combined comparison plot ---")
-    create_combined_plot(results_16x1, results_1x16, perturbation_strengths, block_rks_list, dir)
+    create_combined_plot(results_16x1, results_1x16, dir=dir)
 
     println("\n" * "="^70)
     println("EXPERIMENTS COMPLETED")

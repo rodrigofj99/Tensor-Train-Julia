@@ -38,9 +38,16 @@ function injectivity_vs_dimension(;
     dir = "out/block_rank_experiments"
 )
     results = Dict{String,Any}()
+    results["N_list"] = N_list
+    results["μ"] = μ
+    results["d"] = d
+    results["block_rks_list"] = block_rks_list
+    results["n_realizations"] = n_realizations
+    results["base_ranks"] = base_ranks
+    
+    mkpath(dir)
     for μ_rk in base_ranks
         # Check if results already exist
-        mkpath(dir)
         filename = "$dir/scaling_vs_dimension_mu$(μ)_rank-$(μ_rk).json"
 
         if !force_rerun && isfile(filename)
@@ -49,16 +56,14 @@ function injectivity_vs_dimension(;
             println("Loading existing results... (use force_rerun=true to recompute)")
 
             # Load and return existing results
-            results = JSON3.read(read(filename, String), Dict{String,Any})
-
-            # Convert arrays to proper format (JSON converts them to nested structures)
-            N_list_loaded = collect(results["N_list"])
-            block_rks_list_loaded = collect(results["block_rks_list"])
-            μ_loaded = results["μ"]
+            tmp = JSON3.read(read(filename, String), Dict{String,Any})
+            for key in keys(tmp)
+                results[key] = tmp[key]
+            end
 
             # Convert nested arrays to matrices for each approach
             for key in keys(results)
-                if key ∉ ["N_list", "μ", "d", "block_rks_list", "n_realizations"]
+                if key ∉ ["N_list", "μ", "d", "block_rks_list", "n_realizations", "base_ranks"]
                     approach_data = results[key]
                     for stat_key in ["median_injectivity", "q25_injectivity", "q75_injectivity",
                          "median_dilation", "q25_dilation", "q75_dilation"]
@@ -71,132 +76,117 @@ function injectivity_vs_dimension(;
                 end
             end
 
-            return results
-        end
+        else
+            println("=== Scenario 1: Injectivity vs Dimension N ===")
+            println("Fixed subspace size μ = $μ")
+            println("Subspace spanned rank: $μ_rk")
+            println("Dimension N values: $N_list")
+            println("Block ranks: $block_rks_list")
+            println("Physical dimension per core: $d")
+            println("Realizations: $n_realizations")
+            println()
 
-        println("=== Scenario 1: Injectivity vs Dimension N ===")
-        println("Fixed subspace size μ = $μ")
-        println("Subspace spanned rank: $μ_rk")
-        println("Dimension N values: $N_list")
-        println("Block ranks: $block_rks_list")
-        println("Physical dimension per core: $d")
-        println("Realizations: $n_realizations")
-        println()
+            flush(stdout) # <--- Force the text to appear in the Slurm output file
 
-        results["N_list"] = N_list
-        results["μ"] = μ
-        results["d"] = d
-        results["block_rks_list"] = block_rks_list
-        results["n_realizations"] = n_realizations
+            # Test all 4 combinations
+            for T in test_types
+                type_name = T == Float64 ? "Float64" : "ComplexF64"
 
-        flush(stdout) # <--- Force the text to appear in the Slurm output file
+                for orthogonal in [true, false]
+                    orth_name = orthogonal ? "orthogonal" : "non_orthogonal"
+                    approach_name = "$(type_name)_$(orth_name)_rank-$(μ_rk)"
 
-        # Test all 4 combinations
-        for T in test_types
-            type_name = T == Float64 ? "Float64" : "ComplexF64"
+                    println("\n--- Testing $approach_name ---")
+                    flush(stdout) # <--- Force the text to appear in the Slurm output file
 
-            for orthogonal in [true, false]
-                orth_name = orthogonal ? "orthogonal" : "non_orthogonal"
-                approach_name = "$(type_name)_$(orth_name)_rank-$(μ_rk)"
+                    # Storage: [N_index, block_rks_index, realization]
+                    injectivity_data = zeros(length(N_list), length(block_rks_list), n_realizations)
+                    dilation_data = zeros(length(N_list), length(block_rks_list), n_realizations)
 
-                println("\n--- Testing $approach_name ---")
-                flush(stdout) # <--- Force the text to appear in the Slurm output file
+                    for (i_N, N) in enumerate(N_list)
+                        println("  N = $N:")
+                        dims = ntuple(i -> d, N)
 
-                # Storage: [N_index, block_rks_index, realization]
-                injectivity_data = zeros(length(N_list), length(block_rks_list), n_realizations)
-                dilation_data = zeros(length(N_list), length(block_rks_list), n_realizations)
-
-                for (i_N, N) in enumerate(N_list)
-                    println("  N = $N:")
-                    dims = ntuple(i -> d, N)
-
-                    # Generate rank-μ_rk subspace
-                    X = Vector{TTvector{T,N}}(undef, μ)
-                    for j = 1:μ
-                        rks_1 = ntuple(i -> μ_rk, N+1)
-                        X[j] = rand_tt(T, dims, rks_1; orthogonal=true, normalise=false, seed=seed + j)
-                        X[j] = X[j] / norm(X[j])
-                    end
-
-                    # Compute Cholesky orthogonalization
-                    A = zeros(T, μ, μ)
-                    for j1 = 1:μ
-                        A[j1,j1] = dot(X[j1], X[j1])
-                        for j2 = j1+1:μ
-                            A[j1,j2] = dot(X[j1], X[j2])
+                        # Generate rank-μ_rk subspace
+                        X = Vector{TTvector{T,N}}(undef, μ)
+                        for j = 1:μ
+                            rks_1 = ntuple(i -> μ_rk, N+1)
+                            X[j] = rand_tt(T, dims, rks_1; orthogonal=true, normalise=false, seed=seed + j)
+                            X[j] = X[j] / norm(X[j])
                         end
-                    end
-                    A = Hermitian(A, :L)
-                    C = inv(cholesky(A).U)
 
-                    # Test each block rank
-                    for (i_blk, block_rks) in enumerate(block_rks_list)
-                        print("    block_rks=$block_rks: ")
-                        flush(stdout) # <--- Force the text to appear in the Slurm output file
-
-                        # Get sketch dimension
-                        _, sketch_rks = tt_recursive_sketch(T, X[1], 2μ;
-                                                            orthogonal=orthogonal, reverse=false,
-                                                            block_rks=block_rks, seed=seed)
-                        sketch_dim = sketch_rks[N+1]
-
-                        for real = 1:n_realizations
-                            # Build sketch matrix
-                            Ω_matrix = zeros(T, sketch_dim, μ)
-                            sketch_seed = seed + real + 1000*i_blk + 10000*i_N
-
-                            for j = 1:μ
-                                W, _ = tt_recursive_sketch(T, X[j], 2μ;
-                                                        orthogonal=orthogonal, reverse=false,
-                                                        seed=sketch_seed, block_rks=block_rks)
-                                Ω_matrix[:, j] = W[N+1]'
+                        # Compute Cholesky orthogonalization
+                        A = zeros(T, μ, μ)
+                        for j1 = 1:μ
+                            A[j1,j1] = dot(X[j1], X[j1])
+                            for j2 = j1+1:μ
+                                A[j1,j2] = dot(X[j1], X[j2])
                             end
-
-                            # Apply orthogonalization and compute SVD
-                            Ω_orth = Ω_matrix * C
-                            σ = svdvals(Ω_orth)
-                            injectivity_data[i_N, i_blk, real] = σ[end]^2
-                            dilation_data[i_N, i_blk, real] = σ[1]^2
-
-                            print(".")
                         end
-                        println()
+                        A = Hermitian(A, :L)
+                        C = inv(cholesky(A).U)
+
+                        # Test each block rank
+                        for (i_blk, block_rks) in enumerate(block_rks_list)
+                            print("    block_rks=$block_rks: ")
+                            flush(stdout) # <--- Force the text to appear in the Slurm output file
+
+                            # Get sketch dimension
+                            _, sketch_rks = tt_recursive_sketch(T, X[1], 2μ;
+                                                                orthogonal=orthogonal, reverse=false,
+                                                                block_rks=block_rks, seed=seed)
+                            sketch_dim = sketch_rks[N+1]
+
+                            for real = 1:n_realizations
+                                # Build sketch matrix
+                                Ω_matrix = zeros(T, sketch_dim, μ)
+                                sketch_seed = seed + real + 1000*i_blk + 10000*i_N
+
+                                for j = 1:μ
+                                    W, _ = tt_recursive_sketch(T, X[j], 2μ;
+                                                            orthogonal=orthogonal, reverse=false,
+                                                            seed=sketch_seed, block_rks=block_rks)
+                                    Ω_matrix[:, j] = W[N+1]'
+                                end
+
+                                # Apply orthogonalization and compute SVD
+                                Ω_orth = Ω_matrix * C
+                                σ = svdvals(Ω_orth)
+                                injectivity_data[i_N, i_blk, real] = σ[end]^2
+                                dilation_data[i_N, i_blk, real] = σ[1]^2
+
+                                print(".")
+                            end
+                            println()
+                        end
                     end
+
+                    # Compute statistics
+                    results[approach_name] = Dict(
+                        "injectivity" => injectivity_data,
+                        "dilation" => dilation_data,
+                        "median_injectivity" => [median(injectivity_data[i, j, :])
+                                                for i in 1:length(N_list), j in 1:length(block_rks_list)],
+                        "q25_injectivity" => [quantile(injectivity_data[i, j, :], 0.25)
+                                            for i in 1:length(N_list), j in 1:length(block_rks_list)],
+                        "q75_injectivity" => [quantile(injectivity_data[i, j, :], 0.75)
+                                            for i in 1:length(N_list), j in 1:length(block_rks_list)],
+                        "median_dilation" => [median(dilation_data[i, j, :])
+                                                for i in 1:length(N_list), j in 1:length(block_rks_list)],
+                        "q25_dilation" => [quantile(dilation_data[i, j, :], 0.25)
+                                            for i in 1:length(N_list), j in 1:length(block_rks_list)],
+                        "q75_dilation" => [quantile(dilation_data[i, j, :], 0.75)
+                                            for i in 1:length(N_list), j in 1:length(block_rks_list)]
+                    )
                 end
-
-                # Compute statistics
-                results[approach_name] = Dict(
-                    "injectivity" => injectivity_data,
-                    "dilation" => dilation_data,
-                    "median_injectivity" => [median(injectivity_data[i, j, :])
-                                            for i in 1:length(N_list), j in 1:length(block_rks_list)],
-                    "q25_injectivity" => [quantile(injectivity_data[i, j, :], 0.25)
-                                        for i in 1:length(N_list), j in 1:length(block_rks_list)],
-                    "q75_injectivity" => [quantile(injectivity_data[i, j, :], 0.75)
-                                        for i in 1:length(N_list), j in 1:length(block_rks_list)],
-
-
-
-                    "median_dilation" => [median(dilation_data[i, j, :])
-                                            for i in 1:length(N_list), j in 1:length(block_rks_list)],
-                    "q25_dilation" => [quantile(dilation_data[i, j, :], 0.25)
-                                        for i in 1:length(N_list), j in 1:length(block_rks_list)],
-                    "q75_dilation" => [quantile(dilation_data[i, j, :], 0.75)
-                                        for i in 1:length(N_list), j in 1:length(block_rks_list)]
-                )
             end
+
+            # Save results
+            open(io -> JSON3.write(io, results, allow_inf=true), filename, "w")
+            println("Results saved to: $filename")
+            flush(stdout) # <--- Force the text to appear in the Slurm output file
         end
-
-        # Note: Individual plots handled by combined plotting function
-
-        # Save results
-        mkpath(dir)
-        filename = "$dir/scaling_vs_dimension_mu$(μ)_rank-$(μ_rk).json"
-        open(io -> JSON3.write(io, results, allow_inf=true), filename, "w")
-        println("Results saved to: $filename")
-        flush(stdout) # <--- Force the text to appear in the Slurm output file
     end
-
     return results
 end
 
@@ -216,9 +206,16 @@ function injectivity_vs_subspace_size(;
     dir = "out/block_rank_experiments"
 )
     results = Dict{String,Any}()
+    results["N"] = N
+    results["d"] = d
+    results["μ_list"] = μ_list
+    results["block_rks_list"] = block_rks_list
+    results["n_realizations"] = n_realizations
+    results["base_ranks"] = base_ranks
+    
+    mkpath(dir)
     for μ_rk in base_ranks
         # Check if results already exist
-        mkpath(dir)
         filename = "$dir/scaling_vs_subspace_N$(N)_rank-$(μ_rk).json"
 
         if !force_rerun && isfile(filename)
@@ -227,22 +224,14 @@ function injectivity_vs_subspace_size(;
             println("Loading existing results... (use force_rerun=true to recompute)")
 
             # Load and return existing results
-            if isempty(results)
-                results = JSON3.read(read(filename, String), Dict{String,Any})
-            else
-                tmp = JSON3.read(read(filename, String), Dict{String,Any})
-                for key in keys(tmp)
-                    results[key] = tmp[key]
-                end
+            tmp = JSON3.read(read(filename, String), Dict{String,Any})
+            for key in keys(tmp)
+                results[key] = tmp[key]
             end
-            # Convert arrays to proper format (JSON converts them to nested structures)
-            μ_list_loaded = collect(results["μ_list"])
-            block_rks_list_loaded = collect(results["block_rks_list"])
-            N_loaded = results["N"]
 
             # Convert nested arrays to matrices for each approach
             for key in keys(results)
-                if key ∉ ["μ_list", "N", "d", "block_rks_list", "n_realizations"]
+                if key ∉ ["μ_list", "N", "d", "block_rks_list", "n_realizations", "base_ranks"]
                     approach_data = results[key]
                     for stat_key in ["median_injectivity", "q25_injectivity", "q75_injectivity",
                          "median_dilation", "q25_dilation", "q75_dilation"]
@@ -266,12 +255,6 @@ function injectivity_vs_subspace_size(;
             flush(stdout) # <--- Force the text to appear in the Slurm output file
 
             dims = ntuple(i -> d, N)
-
-            results["N"] = N
-            results["d"] = d
-            results["μ_list"] = μ_list
-            results["block_rks_list"] = block_rks_list
-            results["n_realizations"] = n_realizations
 
             # Test all 4 combinations
             for T in test_types
@@ -368,8 +351,6 @@ function injectivity_vs_subspace_size(;
                 end
             end
 
-            # Note: Individual plots handled by combined plotting function
-
             # Save results
             open(io -> JSON3.write(io, results, allow_inf=true), filename, "w")
             println("Results saved to: $filename")
@@ -382,7 +363,7 @@ end
 """
 Create combined side-by-side plot comparing orthogonal vs non-orthogonal approaches
 """
-function create_combined_scaling_plots(results1, results2, N_list, μ_list, block_rks_list, μ_fixed, N_fixed, base_ranks; dir = "out/block_rank_experiments")
+function create_combined_scaling_plots(results1, results2; dir = "out/block_rank_experiments")
     mkpath("$dir/plots")
 
     # Configure CairoMakie for publication-quality plots
@@ -420,43 +401,53 @@ function create_combined_scaling_plots(results1, results2, N_list, μ_list, bloc
         )
     )
 
+    # Extract parameters from results
+    N_list = Int.(collect(results1["N_list"]))
+    μ_fixed = Int(results1["μ"])
+    block_rks_list = Int.(collect(results1["block_rks_list"]))
+    base_ranks = Int.(collect(results1["base_ranks"]))
+
+    μ_list = Int.(collect(results2["μ_list"]))
+    N_fixed = Int(results2["N"])
+
+    # Base palettes for dynamic generation
+    base_colors = [:blue, :orange, :green, :red, :purple, :cyan, :brown, :magenta]
+    base_markers = [:circle, :rect, :diamond, :utriangle, :dtriangle, :star5, :xcross, :hexagon]
+
     for μ_rk in base_ranks
         with_theme(PLOT_THEME) do
-            # Ensure proper types for plotting
-            N_list = Int.(N_list)
-            μ_list = Int.(μ_list)
-            block_rks_list = Int.(block_rks_list)
+            # Dynamically build mapping dictionaries and legend elements
+            colors_blk = Dict{Int, Symbol}()
+            markers_blk = Dict{Int, Symbol}()
+            color_elements = MarkerElement[]
+            color_labels = LaTeXString[]
 
-            # Color scheme for block ranks - extended for rank 16
-            colors_blk = Dict(1 => :blue, 4 => :orange, 16 => :green, 32 => :red)
-            markers_blk = Dict(1 => :circle, 4 => :rect, 16 => :diamond, 32 => :utriangle)
+            for (i, rk) in enumerate(block_rks_list)
+                c = base_colors[mod1(i, length(base_colors))]
+                m = base_markers[mod1(i, length(base_markers))]
+                colors_blk[rk] = c
+                markers_blk[rk] = m
+                
+                push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
+                label_str = rk == 1 ? "R=1(Khatri-Rao)" : "R = $rk"
+                push!(color_labels, LaTeXString(label_str))
+            end
 
-            ###colors_blk = Dict(1 => :blue, 4 => :orange)
-            ###markers_blk = Dict(1 => :circle, 4 => :rect)
-
-            #fig = Figure(size = (624, 300))  # 6.5" wide, 4.5" tall (72 DPI equivalent)
-            fig = Figure()#size = (624, 624))
+            fig = Figure(size = (624, 600))
 
             ax1 = Axis(fig[1, 1],
                     xlabel = L"Dimension $d$",
                     ylabel = L"Injectivity $\sigma^2_{\mathrm{min}}$",
                     yscale = log10,
                     limits = (nothing, (1e-7, 1e0)),
-                    #yticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
-                    #         [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
                     title = LaTeXString("Injectivity vs d (r = $μ_fixed)"))
 
-            #ax2 = Axis(fig[1, 3],
             ax2 = Axis(fig[1, 2],
                     xlabel = L"Subspace Size $r$",
-                    #ylabel = L"Injectivity $\sigma^2_{\mathrm{min}}$",
                     xscale = log2,
                     yscale = log10,
                     limits = (nothing, (1e-7, 1e0)),
                     xticks = ([8, 16, 32, 64, 128], ["8", "16", "32", "64", "128"]),
-                    #xticks = (μ_list, string.(μ_list)),
-                    #yticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
-                    #         [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
                     title = LaTeXString("Injectivity vs r (d = $N_fixed)"))
 
             ax3 = Axis(fig[2, 1],
@@ -464,21 +455,14 @@ function create_combined_scaling_plots(results1, results2, N_list, μ_list, bloc
                     ylabel = L"Dilation $\sigma^2_{\mathrm{max}}$",
                     yscale = log10,
                     limits = (nothing, (1e-2, 1e2)),
-                    #yticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
-                    #         [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
                     title = LaTeXString("Dilation vs d (r = $μ_fixed)"))
 
-            #ax4 = Axis(fig[1, 4],
             ax4 = Axis(fig[2, 2],
                     xlabel = L"Subspace Size $r$",
-                    #ylabel = L"Dilation $\sigma^2_{\mathrm{max}}$",
                     xscale = log2,
                     yscale = log10,
                     limits = (nothing, (1e-2, 1e2)),
                     xticks = ([8, 16, 32, 64, 128], ["8", "16", "32", "64", "128"]),
-                    #xticks = (μ_list, string.(μ_list)),
-                    #yticks = ([1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
-                    #         [L"10^{-6}", L"10^{-5}", L"10^{-4}", L"10^{-3}", L"10^{-2}", L"10^{-1}"]),
                     title = LaTeXString("Dilation vs r (d = $N_fixed)"))
 
             # Link axis for consistent scaling
@@ -487,111 +471,60 @@ function create_combined_scaling_plots(results1, results2, N_list, μ_list, bloc
             linkxaxes!(ax1, ax3)
             linkxaxes!(ax2, ax4)
 
-            # Plot both orthogonal and non-orthogonal for scenario 1: N vs injectivity
-            for (orth_flag, linestyle) in [(true, :solid), (false, :dash)]
-                data_key = orth_flag ? "Float64_orthogonal" : "Float64_non_orthogonal"
-                data1 = results1[data_key*"_rank-$(μ_rk)"]
-                med1 = Float64.(data1["median_injectivity"])
-                q25_1 = Float64.(data1["q25_injectivity"])
-                q75_1 = Float64.(data1["q75_injectivity"])
+            for (ax, list, results) in [([ax1, ax3], N_list, results1), ([ax2, ax4], μ_list, results2)]
+                for (orth_flag, linestyle) in [(true, :solid), (false, :dash)]
+                    data_key = orth_flag ? "Float64_orthogonal" : "Float64_non_orthogonal"
+                    full_key = data_key*"_rank-$(μ_rk)"
+                    if !haskey(results, full_key)
+                        continue
+                    end
+
+                    data = results[full_key]
+                    med = Float64.(data["median_injectivity"])
+                    q25 = Float64.(data["q25_injectivity"])
+                    q75 = Float64.(data["q75_injectivity"])
 
 
-                med3 = Float64.(data1["median_dilation"])
-                q25_3 = Float64.(data1["q25_dilation"])
-                q75_3 = Float64.(data1["q75_dilation"])
+                    med2 = Float64.(data["median_dilation"])
+                    q25_2 = Float64.(data["q25_dilation"])
+                    q75_2 = Float64.(data["q75_dilation"])
+
+                    for (i_blk, block_rks) in enumerate(block_rks_list)
+                        color = colors_blk[block_rks]
+                        marker = markers_blk[block_rks]
+
+                        # Extract data for this block rank across all μ values
+                        med_curve = med[:, i_blk]
+                        err_low = q25[:, i_blk]
+                        err_high = q75[:, i_blk]
 
 
-                for (i_blk, block_rks) in enumerate(block_rks_list)
-                    color = colors_blk[block_rks]
-                    marker = markers_blk[block_rks]
+                        med2_curve = med2[:, i_blk]
+                        err2_low = q25_2[:, i_blk]
+                        err2_high = q75_2[:, i_blk]
 
-                    # Extract data for this block rank across all N values
-                    med_curve = med1[:, i_blk]
-                    err_low = q25_1[:, i_blk]
-                    err_high = q75_1[:, i_blk]
+                        band!(ax[1], list, err_low, err_high, color=(color, 0.2))
+                        scatterlines!(ax[1], list, med_curve,
+                                    color=color,
+                                    linewidth=2,
+                                    linestyle=linestyle,
+                                    marker=marker,
+                                    markersize=6)
 
-
-                    med3_curve = med3[:, i_blk]
-                    err3_low = q25_3[:, i_blk]
-                    err3_high = q75_3[:, i_blk]
-
-                    band!(ax1, N_list, err_low, err_high, color=(color, 0.2))
-                    scatterlines!(ax1, N_list, med_curve,
-                                color=color,
-                                linewidth=2,
-                                linestyle=linestyle,
-                                marker=marker,
-                                markersize=6)
-
-
-                    band!(ax3, N_list, err3_low, err3_high, color=(color, 0.2))
-                    scatterlines!(ax3, N_list, med3_curve,
-                                color=color,
-                                linewidth=2,
-                                linestyle=linestyle,
-                                marker=marker,
-                                markersize=6)
+                        band!(ax[2], list, err2_low, err2_high, color=(color, 0.2))
+                        scatterlines!(ax[2], list, med2_curve,
+                                    color=color,
+                                    linewidth=2,
+                                    linestyle=linestyle,
+                                    marker=marker,
+                                    markersize=6)
+                    end
                 end
             end
 
-            # Plot both orthogonal and non-orthogonal for scenario 2: μ vs injectivity
-            for (orth_flag, linestyle) in [(true, :solid), (false, :dash)]
-                data_key = orth_flag ? "Float64_orthogonal" : "Float64_non_orthogonal"
-                data2 = results2[data_key*"_rank-$(μ_rk)"]
-                med2 = Float64.(data2["median_injectivity"])
-                q25_2 = Float64.(data2["q25_injectivity"])
-                q75_2 = Float64.(data2["q75_injectivity"])
+            # Create custom legend
 
-
-                med4 = Float64.(data2["median_dilation"])
-                q25_4 = Float64.(data2["q25_dilation"])
-                q75_4 = Float64.(data2["q75_dilation"])
-
-                for (i_blk, block_rks) in enumerate(block_rks_list)
-                    color = colors_blk[block_rks]
-                    marker = markers_blk[block_rks]
-
-                    # Extract data for this block rank across all μ values
-                    med_curve = med2[:, i_blk]
-                    err_low = q25_2[:, i_blk]
-                    err_high = q75_2[:, i_blk]
-
-
-                    med4_curve = med4[:, i_blk]
-                    err4_low = q25_4[:, i_blk]
-                    err4_high = q75_4[:, i_blk]
-
-                    band!(ax2, μ_list, err_low, err_high, color=(color, 0.2))
-                    scatterlines!(ax2, μ_list, med_curve,
-                                color=color,
-                                linewidth=2,
-                                linestyle=linestyle,
-                                marker=marker,
-                                markersize=6)
-
-
-
-                    band!(ax4, μ_list, err4_low, err4_high, color=(color, 0.2))
-                    scatterlines!(ax4, μ_list, med4_curve,
-                                color=color,
-                                linewidth=2,
-                                linestyle=linestyle,
-                                marker=marker,
-                                markersize=6)
-                end
-            end
-
-            # Create custom legend with two rows
-            # Row 1: Block ranks with colors
-            color_elements = [
-                LineElement(color = :blue, linewidth = 2),
-                LineElement(color = :orange, linewidth = 2),
-                LineElement(color = :green, linewidth = 2),
-                LineElement(color = :red, linewidth = 2)
-            ]
-            color_labels = [LaTeXString("R=1(Khatri-Rao)"), L"R = 4", L"R = 16", L"R = 32"]
-
-            # Row 2: Orthogonal vs Non-orthogonal line styles
+            # Orthogonal vs Non-orthogonal line styles
             style_elements = [
                 LineElement(color = :black, linewidth = 2, linestyle = :dash),
                 LineElement(color = :black, linewidth = 2, linestyle = :solid)
@@ -603,7 +536,6 @@ function create_combined_scaling_plots(results1, results2, N_list, μ_list, bloc
             all_labels = [color_labels..., style_labels...]
 
             # Add horizontal legend below both subplots
-            #Legend(fig[2, 1:4], all_elements, all_labels,
             Legend(fig[3, 1:2], all_elements, all_labels,
                 orientation = :horizontal,
                 tellheight = true,
@@ -635,7 +567,7 @@ function run_all_scaling_experiments(; force_rerun = false)
     flush(stdout) # <--- Force the text to appear in the Slurm output file
 
     N_list = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-    N = 50
+    N = 20
     μ_list = [8, 16, 32, 64, 128]
     μ = 16
     block_rks_list = [1, 4, 16, 32]
@@ -674,13 +606,7 @@ function run_all_scaling_experiments(; force_rerun = false)
     # Create combined side-by-side plot
     println("\n--- Creating combined comparison plot ---")
     flush(stdout) # <--- Force the text to appear in the Slurm output file
-    create_combined_scaling_plots(results1, results2, 
-                                  N_list, 
-                                  μ_list,
-                                  block_rks_list, 
-                                  μ,
-                                  N,
-                                  base_ranks)
+    create_combined_scaling_plots(results1, results2)
 
     println("\n" * "="^70)
     println("ALL EXPERIMENTS COMPLETED")
