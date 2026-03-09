@@ -73,10 +73,6 @@ function synthetic_experiment(;
         else
             println("Parameters match! Using cached results.")
 
-            # Convert arrays to proper format
-            ε_list = collect(results["perturbation_strengths"])
-            block_rks_loaded = collect(results["block_rks_list"])
-
             # Convert nested arrays to matrices/vectors
             for key in keys(results)
                 if key ∉ ["N", "d", "base_rank", "n_summands", "perturbation_rank", "perturbation_strengths", "block_rks_list", "n_realizations", "seed"]
@@ -346,7 +342,12 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
             markers_blk[rk] = m
             
             push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
-            label_str = rk == 1 ? "Rank 1 (Khatri-Rao)" : "Rank $rk"
+            label_str = "Rank $rk"
+            if rk == 1
+                label_str *= " (Khatri-Rao)"
+            elseif rk == results["base_rank"]
+                label_str *= " (Gaussian TT)"
+            end
             push!(color_labels, label_str)
         end
 
@@ -478,6 +479,8 @@ function create_combined_plot(results1, results2; dir = "out/randomized_rounding
         # Ensure proper types for plotting
         ε_list = Float64.(results1["perturbation_strengths"])
         block_rks_list = Int.(results1["block_rks_list"])
+        base_rank = results1["base_rank"]
+
         
         # Base palettes for dynamic generation
         base_colors = [:blue, :orange, :green, :red, :purple, :cyan, :brown, :magenta]
@@ -496,22 +499,26 @@ function create_combined_plot(results1, results2; dir = "out/randomized_rounding
             markers_blk[rk] = m
             
             push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
-            label_str = rk == 1 ? "R=1 (Khatri-Rao)" : "R=$rk"
+            label_str = "Rank $rk"
+            if rk == 1
+                label_str *= " (Khatri-Rao)"
+            elseif rk == base_rank
+                label_str *= " (Gaussian TT)"
+            end
             push!(color_labels, label_str)
         end
 
         fig = Figure(size = (624, 300))  # 6.5" wide, 4.5" tall (72 DPI equivalent)
-        s = 16
         
         # Create two subplots side by side
         ax1 = Axis(fig[1, 1],
                    xlabel = L"Noise Level $\varepsilon$",
-                   ylabel = L"Relative Error $\Vert \mathrm{trunc}_{16}(\mathbf{x}_\varepsilon) - \mathbf{x}_\varepsilon \Vert /\Vert \mathbf{x} \Vert $",
+                   ylabel = L"Relative Error $\Vert \mathrm{trunc}_{%$base_rank}(\mathbf{x}_\varepsilon) - \mathbf{x}_\varepsilon \Vert /\Vert \mathbf{x} \Vert $",
                    xscale = log10,
                    yscale = log10,
                    limits = (nothing, (1e-5, 1e3)),
                    xticks = ([1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], [L"10^{-1}", L"10^{-2}", L"10^{-3}", L"10^{-4}", L"10^{-5}", L"10^{-6}"]),
-                   title = "Sum of $s Kronecker Bases")
+                   title = "Sum of $base_rank Kronecker Bases")
 
         ax2 = Axis(fig[1, 2],
                    xlabel = L"Noise Level $\varepsilon$",
@@ -520,7 +527,7 @@ function create_combined_plot(results1, results2; dir = "out/randomized_rounding
                    yscale = log10,
                    limits = (nothing, (1e-5, 1e3)),
                    xticks = ([1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], [L"10^{-1}", L"10^{-2}", L"10^{-3}", L"10^{-4}", L"10^{-5}", L"10^{-6}"]),
-                   title = "Single Rank-$s Basis")
+                   title = "Single Rank-$base_rank Basis")
 
         # Plot selected methods for both cases
         for (ax, results) in [(ax1, results1), (ax2, results2)]
@@ -601,20 +608,20 @@ function run_randomized_rounding_experiments(; force_rerun = false)
 
     N = 50
     d = 4
-    base_rank = 16
-    block_rks_list = [1, 4, 8, 16]     # Number of blocks P = base_rank/block_rks => embedding dimension = base_rank
-    perturbation_strengths = 10.0.^(-1:-1:-6)#10.0.^(-6:-1)
+    base_rank = 10                  # If base_rank = max block_rank, we get Gaussian TT
+    block_rks_list = [1, 5, 10]     # Number of blocks P = base_rank/block_rks => embedding dimension = base_rank
+    perturbation_strengths = 10.0.^(-1:-1:-6) 
     perturbation_rank = 50
     n_realizations = 100
     dir = "out/randomized_rounding"
 
     # Run experiment 1: 8 summands of rank 1
     println("\n--- EXPERIMENT 1: 16 summands of rank 1 ---")
-    results_16x1 = synthetic_experiment(
+    results1 = synthetic_experiment(
         N = N,
         d = d,
         base_rank = base_rank,
-        n_summands = 16,
+        n_summands = 10,
         perturbation_strengths = perturbation_strengths,
         perturbation_rank = perturbation_rank,
         block_rks_list = block_rks_list,
@@ -625,7 +632,7 @@ function run_randomized_rounding_experiments(; force_rerun = false)
     
     # Run experiment 2: 1 summand of rank 8
     println("\n--- EXPERIMENT 2: 1 summand of rank 16 ---")
-    results_1x16 = synthetic_experiment(
+    results2 = synthetic_experiment(
         N = N,
         d = d,
         base_rank = base_rank,
@@ -640,13 +647,13 @@ function run_randomized_rounding_experiments(; force_rerun = false)
 
     # Create combined plot
     println("\n--- Creating combined comparison plot ---")
-    create_combined_plot(results_16x1, results_1x16, dir=dir)
+    create_combined_plot(results1, results2, dir=dir)
 
     println("\n" * "="^70)
     println("EXPERIMENTS COMPLETED")
     println("="^70)
 
-    return (results_16x1, results_1x16)
+    return (results1, results2)
 end
 
 # Run experiments automatically when file is included or executed

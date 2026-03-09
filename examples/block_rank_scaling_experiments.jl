@@ -43,7 +43,6 @@ function injectivity_vs_dimension(;
     results["d"] = d
     results["block_rks_list"] = block_rks_list
     results["n_realizations"] = n_realizations
-    results["base_ranks"] = base_ranks
     
     mkpath(dir)
     for μ_rk in base_ranks
@@ -55,22 +54,41 @@ function injectivity_vs_dimension(;
             println("Results already exist at: $filename")
             println("Loading existing results... (use force_rerun=true to recompute)")
 
-            # Load and return existing results
             tmp = JSON3.read(read(filename, String), Dict{String,Any})
-            for key in keys(tmp)
-                results[key] = tmp[key]
-            end
+            # Verify parameters match
+            params_match = (
+                collect(tmp["N_list"]) == collect(N_list) &&
+                tmp["d"] == d &&
+                tmp["μ"] == μ &&
+                collect(tmp["block_rks_list"]) == collect(block_rks_list) &&
+                tmp["n_realizations"] == n_realizations
+            )
 
-            # Convert nested arrays to matrices for each approach
-            for key in keys(results)
-                if key ∉ ["N_list", "μ", "d", "block_rks_list", "n_realizations", "base_ranks"]
-                    approach_data = results[key]
-                    for stat_key in ["median_injectivity", "q25_injectivity", "q75_injectivity",
-                         "median_dilation", "q25_dilation", "q75_dilation"]
-                        if haskey(approach_data, stat_key)
-                            # Convert to matrix
-                            arr = approach_data[stat_key]
-                            approach_data[stat_key] = reshape(arr, :, length(block_rks_list))
+            if !params_match
+                println("WARNING: Loaded parameters do not match current parameters!")
+                println("Loaded:  N_list=$(collect(tmp["N_list"])), d=$(tmp["d"]), μ=$(tmp["μ"]), block_rks_list=$(collect(tmp["block_rks_list"])), n_real=$(tmp["n_realizations"])")
+                println("Current: N_list=$N_list, d=$d, μ=$μ, block_rks_list=$block_rks_list, n_real=$n_realizations")
+                println("Rerunning experiment with current parameters...")
+                # Fall through to run experiment
+            else
+                println("Parameters match! Using cached results.")
+
+                # Load and return existing results
+                for key in keys(tmp)
+                    results[key] = tmp[key]
+                end
+
+                # Convert nested arrays to matrices for each approach
+                for key in keys(results)
+                    if key ∉ ["N_list", "μ", "d", "block_rks_list", "n_realizations"]
+                        approach_data = results[key]
+                        for stat_key in ["median_injectivity", "q25_injectivity", "q75_injectivity",
+                            "median_dilation", "q25_dilation", "q75_dilation"]
+                            if haskey(approach_data, stat_key)
+                                # Convert to matrix
+                                arr = approach_data[stat_key]
+                                approach_data[stat_key] = reshape(arr, :, length(block_rks_list))
+                            end
                         end
                     end
                 end
@@ -211,7 +229,6 @@ function injectivity_vs_subspace_size(;
     results["μ_list"] = μ_list
     results["block_rks_list"] = block_rks_list
     results["n_realizations"] = n_realizations
-    results["base_ranks"] = base_ranks
     
     mkpath(dir)
     for μ_rk in base_ranks
@@ -225,20 +242,40 @@ function injectivity_vs_subspace_size(;
 
             # Load and return existing results
             tmp = JSON3.read(read(filename, String), Dict{String,Any})
-            for key in keys(tmp)
-                results[key] = tmp[key]
-            end
 
-            # Convert nested arrays to matrices for each approach
-            for key in keys(results)
-                if key ∉ ["μ_list", "N", "d", "block_rks_list", "n_realizations", "base_ranks"]
-                    approach_data = results[key]
-                    for stat_key in ["median_injectivity", "q25_injectivity", "q75_injectivity",
-                         "median_dilation", "q25_dilation", "q75_dilation"]
-                        if haskey(approach_data, stat_key)
-                            # Convert to matrix
-                            arr = approach_data[stat_key]
-                            approach_data[stat_key] = reshape(arr, :, length(block_rks_list))
+            # Verify parameters match
+            params_match = (
+                collect(tmp["μ_list"]) == collect(μ_list) &&
+                tmp["d"] == d &&
+                tmp["N"] == N &&
+                collect(tmp["block_rks_list"]) == collect(block_rks_list) &&
+                tmp["n_realizations"] == n_realizations
+            )
+
+            if !params_match
+                println("WARNING: Loaded parameters do not match current parameters!")
+                println("Loaded:  N=$(tmp["N"]), d=$(tmp["d"]), μ_list=$(collect(tmp["μ_list"])), block_rks_list=$(collect(tmp["block_rks_list"])), n_real=$(tmp["n_realizations"])")
+                println("Current: N=$N, d=$d, μ_list=$μ_list, block_rks_list=$block_rks_list, n_real=$n_realizations")
+                println("Rerunning experiment with current parameters...")
+                # Fall through to run experiment
+            else
+                println("Parameters match! Using cached results.")
+
+                for key in keys(tmp)
+                    results[key] = tmp[key]
+                end
+
+                # Convert nested arrays to matrices for each approach
+                for key in keys(results)
+                    if key ∉ ["μ_list", "N", "d", "block_rks_list", "n_realizations", "base_ranks"]
+                        approach_data = results[key]
+                        for stat_key in ["median_injectivity", "q25_injectivity", "q75_injectivity",
+                            "median_dilation", "q25_dilation", "q75_dilation"]
+                            if haskey(approach_data, stat_key)
+                                # Convert to matrix
+                                arr = approach_data[stat_key]
+                                approach_data[stat_key] = reshape(arr, :, length(block_rks_list))
+                            end
                         end
                     end
                 end
@@ -363,7 +400,7 @@ end
 """
 Create combined side-by-side plot comparing orthogonal vs non-orthogonal approaches
 """
-function create_combined_scaling_plots(results1, results2; dir = "out/block_rank_experiments")
+function create_combined_scaling_plots(results1, results2, base_ranks; dir = "out/block_rank_experiments")
     mkpath("$dir/plots")
 
     # Configure CairoMakie for publication-quality plots
@@ -403,12 +440,13 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
 
     # Extract parameters from results
     N_list = Int.(collect(results1["N_list"]))
-    μ_fixed = Int(results1["μ"])
-    block_rks_list = Int.(collect(results1["block_rks_list"]))
-    base_ranks = Int.(collect(results1["base_ranks"]))
-
-    μ_list = Int.(collect(results2["μ_list"]))
     N_fixed = Int(results2["N"])
+    μ_fixed = Int(results1["μ"])
+    μ_list = Int.(collect(results2["μ_list"]))
+    block_rks_list1 = Int.(collect(results1["block_rks_list"]))
+    block_rks_list2 = Int.(collect(results2["block_rks_list"]))
+
+    println(μ_list)
 
     # Base palettes for dynamic generation
     base_colors = [:blue, :orange, :green, :red, :purple, :cyan, :brown, :magenta]
@@ -422,17 +460,6 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
             color_elements = MarkerElement[]
             color_labels = []
 
-            for (i, rk) in enumerate(block_rks_list)
-                c = base_colors[mod1(i, length(base_colors))]
-                m = base_markers[mod1(i, length(base_markers))]
-                colors_blk[rk] = c
-                markers_blk[rk] = m
-                
-                push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
-                label_str = rk == 1 ? "R=1(Khatri-Rao)" : "R = $rk"
-                push!(color_labels, label_str)
-            end
-
             fig = Figure(size = (624, 600))
 
             ax1 = Axis(fig[1, 1],
@@ -444,10 +471,11 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
 
             ax2 = Axis(fig[1, 2],
                     xlabel = L"Subspace Size $r$",
-                    xscale = log2,
+                    #xscale = log2,
                     yscale = log10,
                     limits = (nothing, (1e-7, 1e0)),
-                    xticks = ([8, 16, 32, 64, 128], ["8", "16", "32", "64", "128"]),
+                    #xticks = ([8, 16, 32, 64, 128], ["8", "16", "32", "64", "128"]),
+                    xticks = ([16, 48, 80, 112] , ["16", "48", "80", "112"]),
                     title = "Injectivity vs r (d = $N_fixed)")
 
             ax3 = Axis(fig[2, 1],
@@ -459,10 +487,11 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
 
             ax4 = Axis(fig[2, 2],
                     xlabel = L"Subspace Size $r$",
-                    xscale = log2,
+                    #xscale = log2,
                     yscale = log10,
                     limits = (nothing, (1e-2, 1e2)),
-                    xticks = ([8, 16, 32, 64, 128], ["8", "16", "32", "64", "128"]),
+                    #xticks = ([8, 16, 32, 64, 128], ["8", "16", "32", "64", "128"]),
+                    xticks = ([16, 48, 80, 112] , ["16", "48", "80", "112"]),
                     title = "Dilation vs r (d = $N_fixed)")
 
             # Link axis for consistent scaling
@@ -471,7 +500,17 @@ function create_combined_scaling_plots(results1, results2; dir = "out/block_rank
             linkxaxes!(ax1, ax3)
             linkxaxes!(ax2, ax4)
 
-            for (ax, list, results) in [([ax1, ax3], N_list, results1), ([ax2, ax4], μ_list, results2)]
+            for (ax, list, results, block_rks_list) in [([ax1, ax3], N_list, results1, block_rks_list1), ([ax2, ax4], μ_list, results2, block_rks_list2)]
+                for (i, rk) in enumerate(block_rks_list)
+                    c = base_colors[mod1(i, length(base_colors))]
+                    m = base_markers[mod1(i, length(base_markers))]
+                    colors_blk[rk] = c
+                    markers_blk[rk] = m
+                    
+                    push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
+                    label_str = rk == 1 ? "R=1(Khatri-Rao)" : "R = $rk"
+                    push!(color_labels, label_str)
+                end
                 for (orth_flag, linestyle) in [(true, :solid), (false, :dash)]
                     data_key = orth_flag ? "Float64_orthogonal" : "Float64_non_orthogonal"
                     full_key = data_key*"_rank-$(μ_rk)"
@@ -567,12 +606,12 @@ function run_all_scaling_experiments(; force_rerun = false)
     flush(stdout) # <--- Force the text to appear in the Slurm output file
 
     N_list = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-    N = 20
-    μ_list = [8, 16, 32, 64, 128]
+    N = 50
+    μ_list = [16, 32, 48, 64, 80, 96, 112, 128] 
     μ = 16
     block_rks_list = [1, 4, 16, 32]
     n_realizations = 100
-    base_ranks = [1, 10]
+    base_ranks = [4]
     dir = "out/block_rank_experiments"
 
     # Scenario 1: Injectivity vs Dimension N
@@ -606,7 +645,7 @@ function run_all_scaling_experiments(; force_rerun = false)
     # Create combined side-by-side plot
     println("\n--- Creating combined comparison plot ---")
     flush(stdout) # <--- Force the text to appear in the Slurm output file
-    create_combined_scaling_plots(results1, results2)
+    create_combined_scaling_plots(results1, results2, base_ranks; dir = dir)
 
     println("\n" * "="^70)
     println("ALL EXPERIMENTS COMPLETED")
