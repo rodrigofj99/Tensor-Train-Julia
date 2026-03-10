@@ -443,10 +443,7 @@ function create_combined_scaling_plots(results1, results2, base_ranks; dir = "ou
     N_fixed = Int(results2["N"])
     μ_fixed = Int(results1["μ"])
     μ_list = Int.(collect(results2["μ_list"]))
-    block_rks_list1 = Int.(collect(results1["block_rks_list"]))
-    block_rks_list2 = Int.(collect(results2["block_rks_list"]))
-
-    println(μ_list)
+    block_rks_list = Int.(collect(results1["block_rks_list"]))
 
     # Base palettes for dynamic generation
     base_colors = [:blue, :orange, :green, :red, :purple, :cyan, :brown, :magenta]
@@ -500,17 +497,18 @@ function create_combined_scaling_plots(results1, results2, base_ranks; dir = "ou
             linkxaxes!(ax1, ax3)
             linkxaxes!(ax2, ax4)
 
-            for (ax, list, results, block_rks_list) in [([ax1, ax3], N_list, results1, block_rks_list1), ([ax2, ax4], μ_list, results2, block_rks_list2)]
-                for (i, rk) in enumerate(block_rks_list)
-                    c = base_colors[mod1(i, length(base_colors))]
-                    m = base_markers[mod1(i, length(base_markers))]
-                    colors_blk[rk] = c
-                    markers_blk[rk] = m
-                    
-                    push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
-                    label_str = rk == 1 ? "R=1(Khatri-Rao)" : "R = $rk"
-                    push!(color_labels, label_str)
-                end
+            for (i, rk) in enumerate(block_rks_list)
+                c = base_colors[mod1(i, length(base_colors))]
+                m = base_markers[mod1(i, length(base_markers))]
+                colors_blk[rk] = c
+                markers_blk[rk] = m
+                
+                push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
+                label_str = rk == 1 ? "R=1(Khatri-Rao)" : "R = $rk"
+                push!(color_labels, label_str)
+            end
+
+            for (ax, list, results) in [([ax1, ax3], N_list, results1), ([ax2, ax4], μ_list, results2)]
                 for (orth_flag, linestyle) in [(true, :solid), (false, :dash)]
                     data_key = orth_flag ? "Float64_orthogonal" : "Float64_non_orthogonal"
                     full_key = data_key*"_rank-$(μ_rk)"
@@ -611,7 +609,7 @@ function run_all_scaling_experiments(; force_rerun = false)
     μ = 16
     block_rks_list = [1, 4, 16, 32]
     n_realizations = 100
-    base_ranks = [4]
+    base_ranks = [1, 4]
     dir = "out/block_rank_experiments"
 
     # Scenario 1: Injectivity vs Dimension N
