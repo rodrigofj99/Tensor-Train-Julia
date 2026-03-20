@@ -457,13 +457,14 @@ function create_combined_scaling_plots(results1, results2, base_ranks; dir = "ou
             color_elements = MarkerElement[]
             color_labels = []
 
-            fig = Figure(size = (624, 600))
+            fig = Figure(size = (824, 600))
 
             ax1 = Axis(fig[1, 1],
-                    xlabel = L"Dimension $d$",
+                    xlabel = L"Tensor Order $d$",
                     ylabel = L"Injectivity $\sigma^2_{\mathrm{min}}$",
                     yscale = log10,
                     limits = (nothing, (1e-7, 1e0)),
+                    xticks = ([10, 20, 30, 40, 50, 60, 70, 80, 90, 100], ["10", "20", "30", "40", "50", "60", "70", "80", "90", "100"]),
                     title = "Injectivity vs d (r = $μ_fixed)")
 
             ax2 = Axis(fig[1, 2],
@@ -472,14 +473,15 @@ function create_combined_scaling_plots(results1, results2, base_ranks; dir = "ou
                     yscale = log10,
                     limits = (nothing, (1e-7, 1e0)),
                     #xticks = ([8, 16, 32, 64, 128], ["8", "16", "32", "64", "128"]),
-                    xticks = ([16, 48, 80, 112] , ["16", "48", "80", "112"]),
+                    xticks = ([16, 32, 48, 64, 80, 96, 112, 128]  , ["16","32", "48", "64", "80", "96", "112", "128"]),
                     title = "Injectivity vs r (d = $N_fixed)")
 
             ax3 = Axis(fig[2, 1],
-                    xlabel = L"Dimension $d$",
+                    xlabel = L"Tensor Order $d$",
                     ylabel = L"Dilation $\sigma^2_{\mathrm{max}}$",
                     yscale = log10,
                     limits = (nothing, (1e-2, 1e2)),
+                    xticks = ([10, 20, 30, 40, 50, 60, 70, 80, 90, 100], ["10", "20", "30", "40", "50", "60", "70", "80", "90", "100"]),
                     title = "Dilation vs d (r = $μ_fixed)")
 
             ax4 = Axis(fig[2, 2],
@@ -488,7 +490,7 @@ function create_combined_scaling_plots(results1, results2, base_ranks; dir = "ou
                     yscale = log10,
                     limits = (nothing, (1e-2, 1e2)),
                     #xticks = ([8, 16, 32, 64, 128], ["8", "16", "32", "64", "128"]),
-                    xticks = ([16, 48, 80, 112] , ["16", "48", "80", "112"]),
+                    xticks = ([16, 32, 48, 64, 80, 96, 112, 128]  , ["16","32", "48", "64", "80", "96", "112", "128"]),
                     title = "Dilation vs r (d = $N_fixed)")
 
             # Link axis for consistent scaling
@@ -566,7 +568,7 @@ function create_combined_scaling_plots(results1, results2, base_ranks; dir = "ou
                 LineElement(color = :black, linewidth = 2, linestyle = :dash),
                 LineElement(color = :black, linewidth = 2, linestyle = :solid)
             ]
-            style_labels = ["Gaussian i.i.d", "Orthogonal"]
+            style_labels = ["TTStack", "Orthogonal TTStack"]
 
             # Combine elements
             all_elements = [color_elements..., style_elements...]

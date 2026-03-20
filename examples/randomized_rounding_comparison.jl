@@ -361,6 +361,7 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
                   xlabel = L"Noise Level $\varepsilon$",
                   ylabel = "Relative Error",
                   xscale = log10,
+                  xreversed = true,
                   yscale = log10,
                   limits = (nothing, (1e-5, 1e3)),
                   xticks = ([1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], [L"10^{-1}", L"10^{-2}", L"10^{-3}", L"10^{-4}", L"10^{-5}", L"10^{-6}"]),
@@ -373,7 +374,7 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
             color = colors_blk[block_rks]
             marker = markers_blk[block_rks]
 
-            for (linestyle, method_name) in [((:dash, :dense), "ttrand_orthogonal_blk"), ((:dot, :dense), "stta_orthogonal_blk")]
+            for (linestyle, method_name) in [((:solid, :dense), "ttrand_orthogonal_blk"), ((:dash, :dense), "stta_orthogonal_blk")]
                 full_key = method_name*"$(block_rks)"
                 if !haskey(results, full_key)
                     continue
@@ -403,10 +404,10 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
         
         # Create custom legend elements
         line_elements = [
-            LineElement(color = :black, linestyle = :dash, linewidth = 2),
-            LineElement(color = :black, linestyle = :dot, linewidth = 2)
+            LineElement(color = :black, linestyle = :solid, linewidth = 2),
+            LineElement(color = :black, linestyle = :dash, linewidth = 2)
         ]
-        line_labels = ["RandOrth (solid)", "STTA (dotted)"]
+        line_labels = ["RandOrth (solid)", "STTA (dashed)"]
         
         ref_elements = [LineElement(color = :gray, linestyle = :dashdot, linewidth = 1)]
         ref_labels = [L"$\varepsilon$ (reference)"]
@@ -508,30 +509,32 @@ function create_combined_plot(results1, results2; dir = "out/randomized_rounding
             push!(color_labels, label_str)
         end
 
-        fig = Figure(size = (624, 300))  # 6.5" wide, 4.5" tall (72 DPI equivalent)
+        fig = Figure(size = (724, 300))  
         
         # Create two subplots side by side
         ax1 = Axis(fig[1, 1],
                    xlabel = L"Noise Level $\varepsilon$",
                    ylabel = L"Relative Error $\Vert \mathrm{trunc}_{%$base_rank}(\mathbf{x}_\varepsilon) - \mathbf{x}_\varepsilon \Vert /\Vert \mathbf{x} \Vert $",
                    xscale = log10,
+                   xreversed = true,
                    yscale = log10,
-                   limits = (nothing, (1e-5, 1e3)),
+                   limits = (nothing, (1e-5, 1e2)),
                    xticks = ([1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], [L"10^{-1}", L"10^{-2}", L"10^{-3}", L"10^{-4}", L"10^{-5}", L"10^{-6}"]),
-                   title = "Sum of $base_rank Kronecker Bases")
+                   title = "Randomized rounding of the sum of $base_rank Kronecker vectors")
 
         ax2 = Axis(fig[1, 2],
                    xlabel = L"Noise Level $\varepsilon$",
                    ylabel = "",
                    xscale = log10,
+                   xreversed = true,
                    yscale = log10,
-                   limits = (nothing, (1e-5, 1e3)),
+                   limits = (nothing, (1e-5, 1e2)),
                    xticks = ([1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6], [L"10^{-1}", L"10^{-2}", L"10^{-3}", L"10^{-4}", L"10^{-5}", L"10^{-6}"]),
-                   title = "Single Rank-$base_rank Basis")
+                   title = "Randomized rounding of single rank-$base_rank vector")
 
         # Plot selected methods for both cases
         for (ax, results) in [(ax1, results1), (ax2, results2)]
-            for (linestyle, method_name) in [((:dash, :dense), "ttrand_orthogonal_blk"), ((:dot, :dense), "stta_orthogonal_blk")]
+            for (linestyle, method_name) in [((:solid, :dense), "ttrand_orthogonal_blk"), ((:dash, :dense), "stta_orthogonal_blk")]
                 for block_rks in block_rks_list
                     full_key = method_name*"$(block_rks)"
                     if !haskey(results, full_key)
@@ -566,8 +569,8 @@ function create_combined_plot(results1, results2; dir = "out/randomized_rounding
         
         # Create custom legend elements
         line_elements = [
-            LineElement(color = :black, linestyle = :dash, linewidth = 2),
-            LineElement(color = :black, linestyle = :dot, linewidth = 2)
+            LineElement(color = :black, linestyle = :solid, linewidth = 2),
+            LineElement(color = :black, linestyle = :dash, linewidth = 2)
         ]
         line_labels = ["RandOrth", "STTA"]
         
@@ -608,11 +611,11 @@ function run_randomized_rounding_experiments(; force_rerun = false)
 
     N = 50
     d = 4
-    base_rank = 10                  # If base_rank = max block_rank, we get Gaussian TT
-    block_rks_list = [1, 5, 10]     # Number of blocks P = base_rank/block_rks => embedding dimension = base_rank
+    base_rank = 16                  # If base_rank = max block_rank, we get Gaussian TT
+    block_rks_list = [1, 4, 8, 16]     # Number of blocks P = base_rank/block_rks => embedding dimension = base_rank
     perturbation_strengths = 10.0.^(-1:-1:-6) 
-    perturbation_rank = 50
-    n_realizations = 100
+    perturbation_rank = 10
+    n_realizations = 10
     dir = "out/randomized_rounding"
 
     # Run experiment 1: 8 summands of rank 1
@@ -621,7 +624,7 @@ function run_randomized_rounding_experiments(; force_rerun = false)
         N = N,
         d = d,
         base_rank = base_rank,
-        n_summands = 10,
+        n_summands = 16,
         perturbation_strengths = perturbation_strengths,
         perturbation_rank = perturbation_rank,
         block_rks_list = block_rks_list,

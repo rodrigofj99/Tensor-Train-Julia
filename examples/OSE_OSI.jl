@@ -240,7 +240,7 @@ function create_combined_scaling_plots(results; dir = "out/block_rank_experiment
             colors_P = Dict{Int, Symbol}()
             markers_P = Dict{Int, Symbol}()
             color_elements = MarkerElement[]
-            color_labels = LaTeXString[]
+            color_labels = []
 
             for (i, P) in enumerate(P_list)
                 c = base_colors[mod1(i, length(base_colors))]
@@ -251,20 +251,26 @@ function create_combined_scaling_plots(results; dir = "out/block_rank_experiment
                 
                 # Push a MarkerElement instead of a LineElement
                 push!(color_elements, MarkerElement(marker = m, color = c, markersize = 10, strokecolor = :transparent))
-                push!(color_labels, LaTeXString("\$P = $(P)\$"))
+                push!(color_labels, "P = $P")
             end
 
-            fig = Figure(size = (624, 300))
+            fig = Figure(size = (824, 300))
 
             ax1 = Axis(fig[1, 1],
-                    xlabel = L"Dimension $d$",
+                    xlabel = L"Tensor Order $d$",
                     ylabel = L"Injectivity $\sigma^2_{\mathrm{min}}$",
-                    title = LaTeXString("Injectivity vs d (r = $μ_fixed)"))
+                    limits = (nothing, (0, 0.75)),
+                    yticks = ([0, 0.25, 0.5, 0.75], ["0", "0.25", "0.5", "0.75"]),
+                    xticks = ([5, 10, 15, 20, 25, 30, 35, 40, 45, 50], ["5", "10", "15", "20", "25", "30", "35", "40", "45", "50"]),
+                    title = "Injectivity vs d")
 
             ax3 = Axis(fig[1, 2],
-                    xlabel = L"Dimension $d$",
+                    xlabel = L"Tensor Order $d$",
                     ylabel = L"Dilation $\sigma^2_{\mathrm{max}}$",
-                    title = LaTeXString("Dilation vs d (r = $μ_fixed)"))
+                    limits = (nothing, (1, 8)),
+                    yticks = ([1, 2, 3, 4, 5, 6, 7, 8], ["1", "2", "3", "4", "5", "6", "7", "8"]),
+                    xticks = ([5, 10, 15, 20, 25, 30, 35, 40, 45, 50], ["5", "10", "15", "20", "25", "30", "35", "40", "45", "50"]),
+                    title = "Dilation vs d")
 
             # Link axis for consistent scaling
             linkxaxes!(ax1, ax3)
@@ -325,7 +331,7 @@ function create_combined_scaling_plots(results; dir = "out/block_rank_experiment
                 LineElement(color = :black, linewidth = 2, linestyle = :dash),
                 LineElement(color = :black, linewidth = 2, linestyle = :solid)
             ]
-            style_labels = ["Gaussian i.i.d", "Orthogonal"]
+            style_labels = ["TTStack", "Orthogonal TTStack"]
 
             # Combine elements
             all_elements = [color_elements..., style_elements...]
