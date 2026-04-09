@@ -7,7 +7,7 @@ include("tt_operations.jl")
 export *, +, dot, -, /, outer_product
 
 include("tt_rounding.jl")
-export tt_svdvals, tt_rounding, tt_compression_par, orthogonalize, tt_up_rks, norm, r_and_d_to_rks
+export tt_svdvals, tt_rounding!, tt_rounding, tt_compression_par, orthogonalize, tt_up_rks, norm, r_and_d_to_rks
 
 include("als.jl")
 export als_linsolv, als_eigsolv, als_gen_eigsolv

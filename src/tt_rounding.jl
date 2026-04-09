@@ -119,7 +119,7 @@ end
 
 """
 returns a TT representation where the singular values lower than tol are discarded
-"""
+
 function tt_rounding(x_tt::TTvector{T,N};tol=1e-12,rmax=2^14) where {T<:Number,N}
 	is_leftorthogonal(x_tt) ? y_tt = copy(x_tt) :	y_tt = orthogonalize(x_tt;i=x_tt.N)
 	norm(y_tt) < tol && return zeros_tt(T,x_tt.ttv_dims,x_tt.ttv_rks)
@@ -139,7 +139,135 @@ function tt_rounding(x_tt::TTvector{T,N};tol=1e-12,rmax=2^14) where {T<:Number,N
 	end
 	y_tt.ttv_ot[1] = 0
 	return y_tt
+end"""
+
+
+
+function tt_rounding(x_tt::TTvector{T,N}; tol=1e-12, rmax=2^14, direction=:left) where {T<:Number,N}
+	if direction == :left
+		y_tt = is_leftorthogonal(x_tt) ? copy(x_tt) : orthogonalize(x_tt; i=N)
+	else
+		y_tt = is_rightorthogonal(x_tt) ? copy(x_tt) : orthogonalize(x_tt; i=1)
+	end
+
+	return _tt_rounding(y_tt; tol=tol, rmax=rmax, direction=direction)
 end
+
+
+
+function tt_rounding!(x_tt::TTvector{T,N}; tol=1e-12, rmax=2^14, direction=:left) where {T<:Number,N}
+	if direction == :left
+		y_tt = is_leftorthogonal(x_tt) ? x_tt : orthogonalize(x_tt; i=N)
+	else
+		y_tt = is_rightorthogonal(x_tt) ? x_tt : orthogonalize(x_tt; i=1)
+	end
+
+	_tt_rounding(y_tt; tol=tol, rmax=rmax, direction=direction)
+	return 
+end
+
+
+
+"""
+Internal function for rounding. It's meant to be used by a wrapper
+"""
+function _tt_rounding(y_tt::TTvector{T,N}; tol=1e-12, rmax=2^14, direction=:left) where {T<:Number,N}
+    if direction == :left
+        # =====================================================================
+        # RIGHT-TO-LEFT COMPRESSION SWEEP (Requires Left-Orthogonalization)
+        # ===================================================================== 
+        if norm(y_tt.ttv_vec[N]) < tol 
+            return zeros_tt(T, y_tt.ttv_dims, y_tt.ttv_rks)
+        end
+        
+        for j in N:-1:2
+            nj = y_tt.ttv_dims[j]
+            rj_prev = y_tt.ttv_rks[j]
+            rj = y_tt.ttv_rks[j+1]
+            
+            # Unfold: (rj_prev) x (nj * rj)
+            M = reshape(permutedims(y_tt.ttv_vec[j], (2, 1, 3)), rj_prev, nj * rj)
+            
+            u, s, v = try
+                svd(M, full=false)
+            catch e
+                e isa LAPACKException ? svd(M, full=false, alg=LinearAlgebra.QRIteration()) : rethrow(e)
+            end
+            
+            # Enforce maximum rank
+            _, k = floor(s, tol)
+            k = min(k, rmax, sum(s .> 0.0))
+            
+            # Update current core (j) with V^T
+            V_trunc = adjoint(@view v[:, 1:k])
+            y_tt.ttv_vec[j] = permutedims(reshape(V_trunc, k, nj, rj), (2, 1, 3))
+            
+            # Absorb U*S into the left core (j-1)
+            US = @view(u[:, 1:k]) .* s[1:k]' 
+            nj_prev = y_tt.ttv_dims[j-1]
+            rj_prev_prev = y_tt.ttv_rks[j-1]
+            
+            left_core_mat = reshape(y_tt.ttv_vec[j-1], nj_prev * rj_prev_prev, rj_prev)
+            y_tt.ttv_vec[j-1] = reshape(left_core_mat * US, nj_prev, rj_prev_prev, k)
+            
+            y_tt.ttv_rks[j] = k
+            y_tt.ttv_ot[j] = -1 # Right-orthogonal
+        end
+        y_tt.ttv_ot[1] = 0
+        return y_tt
+
+    elseif direction == :right
+        # =====================================================================
+        # LEFT-TO-RIGHT COMPRESSION SWEEP (Requires Right-Orthogonalization)
+        # =====================================================================
+        if norm(y_tt.ttv_vec[1]) < tol 
+            return zeros_tt(T, y_tt.ttv_dims, y_tt.ttv_rks)
+        end
+        
+        for j in 1:(N-1)
+            nj = y_tt.ttv_dims[j]
+            rj_prev = y_tt.ttv_rks[j]
+            rj = y_tt.ttv_rks[j+1]
+            
+            # Unfold: (nj * rj_prev) x (rj)
+            M = reshape(y_tt.ttv_vec[j], nj * rj_prev, rj)
+            
+            u, s, v = try
+                svd(M, full=false)
+            catch e
+                e isa LAPACKException ? svd(M, full=false, alg=LinearAlgebra.QRIteration()) : rethrow(e)
+            end
+            
+            _, k = floor(s, tol)
+            k = min(k, rmax, sum(s .> 0.0))
+            
+            # Update current core (j) with U
+            y_tt.ttv_vec[j] = reshape(@view(u[:, 1:k]), nj, rj_prev, k)
+            
+            # Absorb S*V^T into the right core (j+1)
+            SVT = s[1:k] .* adjoint(@view v[:, 1:k])
+            
+            nj_next = y_tt.ttv_dims[j+1]
+            rj_next = y_tt.ttv_rks[j+2]
+            
+            # Permute right core to (left_bond, physical, right_bond) for valid matrix multiplication
+            right_core_mat = reshape(permutedims(y_tt.ttv_vec[j+1], (2, 1, 3)), rj, nj_next * rj_next)
+            new_right_core_flat = SVT * right_core_mat
+            
+            # Permute back to standard struct layout: (physical, left_bond, right_bond)
+            y_tt.ttv_vec[j+1] = permutedims(reshape(new_right_core_flat, k, nj_next, rj_next), (2, 1, 3))
+            
+            y_tt.ttv_rks[j+1] = k
+            y_tt.ttv_ot[j] = 1 # Left-orthogonal
+        end
+        y_tt.ttv_ot[N] = 0
+        return y_tt
+
+    else
+        error("Invalid direction. Use direction=:right or direction=:left")
+    end
+end
+
 
 """
 returns the rounding of the TT operator
@@ -166,13 +294,13 @@ function tt_svdvals(x_tt::TTvector{T,N};tol=1e-14) where {T<:Number,N}
 	return Σ
 end
 
-function floor(s::Array{Float64},tol;degen_tol=1e-5)
+function floor(s::AbstractVector{<:Real},tol;degen_tol=1e-5)
 	if tol==0.0
 		return s,length(s)
 	else
 		d = length(s)
 		i=d
-		weight = 0.0
+		weight = zero(eltype(s))
 		norm2 = dot(s,s)
 		while (i>0) && weight<tol^2*norm2
 			weight+=s[i]^2

@@ -366,11 +366,82 @@ function is_leftorthogonal(x_tt::TTvector{T,N}) where {T<:Number,N}
   return ot[1:N-1] == x_tt.ttv_ot[1:N-1]
 end
 
+function is_rightorthogonal(x_tt::TTvector{T,N}) where {T<:Number,N}
+  ot = -ones(Int64,N)
+  return ot[2:N] == x_tt.ttv_ot[2:N]
+end
+
 """
 TT decomposition by the Hierarchical SVD algorithm 
   * Oseledets, I. V. (2011). Tensor-train decomposition. *SIAM Journal on Scientific Computing*, 33(5), 2295-2317.
   * Schollwöck, U. (2011). The density-matrix renormalization group in the age of matrix product states. *Annals of physics*, 326(1), 96-192.
 The *root* of the TT decomposition is at index *i.e.* ``A_i`` for ``i < index`` are left-orthogonal and ``A_i`` for ``i > index`` are right-orthogonal. Singular values lower than tol are discarded.
+"""
+function ttv_decomp(tensor::Array{T,d};index=1,tol=1e-12) where {T<:Number,d}
+  # Decomposes a tensor into its tensor train with core matrices at i=index
+  dims = size(tensor) #dims = [n_1,...,n_d]
+  ttv_vec = Array{Array{T,3}}(undef,d)
+
+  # Cores extracted from U (i < index) are Left-Orthogonal (1)
+  # Cores extracted from V' (i > index) are Right-Orthogonal (-1)
+  # The root (i = index) is mixed (0)
+  ttv_ot = zeros(Int64, d)
+  if index > 1
+    ttv_ot[1:index-1] .= 1   # Left-Orthogonal
+  end
+  if index < d
+    ttv_ot[index+1:d] .= -1  # Right-Orthogonal
+  end
+
+  rks = ones(Int64, d+1) 
+  tensor_curr = tensor
+
+  # Calculate ttv_vec[i] for i < index (Left-to-Right Sweep)
+  for i = 1 : (index - 1)
+    # Reshape the currently left tensor
+    tensor_curr = reshape(tensor_curr, Int(rks[i] * dims[i]), :)
+
+    # Perform the singular value decomposition
+    u, s, v = svd(tensor_curr)
+
+    # Define the i-th rank
+    rks[i+1] = length(s[s .>= tol])
+
+    # Reshape the U matrix directly into the 3D core format and permute dimensions to match (μ_i, α_{i-1}, α_i)
+    ttv_vec[i] = permutedims(reshape(u[:, 1:rks[i+1]], rks[i], dims[i], rks[i+1]), (2, 1, 3))
+
+    # Update the currently left tensor
+    tensor_curr = Diagonal(s[1:rks[i+1]])*v'[1:rks[i+1],:]
+  end
+
+  # Calculate ttv_vec[i] for i > index (Right-to-Left Sweep)
+  if index < d
+    for i = d : (-1) : (index + 1)
+      # Reshape the currently left tensor
+      tensor_curr = reshape(tensor_curr, :, dims[i] * rks[i+1])
+
+      # Perform the singular value decomposition
+      u, s, v = svd(tensor_curr)
+
+      # Define the (i-1)-th rank
+      rks[i]=length(s[s .>= tol])
+
+      ttv_vec[i] = permutedims(reshape(v'[1:rks[i], :], rks[i], dims[i], rks[i+1]), (2, 1, 3))
+
+      # Update the current left tensor
+      tensor_curr = u[:,1:rks[i]]*Diagonal(s[1:rks[i]])
+    end
+  end
+  # Calculate ttv_vec[i] for i = index (The Root)
+  # Reshape the current left tensor
+  tensor_curr = reshape(tensor_curr, Int(dims[index]*rks[index]),:)
+
+  ttv_vec[index] = permutedims(reshape(tensor_curr[:, 1:rks[index+1]], rks[index], dims[index], rks[index+1]), (2, 1, 3))
+
+  # Define the return value as a TTvector
+  return TTvector{T,d}(d,ttv_vec, dims, rks, ttv_ot)
+end
+
 """
 function ttv_decomp(tensor::Array{T,d};index=1,tol=1e-12) where {T<:Number,d}
   # Decomposes a tensor into its tensor train with core matrices at i=index
@@ -439,6 +510,9 @@ function ttv_decomp(tensor::Array{T,d};index=1,tol=1e-12) where {T<:Number,d}
   # Define the return value as a TTvector
   return TTvector{T,d}(d,ttv_vec, dims, rks, ttv_ot)
 end
+"""
+
+
 
 """
 Returns the tensor corresponding to x_tt
