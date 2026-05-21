@@ -348,18 +348,19 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
             elseif rk == results["base_rank"]
                 label_str *= " (Gaussian TT)"
             end
-            push!(color_labels, label_str)
+            push!(color_labels, LaTeXString(label_str))
         end
 
         # Create title with interpolated values
         N_val = results["N"]
         d_val = results["d"]
-        title_str = "Randomized Rounding: Error vs Perturbation (N=$N_val, d=$(d_val))"
-        
+        r_val = results["base_rank"]
+        title_str = L"Randomized Rounding: Error vs Perturbation ($N=%$N_val$, $d=%$d_val$, $r=%$r_val$)"
+
         fig = Figure(size = (800, 600))
         ax = Axis(fig[1, 1],
                   xlabel = L"Noise Level $\varepsilon$",
-                  ylabel = "Relative Error",
+                  ylabel = LaTeXString("Relative Error"),
                   xscale = log10,
                   xreversed = true,
                   yscale = log10,
@@ -407,7 +408,7 @@ function create_perturbation_plot(results; dir = "out/randomized_rounding")
             LineElement(color = :black, linestyle = :solid, linewidth = 2),
             LineElement(color = :black, linestyle = :dash, linewidth = 2)
         ]
-        line_labels = ["RandOrth (solid)", "STTA (dashed)"]
+        line_labels = [LaTeXString("RandOrth (solid)"), LaTeXString("STTA (dashed)")]
         
         ref_elements = [LineElement(color = :gray, linestyle = :dashdot, linewidth = 1)]
         ref_labels = [L"$\varepsilon$ (reference)"]
@@ -506,7 +507,7 @@ function create_combined_plot(results1, results2; dir = "out/randomized_rounding
             elseif rk == base_rank
                 label_str *= " (Gaussian TT)"
             end
-            push!(color_labels, label_str)
+            push!(color_labels, LaTeXString(label_str))
         end
 
         fig = Figure(size = (724, 300))  
@@ -572,7 +573,7 @@ function create_combined_plot(results1, results2; dir = "out/randomized_rounding
             LineElement(color = :black, linestyle = :solid, linewidth = 2),
             LineElement(color = :black, linestyle = :dash, linewidth = 2)
         ]
-        line_labels = ["RandOrth", "STTA"]
+        line_labels = [L"\text{RandOrth}", L"\text{STTA}"]
         
         
         ref_elements = [LineElement(color = :gray, linestyle = :dashdot, linewidth = 1)]

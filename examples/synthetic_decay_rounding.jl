@@ -125,6 +125,7 @@ function synthetic_experiment(;
         if length(v.Σ[i]) <= cutoff
             v.Σ[i] .*= exp.( -decay_rate .* axes(v.Σ[i],1))
             v.cores[i+1] = v.cores[i+1]
+        end
         @show v.Σ[i]
     end
     psi = vidal_to_left_canonical(v)
