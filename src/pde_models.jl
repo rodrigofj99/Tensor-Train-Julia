@@ -51,14 +51,11 @@ function perturbed_Δ_tto(n,d;hermitian=true,r=1,rks=ones(Int64,d+1))
 end
 
 function potential(V::TTvector{T,d}) where {T,d}
+  # Operator core (L, i, j, R); vector core (L, I, R).
   out = zeros_tto(T,V.ttv_dims,V.ttv_rks)
   for k in 1:d
     for iₖ in 1:V.ttv_dims[k]
-      for jₖ in 1:V.ttv_dims[k]
-        if iₖ == jₖ
-          out.tto_vec[k][iₖ,iₖ,:,:] = V.ttv_vec[k][iₖ,:,:]
-        end
-      end
+      out.tto_vec[k][:,iₖ,iₖ,:] = V.ttv_vec[k][:,iₖ,:]
     end
   end
   return out

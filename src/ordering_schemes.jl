@@ -50,14 +50,14 @@ function N_rdm(x_tt::TTvector{T},i::Integer,j::Integer) where {T<:Number}
     ρ = zeros(T,x_tt.ttv_dims[i:j]...,x_tt.ttv_dims[i:j]...)
     index = CartesianIndices(Tuple([1:k for k in x_tt.ttv_dims[i:j]]))
     for J in index
-        M = copy(y_tt.ttv_vec[i][J[1],:,:])
+        M = copy(y_tt.ttv_vec[i][:,J[1],:])
         for k in i+1:j
-            M = M*y_tt.ttv_vec[k][J[k-i+1],:,:]
+            M = M*y_tt.ttv_vec[k][:,J[k-i+1],:]
         end
         @threads for K in index
-            N = copy(y_tt.ttv_vec[i][K[1],:,:])
+            N = copy(y_tt.ttv_vec[i][:,K[1],:])
             for k in i+1:j
-                N = N*y_tt.ttv_vec[k][K[k-i+1],:,:]
+                N = N*y_tt.ttv_vec[k][:,K[k-i+1],:]
             end
             ρ[J,K] = tr(M*N')
         end

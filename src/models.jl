@@ -65,20 +65,21 @@ end
 function half_filling(N)
     tt_vec = Array{Array{Float64,3},1}(undef,2N)
     for i in 1:N
-        tt_vec[2i-1] = zeros(2,1,1)
+        # Layout (L, I, R) with L = R = 1.
+        tt_vec[2i-1] = zeros(1,2,1)
         tt_vec[2i-1][1,1,1] = 1.0
-        tt_vec[2i] = zeros(2,1,1)
-        tt_vec[2i][2,1,1] = 1.0
+        tt_vec[2i] = zeros(1,2,1)
+        tt_vec[2i][1,2,1] = 1.0
     end
     return TTvector{Float64,2N}(2N,tt_vec,Tuple(2*ones(Int,2N)),ones(Int,2N+1),zeros(2N))
 end
 
-#odd index = spin up 
+#odd index = spin up
 #returns TT of a Slater determinant
 function slater(n,d;σ=1:n)
     x = zeros_tt(ntuple(x->2,d),ones(Int64,d+1))
     for i in σ
-        x.ttv_vec[i][2,1,1] = 1.0
+        x.ttv_vec[i][1,2,1] = 1.0
     end
     for i in setdiff(1:d,σ)
         x.ttv_vec[i][1,1,1] = 1.0
@@ -86,35 +87,35 @@ function slater(n,d;σ=1:n)
     return x
 end
 
-#auxiliary functions for a_p^†a_q
+#auxiliary functions for a_p^†a_q — operator cores in (L, i_out, i_in, R) layout.
 mpo_core_id() = mpo_core_id(Float64)
 
 function mpo_core_id(::Type{T}) where T
-    out = zeros(T,2,2,1,1)
+    out = zeros(T,1,2,2,1)
     out[1,1,1,1] = 1.0
-    out[2,2,1,1] = 1.0
+    out[1,2,2,1] = 1.0
     return out
 end
 
 mpo_core_ferm_sign() = mpo_core_ferm_sign(Float64)
 function mpo_core_ferm_sign(::Type{T}) where T
-    out = zeros(T,2,2,1,1)
+    out = zeros(T,1,2,2,1)
     out[1,1,1,1] = 1.0
-    out[2,2,1,1] = -1.0
+    out[1,2,2,1] = -1.0
     return out
 end
 
 mpo_core_creation() = mpo_core_creation(Float64)
 function mpo_core_creation(::Type{T}) where T
-    out = zeros(T,2,2,1,1)
-    out[2,1,1,1] = 1.0
+    out = zeros(T,1,2,2,1)
+    out[1,2,1,1] = 1.0
     return out
 end
 
 mpo_core_annihilation() = mpo_core_annihilation(Float64)
 function mpo_core_annihilation(::Type{T}) where T
-    out = zeros(T,2,2,1,1)
-    out[1,2,1,1] = 1.0
+    out = zeros(T,1,2,2,1)
+    out[1,1,2,1] = 1.0
     return out
 end
 

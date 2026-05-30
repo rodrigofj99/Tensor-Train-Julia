@@ -139,32 +139,32 @@ function ttrand_rounding_adaptive(y::TTvector{T,N}, ε::Real;
     rks_inc[2:N] .= n_samples
 
     # Pre-compute right Gram matrices of y for the correct per-bond true-error baseline
-    # G_right[k] = vec_y[k..N] · vec_y[k..N]'  (gives the right metric for residuals at bond k-1).
+    # G_right[k] = vec_y[k..N] · vec_y[k..N]' under (L, I, R) layout (L at position 1).
     G_right = Vector{Matrix{T}}(undef, N+1)
     if verbose
       G_right[N+1] = ones(T, 1, 1)
       for kk = N:-1:1
         Vk = y.ttv_vec[kk]
         G_prev = G_right[kk+1]
-        G = zeros(T, size(Vk, 2), size(Vk, 2))
-        @tensor G[a, b] = Vk[i, a, αp] * G_prev[αp, βp] * Vk[i, b, βp]
+        G = zeros(T, size(Vk, 1), size(Vk, 1))
+        @tensor G[a, b] = Vk[a, i, αp] * G_prev[αp, βp] * Vk[b, i, βp]
         G_right[kk] = G
       end
       println("[adaptive] y_norm(sketch)=$(_fmt(y_norm))  ‖y‖_exact=$(_fmt(norm(y)))  τ_bond=$(_fmt(τ))")
     end
 
-    # Randomized sketching and orthogonalization
+    # Randomized sketching and orthogonalization. Local tensors use (L, I, R) layout.
     @timeit timer "orthogonalization" begin
-      yₖ = reshape(y.ttv_vec[1], dims[1], 1, y.ttv_rks[2])
+      yₖ = reshape(y.ttv_vec[1], 1, dims[1], y.ttv_rks[2])
       @inbounds for k in 1:N-1
         max_basis = bond_rank_cap(dims, k, ℓ_max)
         # Randomized QR decomposition
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
-            Zₖ = zeros(T, dims[k],out_rks[k],ℓ_min)
+            Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
             Wₖ₊₁ = W[k+1][:,1:ℓ_min]
-            @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*Wₖ₊₁[αₖ₊₁,ρₖ₊₁]
-            Zₖ = reshape(Zₖ,dims[k]*out_rks[k],ℓ_min)
+            @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[ρₖ,iₖ,ρₖ₊₁] = yₖ[ρₖ,iₖ,αₖ₊₁]*Wₖ₊₁[αₖ₊₁,ρₖ₊₁]
+            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min)
           end
           @timeit timer "QR" begin
             Q, _ = qr!(Zₖ)
@@ -182,20 +182,20 @@ function ttrand_rounding_adaptive(y::TTvector{T,N}, ε::Real;
           # Allocate as 2D from the start (a 3D reshape view scopes the
           # tensoropt write) to keep S_full's type stable as Matrix{T}.
           @timeit timer "Initial residual sketch" begin
-            S_full = zeros(T, dims[k]*out_rks[k], n_samples)
-            let S_full_3d = reshape(S_full, dims[k], out_rks[k], n_samples),
+            S_full = zeros(T, out_rks[k]*dims[k], n_samples)
+            let S_full_3d = reshape(S_full, out_rks[k], dims[k], n_samples),
                 W_view = view(W[k+1], :, ℓ_min+1:ℓ_min+n_samples)
-              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  S_full_3d[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*W_view[αₖ₊₁,ρₖ₊₁]
+              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  S_full_3d[ρₖ,iₖ,ρₖ₊₁] = yₖ[ρₖ,iₖ,αₖ₊₁]*W_view[αₖ₊₁,ρₖ₊₁]
             end
           end
-          Sₖ = Matrix{T}(undef, dims[k]*out_rks[k], n_samples)
+          Sₖ = Matrix{T}(undef, out_rks[k]*dims[k], n_samples)
           @timeit timer "Residual sketch" begin
             copyto!(Sₖ, S_full)
             mul!(Sₖ, Q, Q' * Sₖ, -one(T), one(T))
           end
 
           if verbose
-            V_Yk = reshape(yₖ, dims[k]*out_rks[k], y.ttv_rks[k+1])
+            V_Yk = reshape(yₖ, out_rks[k]*dims[k], y.ttv_rks[k+1])
             Gk = G_right[k+1]
             # Correct per-bond contribution to ‖y - ŷ‖²: ‖(I-QQ')·V(Y_k)·sqrt(G)‖²_F
             # = tr(V·G·V') - tr((Q'V) · G · (Q'V)')
@@ -259,10 +259,10 @@ function ttrand_rounding_adaptive(y::TTvector{T,N}, ε::Real;
               @timeit timer "S_full tail contraction" begin
                 # Fill the last ℓ_inc_eff cols of S_full from the (renormalised) W.
                 W_tail = view(W[k+1], :, ℓ+n_samples-ℓ_inc_eff+1:ℓ+n_samples)
-                tail_buf = zeros(T, dims[k], out_rks[k], ℓ_inc_eff)
-                @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) tail_buf[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*W_tail[αₖ₊₁,ρₖ₊₁]
+                tail_buf = zeros(T, out_rks[k], dims[k], ℓ_inc_eff)
+                @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) tail_buf[ρₖ,iₖ,ρₖ₊₁] = yₖ[ρₖ,iₖ,αₖ₊₁]*W_tail[αₖ₊₁,ρₖ₊₁]
                 copyto!(view(S_full, :, n_samples-ℓ_inc_eff+1:n_samples),
-                        reshape(tail_buf, dims[k]*out_rks[k], ℓ_inc_eff))
+                        reshape(tail_buf, out_rks[k]*dims[k], ℓ_inc_eff))
               end
               @timeit timer "Residual sketch" begin
                 copyto!(Sₖ, S_full)
@@ -270,7 +270,7 @@ function ttrand_rounding_adaptive(y::TTvector{T,N}, ε::Real;
               end
 
               if verbose
-                V_Yk = reshape(yₖ, dims[k]*out_rks[k], y.ttv_rks[k+1])
+                V_Yk = reshape(yₖ, out_rks[k]*dims[k], y.ttv_rks[k+1])
                 Gk = G_right[k+1]
                 VGVt_trace = tr(V_Yk * Gk * V_Yk')
                 QtV = Q' * V_Yk
@@ -290,19 +290,19 @@ function ttrand_rounding_adaptive(y::TTvector{T,N}, ε::Real;
 
           @timeit timer "Update core" begin
             out_rks[k+1] = size(Q,2)
-            vec[k] = reshape(Q,dims[k],out_rks[k],out_rks[k+1])
+            vec[k] = reshape(Q, out_rks[k], dims[k], out_rks[k+1])
             ot[k] = 1
           end
         end
         @timeit timer "Update yₖ" begin
           #update left parts
-          yₖ₊₁ = zeros(T, dims[k+1],out_rks[k+1],y.ttv_rks[k+2])
-          @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁)  yₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂] = yₖ[iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y.ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
+          yₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], y.ttv_rks[k+2])
+          @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁)  yₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂] = yₖ[ρₖ,iₖ,αₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y.ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
           yₖ = yₖ₊₁
         end
         rks_inc[k+1] = 0
       end
-      vec[N] = reshape(yₖ, dims[N],out_rks[N],out_rks[N+1])
+      vec[N] = reshape(yₖ, out_rks[N], dims[N], out_rks[N+1])
     end
     return TTvector{T,N}(N,vec,dims,out_rks,ot)
   end
@@ -364,17 +364,17 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
     rks_inc[2:N] .= n_samples
 
     @timeit timer "orthogonalization" begin
-      Yₖ = [α[j].*reshape(y[j].ttv_vec[1], dims[1], 1, y[j].ttv_rks[2]) for j=1:m]
+      Yₖ = [α[j].*reshape(y[j].ttv_vec[1], 1, dims[1], y[j].ttv_rks[2]) for j=1:m]
       @inbounds for k in 1:N-1
         max_basis = bond_rank_cap(dims, k, ℓ_max)
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
-            Zₖ = zeros(T, dims[k], out_rks[k], ℓ_min)
+            Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
             for j = 1:m
               Wⱼₖ₊₁ = W[j][k+1][:, 1:ℓ_min]
-              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*Wⱼₖ₊₁[αₖ₊₁,ρₖ₊₁]
+              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[ρₖ,iₖ,ρₖ₊₁] += Yₖ[j][ρₖ,iₖ,αₖ₊₁]*Wⱼₖ₊₁[αₖ₊₁,ρₖ₊₁]
             end
-            Zₖ = reshape(Zₖ, dims[k]*out_rks[k], ℓ_min)
+            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min)
           end
           @timeit timer "QR" begin
             Q, _ = qr!(Zₖ)
@@ -384,15 +384,15 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
 
           # S_full holds only the active window: cols ℓ+1..ℓ+n_samples of Σⱼ Yₖ[j]·W[j][k+1].
           @timeit timer "Initial residual sketch" begin
-            S_full = zeros(T, dims[k]*out_rks[k], n_samples)
-            let S_full_3d = reshape(S_full, dims[k], out_rks[k], n_samples)
+            S_full = zeros(T, out_rks[k]*dims[k], n_samples)
+            let S_full_3d = reshape(S_full, out_rks[k], dims[k], n_samples)
               for j = 1:m
                 Wⱼ_view = view(W[j][k+1], :, ℓ_min+1:ℓ_min+n_samples)
-                @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*Wⱼ_view[αₖ₊₁,ρₖ₊₁]
+                @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[ρₖ,iₖ,ρₖ₊₁] += Yₖ[j][ρₖ,iₖ,αₖ₊₁]*Wⱼ_view[αₖ₊₁,ρₖ₊₁]
               end
             end
           end
-          Sₖ = Matrix{T}(undef, dims[k]*out_rks[k], n_samples)
+          Sₖ = Matrix{T}(undef, out_rks[k]*dims[k], n_samples)
           @timeit timer "Residual sketch" begin
             copyto!(Sₖ, S_full)
             mul!(Sₖ, Q, Q' * Sₖ, -one(T), one(T))
@@ -443,13 +443,13 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
                 end
               end
               @timeit timer "S_full tail contraction" begin
-                tail_buf = zeros(T, dims[k], out_rks[k], ℓ_inc_eff)
+                tail_buf = zeros(T, out_rks[k], dims[k], ℓ_inc_eff)
                 for j = 1:m
                   Wⱼ_tail = view(W[j][k+1], :, ℓ+n_samples-ℓ_inc_eff+1:ℓ+n_samples)
-                  @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) tail_buf[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*Wⱼ_tail[αₖ₊₁,ρₖ₊₁]
+                  @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) tail_buf[ρₖ,iₖ,ρₖ₊₁] += Yₖ[j][ρₖ,iₖ,αₖ₊₁]*Wⱼ_tail[αₖ₊₁,ρₖ₊₁]
                 end
                 copyto!(view(S_full, :, n_samples-ℓ_inc_eff+1:n_samples),
-                        reshape(tail_buf, dims[k]*out_rks[k], ℓ_inc_eff))
+                        reshape(tail_buf, out_rks[k]*dims[k], ℓ_inc_eff))
               end
               @timeit timer "Residual sketch" begin
                 copyto!(Sₖ, S_full)
@@ -460,14 +460,14 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
 
           @timeit timer "Update core" begin
             out_rks[k+1] = size(Q, 2)
-            vec[k] = reshape(Q, dims[k], out_rks[k], out_rks[k+1])
+            vec[k] = reshape(Q, out_rks[k], dims[k], out_rks[k+1])
             ot[k] = 1
           end
         end
         @timeit timer "Update Yₖ" begin
-          Yₖ₊₁ = [zeros(T, dims[k+1], out_rks[k+1], y[j].ttv_rks[k+2]) for j=1:m]
+          Yₖ₊₁ = [zeros(T, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2]) for j=1:m]
           for j = 1:m
-            @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁) Yₖ₊₁[j][iₖ₊₁,ρₖ₊₁,αₖ₊₂] = Yₖ[j][iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
+            @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁) Yₖ₊₁[j][ρₖ₊₁,iₖ₊₁,αₖ₊₂] = Yₖ[j][ρₖ,iₖ,αₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
           end
           Yₖ = Yₖ₊₁
         end
@@ -522,24 +522,24 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
     rks_inc[2:N] .= n_samples
 
     @timeit timer "orthogonalization" begin
-      # Drop trivial boundary size-1 ranks to satisfy TensorOperations' index matching.
-      Ayₖ = zeros(T, dims[1], 1, y.ttv_rks[2], Atto.tto_rks[2])
+      # Boundary partial-product Ayₖ has layout (L=1, I, R_y, R_A).
+      Ayₖ = zeros(T, 1, dims[1], y.ttv_rks[2], Atto.tto_rks[2])
       let Ayₖ_3d = reshape(Ayₖ, dims[1], y.ttv_rks[2], Atto.tto_rks[2]),
           y1     = reshape(y.ttv_vec[1], dims[1], y.ttv_rks[2]),
           A1     = reshape(Atto.tto_vec[1], dims[1], dims[1], Atto.tto_rks[2])
         @tensor Ayₖ_3d[iₖ,αₖ₊₁,βₖ₊₁] = A1[iₖ,jₖ,βₖ₊₁] * y1[jₖ,αₖ₊₁]
       end
-      bₖ = reshape(b.ttv_vec[1], dims[1], 1, b.ttv_rks[2])
+      bₖ = reshape(b.ttv_vec[1], 1, dims[1], b.ttv_rks[2])
 
       @inbounds for k in 1:N-1
         max_basis = bond_rank_cap(dims, k, ℓ_max)
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
-            Zₖ = zeros(T, dims[k], out_rks[k], ℓ_min)
+            Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
             WAyₖ₊₁ = WAy[k+1][:, :, 1:ℓ_min]
             Wbₖ₊₁  = Wb[k+1][:, 1:ℓ_min]
-            @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] = Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*WAyₖ₊₁[αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[iₖ,ρₖ,αₖ₊₁]*Wbₖ₊₁[αₖ₊₁,ρₖ₊₁]
-            Zₖ = reshape(Zₖ, dims[k]*out_rks[k], ℓ_min)
+            @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[ρₖ,iₖ,ρₖ₊₁] = Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*WAyₖ₊₁[αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[ρₖ,iₖ,αₖ₊₁]*Wbₖ₊₁[αₖ₊₁,ρₖ₊₁]
+            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min)
           end
           @timeit timer "QR" begin
             Q, _ = qr!(Zₖ)
@@ -549,14 +549,14 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
 
           # S_full holds only the active window: cols ℓ+1..ℓ+n_samples.
           @timeit timer "Initial residual sketch" begin
-            S_full = zeros(T, dims[k]*out_rks[k], n_samples)
-            let S_full_3d = reshape(S_full, dims[k], out_rks[k], n_samples),
+            S_full = zeros(T, out_rks[k]*dims[k], n_samples)
+            let S_full_3d = reshape(S_full, out_rks[k], dims[k], n_samples),
                 WAy_view = view(WAy[k+1], :, :, ℓ_min+1:ℓ_min+n_samples),
                 Wb_view  = view(Wb[k+1],  :,    ℓ_min+1:ℓ_min+n_samples)
-              @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[iₖ,ρₖ,ρₖ₊₁] = Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*WAy_view[αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[iₖ,ρₖ,αₖ₊₁]*Wb_view[αₖ₊₁,ρₖ₊₁]
+              @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[ρₖ,iₖ,ρₖ₊₁] = Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*WAy_view[αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[ρₖ,iₖ,αₖ₊₁]*Wb_view[αₖ₊₁,ρₖ₊₁]
             end
           end
-          Sₖ = Matrix{T}(undef, dims[k]*out_rks[k], n_samples)
+          Sₖ = Matrix{T}(undef, out_rks[k]*dims[k], n_samples)
           @timeit timer "Residual sketch" begin
             copyto!(Sₖ, S_full)
             mul!(Sₖ, Q, Q' * Sₖ, -one(T), one(T))
@@ -602,12 +602,12 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
                 end
               end
               @timeit timer "S_full tail contraction" begin
-                tail_buf = zeros(T, dims[k], out_rks[k], ℓ_inc_eff)
+                tail_buf = zeros(T, out_rks[k], dims[k], ℓ_inc_eff)
                 WAy_tail = view(WAy[k+1], :, :, ℓ+n_samples-ℓ_inc_eff+1:ℓ+n_samples)
                 Wb_tail  = view(Wb[k+1],  :,    ℓ+n_samples-ℓ_inc_eff+1:ℓ+n_samples)
-                @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) tail_buf[iₖ,ρₖ,ρₖ₊₁] = Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*WAy_tail[αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[iₖ,ρₖ,αₖ₊₁]*Wb_tail[αₖ₊₁,ρₖ₊₁]
+                @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) tail_buf[ρₖ,iₖ,ρₖ₊₁] = Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*WAy_tail[αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[ρₖ,iₖ,αₖ₊₁]*Wb_tail[αₖ₊₁,ρₖ₊₁]
                 copyto!(view(S_full, :, n_samples-ℓ_inc_eff+1:n_samples),
-                        reshape(tail_buf, dims[k]*out_rks[k], ℓ_inc_eff))
+                        reshape(tail_buf, out_rks[k]*dims[k], ℓ_inc_eff))
               end
               @timeit timer "Residual sketch" begin
                 copyto!(Sₖ, S_full)
@@ -618,21 +618,21 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
 
           @timeit timer "Update core" begin
             out_rks[k+1] = size(Q, 2)
-            vec[k] = reshape(Q, dims[k], out_rks[k], out_rks[k+1])
+            vec[k] = reshape(Q, out_rks[k], dims[k], out_rks[k+1])
             ot[k] = 1
           end
         end
         @timeit timer "Update Ayₖ, bₖ" begin
-          Ayₖ₊₁ = zeros(T, dims[k+1], out_rks[k+1], y.ttv_rks[k+2], Atto.tto_rks[k+2])
-          bₖ₊₁  = zeros(T, dims[k+1], out_rks[k+1], b.ttv_rks[k+2])
-          @tensoropt (αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂,ρₖ₊₁) Ayₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂,βₖ₊₂] = Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*y.ttv_vec[k+1][jₖ₊₁,αₖ₊₁,αₖ₊₂]*Atto.tto_vec[k+1][iₖ₊₁,jₖ₊₁,βₖ₊₁,βₖ₊₂]
-          @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁) bₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂] = bₖ[iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]*b.ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
+          Ayₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], y.ttv_rks[k+2], Atto.tto_rks[k+2])
+          bₖ₊₁  = zeros(T, out_rks[k+1], dims[k+1], b.ttv_rks[k+2])
+          @tensoropt (αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂,ρₖ₊₁) Ayₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂,βₖ₊₂] = Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y.ttv_vec[k+1][αₖ₊₁,jₖ₊₁,αₖ₊₂]*Atto.tto_vec[k+1][βₖ₊₁,iₖ₊₁,jₖ₊₁,βₖ₊₂]
+          @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁) bₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂] = bₖ[ρₖ,iₖ,αₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*b.ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
           Ayₖ = Ayₖ₊₁
           bₖ  = bₖ₊₁
         end
         rks_inc[k+1] = 0
       end
-      vec[N] = reshape(Ayₖ, dims[N], out_rks[N], out_rks[N+1]) .- reshape(bₖ, dims[N], out_rks[N], out_rks[N+1])
+      vec[N] = reshape(Ayₖ, out_rks[N], dims[N], out_rks[N+1]) .- reshape(bₖ, out_rks[N], dims[N], out_rks[N+1])
     end
     return TTvector{T,N}(N, vec, dims, out_rks, ot)
   end
@@ -725,19 +725,19 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
 
     @timeit timer "orthogonalization sweep" begin
       yₖ = broadcast(*, (reshape(y[i].ttv_vec[1],
-                                  dims[1], 1, ntuple(j->( j==i ? y[i].ttv_rks[2] : 1), M)...)
+                                  1, dims[1], ntuple(j->( j==i ? y[i].ttv_rks[2] : 1), M)...)
                          for i=1:M)...)
-      yₖ = reshape(yₖ, dims[1], 1, prod(y[i].ttv_rks[2] for i=1:M))
+      yₖ = reshape(yₖ, 1, dims[1], prod(y[i].ttv_rks[2] for i=1:M))
 
       @inbounds for k in 1:N-1
         max_basis = bond_rank_cap(dims, k, ℓ_max)
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
-            Zₖ = zeros(T, dims[k], out_rks[k], ℓ_min)
+            Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
             W_full = reshape(W[k+1], prod(y[i].ttv_rks[k+1] for i=1:M), sketch_rks[k+1])
             Wₖ₊₁ = W_full[:, 1:ℓ_min]
-            @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*Wₖ₊₁[αₖ₊₁,ρₖ₊₁]
-            Zₖ = reshape(Zₖ, dims[k]*out_rks[k], ℓ_min)
+            @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[ρₖ,iₖ,ρₖ₊₁] = yₖ[ρₖ,iₖ,αₖ₊₁]*Wₖ₊₁[αₖ₊₁,ρₖ₊₁]
+            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min)
           end
           @timeit timer "QR" begin
             Q, _ = qr!(Zₖ)
@@ -747,14 +747,14 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
 
           # S_full holds only the active window of yₖ × W[k+1].
           @timeit timer "Initial residual sketch" begin
-            S_full = zeros(T, dims[k]*out_rks[k], n_samples)
-            let S_full_3d = reshape(S_full, dims[k], out_rks[k], n_samples),
+            S_full = zeros(T, out_rks[k]*dims[k], n_samples)
+            let S_full_3d = reshape(S_full, out_rks[k], dims[k], n_samples),
                 W_full   = reshape(W[k+1], prod(y[i].ttv_rks[k+1] for i=1:M), sketch_rks[k+1]),
                 W_view   = view(W_full, :, ℓ_min+1:ℓ_min+n_samples)
-              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*W_view[αₖ₊₁,ρₖ₊₁]
+              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[ρₖ,iₖ,ρₖ₊₁] = yₖ[ρₖ,iₖ,αₖ₊₁]*W_view[αₖ₊₁,ρₖ₊₁]
             end
           end
-          Sₖ = Matrix{T}(undef, dims[k]*out_rks[k], n_samples)
+          Sₖ = Matrix{T}(undef, out_rks[k]*dims[k], n_samples)
           @timeit timer "Residual sketch" begin
             copyto!(Sₖ, S_full)
             mul!(Sₖ, Q, Q' * Sₖ, -one(T), one(T))
@@ -799,12 +799,12 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
                 end
               end
               @timeit timer "S_full tail contraction" begin
-                tail_buf = zeros(T, dims[k], out_rks[k], ℓ_inc_eff)
+                tail_buf = zeros(T, out_rks[k], dims[k], ℓ_inc_eff)
                 W_full = reshape(W[k+1], prod(y[i].ttv_rks[k+1] for i=1:M), sketch_rks[k+1])
                 W_tail = view(W_full, :, ℓ+n_samples-ℓ_inc_eff+1:ℓ+n_samples)
-                @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) tail_buf[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*W_tail[αₖ₊₁,ρₖ₊₁]
+                @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) tail_buf[ρₖ,iₖ,ρₖ₊₁] = yₖ[ρₖ,iₖ,αₖ₊₁]*W_tail[αₖ₊₁,ρₖ₊₁]
                 copyto!(view(S_full, :, n_samples-ℓ_inc_eff+1:n_samples),
-                        reshape(tail_buf, dims[k]*out_rks[k], ℓ_inc_eff))
+                        reshape(tail_buf, out_rks[k]*dims[k], ℓ_inc_eff))
               end
               @timeit timer "Residual sketch" begin
                 copyto!(Sₖ, S_full)
@@ -823,51 +823,65 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
 
           @timeit timer "Update core" begin
             out_rks[k+1] = size(Q, 2)
-            vec[k] = reshape(Q, dims[k], out_rks[k], out_rks[k+1])
+            vec[k] = reshape(Q, out_rks[k], dims[k], out_rks[k+1])
             ot[k] = 1
           end
         end
 
         @timeit timer "Update Qy" begin
-          # Pairwise contraction with the M factor cores — identical to ttrand_rounding(::NTuple).
+          # Pairwise contraction with the M factor cores under (L, I, R) layout.
           v = ntuple(i->y[i].ttv_rks[k+1], M)
           w = ntuple(i->y[i].ttv_rks[k+2], M)
           Av = ntuple(i->y[i].ttv_vec[k+1], M)
-          @tensor Qy[αₖ₊₁,ρₖ₊₁] := yₖ[iₖ,ρₖ,αₖ₊₁]*vec[k][iₖ,ρₖ,ρₖ₊₁]
+          @tensor Qy[αₖ₊₁,ρₖ₊₁] := yₖ[ρₖ,iₖ,αₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]
 
+          # Same Hadamard pattern as in ttrand_rounding (tt_randtools.jl): each
+          # @tensor tmp_i[..., L, …, R] = Ai[l,L] * Qy[l, …, r] * Bi[r,R] expands
+          # into two gemms — transpose(Ai) × Qy contraction over l, then × Bi over r.
           if M == 2
             Qy = reshape(Qy, v[1], v[2], out_rks[k+1])
             Qy = permutedims(Qy, (1,3,2))
             tmp = zeros(T, w[1], out_rks[k+1], w[2], dims[k+1])
             for i = 1:dims[k+1]
               tmp_i = view(tmp,:,:,:,i)
-              Ai = Av[1][i,:,:]
-              Bi = Av[2][i,:,:]
-              @tensor tmp_i[L,ρ,R] += Ai[l,L] * Qy[l,ρ,r] * Bi[r,R]
+              Ai = Av[1][:,i,:]
+              Bi = Av[2][:,i,:]
+              tmp1 = transpose(Ai) * reshape(Qy, v[1], out_rks[k+1]*v[2])
+              mul!(reshape(tmp_i, w[1]*out_rks[k+1], w[2]),
+                   reshape(tmp1, w[1]*out_rks[k+1], v[2]),
+                   Bi)
             end
             Qy = permutedims(tmp, (1,3,2,4))
           else
-            Qy = reshape(Qy, v[1], v[2], prod(v[3:end])*out_rks[k+1])
+            αρ1 = prod(v[3:end])*out_rks[k+1]
+            Qy = reshape(Qy, v[1], v[2], αρ1)
             Qy = permutedims(Qy, (1,3,2))
-            tmp = zeros(T, w[1], prod(v[3:end])*out_rks[k+1], w[2], dims[k+1])
+            tmp = zeros(T, w[1], αρ1, w[2], dims[k+1])
             for i = 1:dims[k+1]
               tmp_i = view(tmp,:,:,:,i)
-              Ai = Av[1][i,:,:]
-              Bi = Av[2][i,:,:]
-              @tensor tmp_i[L,αρ,R] = Ai[l,L] * Qy[l,αρ,r] * Bi[r,R]
+              Ai = Av[1][:,i,:]
+              Bi = Av[2][:,i,:]
+              tmp1 = transpose(Ai) * reshape(Qy, v[1], αρ1*v[2])
+              mul!(reshape(tmp_i, w[1]*αρ1, w[2]),
+                   reshape(tmp1, w[1]*αρ1, v[2]),
+                   Bi)
             end
             Qy = permutedims(tmp, (1,3,2,4))
 
             for mp = 3:2:M-1
-              Qy = reshape(Qy, prod(w[1:mp-1]), v[mp], v[mp+1], prod(v[mp+2:end])*out_rks[k+1], dims[k+1])
+              αρm = prod(v[mp+2:end])*out_rks[k+1]
+              Qy = reshape(Qy, prod(w[1:mp-1]), v[mp], v[mp+1], αρm, dims[k+1])
               Qy = permutedims(Qy, (2,1,4,3,5))
-              tmp = zeros(T, w[mp], prod(w[1:mp-1]), prod(v[mp+2:end])*out_rks[k+1], w[mp+1], dims[k+1])
+              tmp = zeros(T, w[mp], prod(w[1:mp-1]), αρm, w[mp+1], dims[k+1])
               for i = 1:dims[k+1]
                 tmp_i = view(tmp,:,:,:,:,i)
                 Qy_i  = view(Qy,:,:,:,:,i)
-                Ai = Av[mp][i,:,:]
-                Bi = Av[mp+1][i,:,:]
-                @tensor tmp_i[L,a,αρ,R] = Ai[l,L] * Qy_i[l,a,αρ,r] * Bi[r,R]
+                Ai = Av[mp][:,i,:]
+                Bi = Av[mp+1][:,i,:]
+                tmp1 = transpose(Ai) * reshape(Qy_i, v[mp], prod(w[1:mp-1])*αρm*v[mp+1])
+                mul!(reshape(tmp_i, w[mp]*prod(w[1:mp-1])*αρm, w[mp+1]),
+                     reshape(tmp1, w[mp]*prod(w[1:mp-1])*αρm, v[mp+1]),
+                     Bi)
               end
               Qy = permutedims(tmp, (2,1,4,3,5))
             end
@@ -879,21 +893,24 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
               for i = 1:dims[k+1]
                 tmp_i = view(tmp,:,:,:,i)
                 Qy_i  = view(Qy,:,:,:,i)
-                Ai = Av[M][i,:,:]
-                @tensor tmp_i[L,a,ρ] = Ai[l,L] * Qy_i[l,a,ρ]
+                Ai = Av[M][:,i,:]
+                mul!(reshape(tmp_i, w[M], prod(w[1:M-1])*out_rks[k+1]),
+                     transpose(Ai),
+                     reshape(Qy_i, v[M], prod(w[1:M-1])*out_rks[k+1]))
               end
               Qy = permutedims(tmp, (2,1,3,4))
             end
           end
           Qy = reshape(Qy, w..., out_rks[k+1], dims[k+1])
-          yₖ = reshape(permutedims(Qy, [M+2;M+1;1:M]), dims[k+1], out_rks[k+1], prod(w))
+          # Layout (L, I, R) for yₖ: bring out_rks first, dims second, then w-product last.
+          yₖ = reshape(permutedims(Qy, [M+1;M+2;1:M]), out_rks[k+1], dims[k+1], prod(w))
         end
         if bond_callback !== nothing
           bond_callback(k, vec, yₖ, out_rks, dims)
         end
         rks_inc[k+1] = 0
       end
-      vec[N] = reshape(yₖ, dims[N], out_rks[N], out_rks[N+1])
+      vec[N] = reshape(yₖ, out_rks[N], dims[N], out_rks[N+1])
       if bond_callback !== nothing
         bond_callback(N, vec, yₖ, out_rks, dims)
       end

@@ -130,7 +130,7 @@ end
   
   # Check all Ψ dimensions  
   for k in 1:length(Ψ)
-    @test size(Ψ[k]) == (dims[k], sketch_l_rks[k], sketch_r_rks[k+1])
+    @test size(Ψ[k]) == (sketch_l_rks[k], dims[k], sketch_r_rks[k+1])
   end
 
   # Test with explicit random TTvectors (original version)
@@ -145,7 +145,7 @@ end
   
   # Check all Ψ2 dimensions
   for k in 1:length(Ψ2)
-    @test size(Ψ2[k]) == (dims[k], L.ttv_rks[k], R.ttv_rks[k+1])
+    @test size(Ψ2[k]) == (L.ttv_rks[k], dims[k], R.ttv_rks[k+1])
   end
 
   # Test reproducibility with same seed

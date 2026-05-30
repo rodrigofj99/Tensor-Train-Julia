@@ -47,23 +47,24 @@ function +(x::TTvector{T,N},y::S) where {T<:Number,S<:Number,N}
 
     # Copy the original first core into the left-most slice of the new core.
     # Then set the new slice (where we store the constant contribution) to y.
+    # Cores have layout (L, I, R); first core has L = 1.
     out.ttv_vec[1][:,:,1:x.ttv_rks[2]] = x.ttv_vec[1]           # copy existing block
     out.ttv_vec[1][:,:,rks[2]] .= y                             # set the "constant" slice
 
     # For interior cores, copy the old core into the upper-left block and put
     # identity-like entries (ones) at the new far corner so the constant term
-    # propagates multiplicatively across the cores. This makes the added
-    # constant equal to y * (1 * 1 * ... * 1) across cores.
+    # propagates multiplicatively across the cores.
     for k in 2:N-1
         # copy old core into the corresponding sub-block
-        out.ttv_vec[k][:,1:x.ttv_rks[k],1:x.ttv_rks[k+1]] = x.ttv_vec[k]
+        out.ttv_vec[k][1:x.ttv_rks[k],:,1:x.ttv_rks[k+1]] = x.ttv_vec[k]
         # set the corner entries to 1 so that constant propagates through
-        out.ttv_vec[k][:,rks[k],rks[k+1]] .= 1
+        out.ttv_vec[k][rks[k],:,rks[k+1]] .= 1
     end
 
-    # Last core: copy the last core and set the final corner element(s) to 1
-    out.ttv_vec[N][:,1:x.ttv_rks[N],1:x.ttv_rks[N+1]] = x.ttv_vec[N]
-    out.ttv_vec[N][:,rks[N],rks[N+1]] .= 1
+    # Last core: copy the last core and set the final corner element(s) to 1.
+    # Last core has R = 1.
+    out.ttv_vec[N][1:x.ttv_rks[N],:,1:x.ttv_rks[N+1]] = x.ttv_vec[N]
+    out.ttv_vec[N][rks[N],:,rks[N+1]] .= 1
 
     return out
 end
@@ -91,20 +92,22 @@ function +(x::TTvector{T,N}, y::TTvector{T,N}) where {T<:Number,N}
     rks[d+1] = 1
 
     for k in 1:d
-        ttv_vec[k] = zeros(T, x.ttv_dims[k], rks[k], rks[k+1])
+        ttv_vec[k] = zeros(T, rks[k], x.ttv_dims[k], rks[k+1])
     end
 
     @inbounds begin
+        # First core has L = 1: only split along R.
         ttv_vec[1][:, :, 1:x.ttv_rks[2]] = x.ttv_vec[1]
         ttv_vec[1][:, :, (x.ttv_rks[2]+1):rks[2]] = y.ttv_vec[1]
 
         for k in 2:(d-1)
-            ttv_vec[k][:, 1:x.ttv_rks[k], 1:x.ttv_rks[k+1]] = x.ttv_vec[k]
-            ttv_vec[k][:, (x.ttv_rks[k]+1):rks[k], (x.ttv_rks[k+1]+1):rks[k+1]] = y.ttv_vec[k]
+            ttv_vec[k][1:x.ttv_rks[k], :, 1:x.ttv_rks[k+1]] = x.ttv_vec[k]
+            ttv_vec[k][(x.ttv_rks[k]+1):rks[k], :, (x.ttv_rks[k+1]+1):rks[k+1]] = y.ttv_vec[k]
         end
 
-        ttv_vec[d][:, 1:x.ttv_rks[d], 1] = x.ttv_vec[d]
-        ttv_vec[d][:, (x.ttv_rks[d]+1):rks[d], 1] = y.ttv_vec[d]
+        # Last core has R = 1: only split along L.
+        ttv_vec[d][1:x.ttv_rks[d], :, 1] = x.ttv_vec[d]
+        ttv_vec[d][(x.ttv_rks[d]+1):rks[d], :, 1] = y.ttv_vec[d]
     end
 
     # Construct TTvector: note we keep x.ttv_dims and pass ttv_vec and new ranks
@@ -128,20 +131,22 @@ function +(x::TToperator{T,N}, y::TToperator{T,N}) where {T<:Number,N}
     rks[d+1] = 1
 
     for k in 1:d
-        tto_vec[k] = zeros(T, x.tto_dims[k], x.tto_dims[k], rks[k], rks[k+1])
+        tto_vec[k] = zeros(T, rks[k], x.tto_dims[k], x.tto_dims[k], rks[k+1])
     end
 
     @inbounds begin
+        # First core has L = 1.
         tto_vec[1][:,:,:, 1:x.tto_rks[1+1]] = x.tto_vec[1]
         tto_vec[1][:,:,:, (x.tto_rks[2]+1):rks[2]] = y.tto_vec[1]
 
         for k in 2:(d-1)
-            tto_vec[k][:,:, 1:x.tto_rks[k], 1:x.tto_rks[k+1]] = x.tto_vec[k]
-            tto_vec[k][:,:, (x.tto_rks[k]+1):rks[k], (x.tto_rks[k+1]+1):rks[k+1]] = y.tto_vec[k]
+            tto_vec[k][1:x.tto_rks[k], :,:, 1:x.tto_rks[k+1]] = x.tto_vec[k]
+            tto_vec[k][(x.tto_rks[k]+1):rks[k], :,:, (x.tto_rks[k+1]+1):rks[k+1]] = y.tto_vec[k]
         end
 
-        tto_vec[d][:,:, 1:x.tto_rks[d], 1] = x.tto_vec[d]
-        tto_vec[d][:,:, (x.tto_rks[d]+1):rks[d], 1] = y.tto_vec[d]
+        # Last core has R = 1.
+        tto_vec[d][1:x.tto_rks[d], :,:, 1] = x.tto_vec[d]
+        tto_vec[d][(x.tto_rks[d]+1):rks[d], :,:, 1] = y.tto_vec[d]
     end
 
     return TToperator{T,N}(d, tto_vec, x.tto_dims, rks, zeros(Int64, d))
@@ -174,20 +179,12 @@ function *(A::TToperator{T,N}, v::TTvector{T,N}) where {T<:Number,N}
     y = zeros_tt(T, A.tto_dims, A.tto_rks .* v.ttv_rks)
 
     @inbounds begin @simd for k in 1:v.N
-        # Create a reshaped view of the k-th core of the result so we can write into
-        # it with indices matching the contraction pattern. The storage layout of
-        # y.ttv_vec[k] is (n_k, r_left, r_right) where r_left = A_r_k * v_r_k, etc.
-        yvec_temp = reshape(y.ttv_vec[k], (y.ttv_dims[k], A.tto_rks[k], v.ttv_rks[k], A.tto_rks[k+1], v.ttv_rks[k+1]))
+        # y.ttv_vec[k] has layout (L, I, R) with L = A_r_k * v_r_k (Kronecker).
+        # Column-major reshape splits L = (αₖ₋₁, νₖ₋₁) with αₖ₋₁ fastest.
+        yvec_temp = reshape(y.ttv_vec[k], (A.tto_rks[k], v.ttv_rks[k], y.ttv_dims[k], A.tto_rks[k+1], v.ttv_rks[k+1]))
 
-        # The @tensoropt macro (assumed provided by TensorOperations or a custom macro)
-        # performs the contraction in an efficient manner:
-        @tensoropt((νₖ₋₁,νₖ), yvec_temp[iₖ,αₖ₋₁,νₖ₋₁,αₖ,νₖ] = A.tto_vec[k][iₖ,jₖ,αₖ₋₁,αₖ]*v.ttv_vec[k][jₖ,νₖ₋₁,νₖ])
-        #
-        # index notation:
-        # - iₖ : physical output index for operator core (1..n_k)
-        # - jₖ : physical input index matching v core (1..n_k)
-        # - αₖ₋₁, αₖ : operator TT-ranks for left/right bonds
-        # - νₖ₋₁, νₖ : vector TT-ranks for left/right bonds
+        # Operator core (L, i, j, R); vector core (L, I, R).
+        @tensoropt((νₖ₋₁,νₖ), yvec_temp[αₖ₋₁,νₖ₋₁,iₖ,αₖ,νₖ] = A.tto_vec[k][αₖ₋₁,iₖ,jₖ,αₖ]*v.ttv_vec[k][νₖ₋₁,jₖ,νₖ])
     end end
 
     return y
@@ -215,19 +212,16 @@ function *(A::TToperator{T,N}, B::TToperator{T,N}) where {T<:Number,N}
     A_rks = A.tto_rks
     B_rks = B.tto_rks
 
-    # Preallocate result cores in a vector comprehension; each Y[k] is a 4D array
-    Y = [zeros(T, A.tto_dims[k], A.tto_dims[k], A_rks[k]*B_rks[k], A_rks[k+1]*B_rks[k+1]) for k in eachindex(A.tto_dims)]
+    # Preallocate result cores: each Y[k] is (L, i, j, R) with L = A_rk * B_rk.
+    Y = [zeros(T, A_rks[k]*B_rks[k], A.tto_dims[k], A.tto_dims[k], A_rks[k+1]*B_rks[k+1]) for k in eachindex(A.tto_dims)]
 
     @inbounds @simd for k in eachindex(Y)
-        # Reshape the target core Y[k] into a 6D temporary to match contraction indices:
-        M_temp = reshape(Y[k], A.tto_dims[k], A.tto_dims[k], A_rks[k], B_rks[k], A_rks[k+1], B_rks[k+1])
+        # Column-major reshape: L = (αₖ₋₁, βₖ₋₁) with αₖ₋₁ fastest; same for R.
+        M_temp = reshape(Y[k], A_rks[k], B_rks[k], A.tto_dims[k], A.tto_dims[k], A_rks[k+1], B_rks[k+1])
 
-        # We iterate over physical indices (i_k, j_k) and perform the contraction
-        # over the inner physical index z. Note: we keep @simd on loops where
-        # it is beneficial; the heavy lifting is done by @tensor contraction.
-        @simd for jₖ in size(M_temp, 2)
-            @simd for iₖ in size(M_temp, 1)
-                @tensor M_temp[iₖ, jₖ, αₖ₋₁, βₖ₋₁, αₖ, βₖ] = A.tto_vec[k][iₖ, z, αₖ₋₁, αₖ] * B.tto_vec[k][z, jₖ, βₖ₋₁, βₖ]
+        @simd for jₖ in size(M_temp, 4)
+            @simd for iₖ in size(M_temp, 3)
+                @tensor M_temp[αₖ₋₁, βₖ₋₁, iₖ, jₖ, αₖ, βₖ] = A.tto_vec[k][αₖ₋₁, iₖ, z, αₖ] * B.tto_vec[k][βₖ₋₁, z, jₖ, βₖ]
             end
         end
     end
@@ -277,9 +271,9 @@ function *(x::TTvector{T,N}, y::TTvector{T,N}) where {T<:Number,N}
     for k in 1:N
         # iterate over physical indices for core k and build Kronecker slices
         for iₖ in 1:x.ttv_dims[k]
-            # kron of the two (left_rank × right_rank) matrices yields the
-            # combined (left_rank * left_rank) × (right_rank * right_rank) matrix
-            out.ttv_vec[k][iₖ, :, :] = kron(x.ttv_vec[k][iₖ, :, :], y.ttv_vec[k][iₖ, :, :])
+            # kron of the two (left_rank × right_rank) slices yields the combined
+            # (L_x L_y) × (R_x R_y) matrix. Layout (L, I, R): slice with index in middle.
+            out.ttv_vec[k][:, iₖ, :] = kron(x.ttv_vec[k][:, iₖ, :], y.ttv_vec[k][:, iₖ, :])
         end
     end
 
@@ -308,9 +302,9 @@ function hadamard_norm_sq(y::NTuple{M,TTvector{T,N}}) where {T<:Number,N,M}
         rk_new = prod(y[l].ttv_rks[k+1] for l in 1:M)
         S_new = zeros(T, rk_new, rk_new)
         for iₖ in 1:dims[k]
-            C = y[1].ttv_vec[k][iₖ, :, :]
+            C = y[1].ttv_vec[k][:, iₖ, :]
             for l in 2:M
-                C = kron(C, y[l].ttv_vec[k][iₖ, :, :])
+                C = kron(C, y[l].ttv_vec[k][:, iₖ, :])
             end
             mul!(S_new, C', S * C, one(T), one(T))
         end
@@ -348,8 +342,8 @@ function dot(A::TTvector{T,N}, B::TTvector{T,N}) where {T<:Number,N}
         # view into current block shaped (R^A_{k}, R^B_{k})
         M = @view(out[1:A_rks[k+1], 1:B_rks[k+1]])
 
-        # contraction over physical index and previous block `out`
-        @tensor M[a,b] = A.ttv_vec[k][z, α, a] * (conj(B.ttv_vec[k][z, β, b]) * out[1:A_rks[k], 1:B_rks[k]][α, β])
+        # contraction over physical index and previous block `out`. Cores: (L, I, R) = (α, z, a).
+        @tensor M[a,b] = A.ttv_vec[k][α, z, a] * (conj(B.ttv_vec[k][β, z, b]) * out[1:A_rks[k], 1:B_rks[k]][α, β])
         # after contracting this core, M becomes the new "out" for next iteration
     end
 
@@ -388,8 +382,8 @@ function dot_par(A::TTvector{T,N}, B::TTvector{T,N}) where {T<:Number,N}
         # M has shape (A_rk, B_rk, A_rk+1, B_rk+1)
         M = zeros(T, A_rks[k], B_rks[k], A_rks[k+1], B_rks[k+1])
 
-        # Contract the physical index z to build M for this site
-        @tensor M[a, b, c, d] = A.ttv_vec[k][z, a, c] * conj(B.ttv_vec[k][z, b, d])
+        # Contract the physical index z to build M for this site. Cores: (L, I, R).
+        @tensor M[a, b, c, d] = A.ttv_vec[k][a, z, c] * conj(B.ttv_vec[k][b, z, d])
 
         # Reshape into matrix form: rows = (A_rk * B_rk), cols = (A_rk+1 * B_rk+1)
         Y[k] = reshape(M, A_rks[k] * B_rks[k], A_rks[k+1] * B_rks[k+1])
@@ -428,12 +422,12 @@ function dot_operator(ψ::TTvector{T,N}, H::TToperator{T,N}, φ::TTvector{T,N}) 
     _center(v) = something(findfirst(isequal(0), v.ttv_ot), N)
     c = max(_center(ψ), _center(φ))
 
-    # Left environment: sites 1..c
+    # Left environment: sites 1..c. Vector cores (L,I,R); operator cores (L,i,j,R).
     L = ones(T, 1, 1, 1)
     for k in 1:(c>1 ? c : 0)
         A_k, H_k, B_k = ψ.ttv_vec[k], H.tto_vec[k], φ.ttv_vec[k]
         @tensoropt L[α,β,γ] := L[α_prev,β_prev,γ_prev] *
-            conj(A_k[i,α_prev,α]) * H_k[i,j,β_prev,β] * B_k[j,γ_prev,γ]
+            conj(A_k[α_prev,i,α]) * H_k[β_prev,i,j,β] * B_k[γ_prev,j,γ]
     end
 
     # Right environment: sites N..c+1  (empty when c == N) or N...1 (if c == 1)
@@ -441,7 +435,7 @@ function dot_operator(ψ::TTvector{T,N}, H::TToperator{T,N}, φ::TTvector{T,N}) 
     r = (c>1 ? c+1 : 1)
     for k in N:-1:r
         A_k, H_k, B_k = ψ.ttv_vec[k], H.tto_vec[k], φ.ttv_vec[k]
-        @tensoropt R[α,β,γ] := conj(A_k[i,α,α_next]) * H_k[i,j,β,β_next] * B_k[j,γ,γ_next] * R[α_next,β_next,γ_next]
+        @tensoropt R[α,β,γ] := conj(A_k[α,i,α_next]) * H_k[β,i,j,β_next] * B_k[γ,j,γ_next] * R[α_next,β_next,γ_next]
     end
 
     # Combine
@@ -507,22 +501,16 @@ of the individual ranks. This produces an operator whose action on a vector z
 is (x * (y' * z)) i.e. projection onto y followed by scaling by x.
 """
 function outer_product(x::TTvector{T,N}, y::TTvector{T,N}) where {T<:Number,N}
-    # allocate per-site operator-cores Y[k] with shapes:
-    # (n_k, n_k, x_rk * y_rk, x_rk+1 * y_rk+1)
-    Y = [zeros(T, x.ttv_dims[k], x.ttv_dims[k], x.ttv_rks[k] * y.ttv_rks[k], x.ttv_rks[k+1] * y.ttv_rks[k+1]) for k in eachindex(x.ttv_dims)]
+    # per-site operator-cores Y[k] with layout (L, i, j, R), L = x_rk * y_rk.
+    Y = [zeros(T, x.ttv_rks[k] * y.ttv_rks[k], x.ttv_dims[k], x.ttv_dims[k], x.ttv_rks[k+1] * y.ttv_rks[k+1]) for k in eachindex(x.ttv_dims)]
 
     @inbounds @simd for k in eachindex(Y)
-        # reshape Y[k] into a 6D temporary M_temp so we can express the
-        # contraction in index notation conveniently.
-        M_temp = reshape(Y[k], x.ttv_dims[k], x.ttv_dims[k], x.ttv_rks[k], y.ttv_rks[k], x.ttv_rks[k+1], y.ttv_rks[k+1])
+        # Reshape into a 6D temporary: L = (αₖ₋₁, βₖ₋₁) with αₖ₋₁ fastest (column-major).
+        M_temp = reshape(Y[k], x.ttv_rks[k], y.ttv_rks[k], x.ttv_dims[k], x.ttv_dims[k], x.ttv_rks[k+1], y.ttv_rks[k+1])
 
-        # For every pair of physical indices (i_k, j_k) we set the block
-        # corresponding to the pair of left- and right-ranks to the outer
-        # product of x_core and conj(y_core). The conj ensures correct
-        # adjoint-like behavior for the outer product operator.
-        @simd for jₖ in size(M_temp, 2)
-            @simd for iₖ in size(M_temp, 1)
-                @tensor M_temp[iₖ, jₖ, αₖ₋₁, βₖ₋₁, αₖ, βₖ] = x.ttv_vec[k][iₖ, αₖ₋₁, αₖ] * conj(y.ttv_vec[k][jₖ, βₖ₋₁, βₖ])
+        @simd for jₖ in size(M_temp, 4)
+            @simd for iₖ in size(M_temp, 3)
+                @tensor M_temp[αₖ₋₁, βₖ₋₁, iₖ, jₖ, αₖ, βₖ] = x.ttv_vec[k][αₖ₋₁, iₖ, αₖ] * conj(y.ttv_vec[k][βₖ₋₁, jₖ, βₖ])
             end
         end
     end

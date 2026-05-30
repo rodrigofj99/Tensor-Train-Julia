@@ -42,18 +42,24 @@ julia --project=. examples/laplacian.jl
 ### Core Data Structures
 
 - **TTvector**: Represents tensors in tensor train format as `C[μ₁,...,μ_d] = A₁[μ₁] * ... * A_d[μ_d]`
-  - `ttv_vec`: Array of 3-order tensor cores `A_k[μ_k, α_{k-1}, α_k]`
+  - `ttv_vec`: Array of 3-order tensor cores `A_k[α_{k-1}, μ_k, α_k]` — axes ordered `(left rank, physical index, right rank)`
   - `ttv_dims`: Dimensions along each mode
   - `ttv_rks`: TT ranks `(r₀,...,r_d)` where `r₀=r_d=1`
   - `ttv_ot`: Orthogonality information (-1: right-orth, 0: unknown, 1: left-orth)
 
 - **TToperator**: Represents matrices in TT format `M[i₁,..,i_d; j₁,..,j_d]`
-  - `tto_vec`: Array of 4-order tensor cores
+  - `tto_vec`: Array of 4-order tensor cores `A_k[α_{k-1}, i_k, j_k, α_k]` — axes ordered `(left rank, row physical, column physical, right rank)`
   - Similar rank and orthogonality structure as TTvector
 
 - **TT_vidal**: Vidal/MPS representation with explicit singular values
-  - `core`: Orthogonal tensor cores
+  - `core`: Orthogonal tensor cores (same `(left, physical, right)` axis order as TTvector)
   - `Σ`: Singular value arrays
+
+The `(L, I, R)` layout matches Julia's column-major memory order: the canonical
+left-unfolding `reshape(core, L*I, R)` and right-unfolding `reshape(core, L, I*R)`
+are pure reshapes with no `permutedims`, which makes SVD, QR, and gemm-based
+operations cache-contiguous. Previously the codebase used `(I, L, R)`; the
+refactor under `refactor-core-layout` switched conventions globally.
 
 ### Module Organization
 

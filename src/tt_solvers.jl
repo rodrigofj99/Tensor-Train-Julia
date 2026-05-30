@@ -383,53 +383,64 @@ function expand_basis!(H::TToperator{T,N},
     out_rks = ones(Int, N+1)
     ot = zeros(Int, N)
 
-    # Initial left contractions at site 1 (left ranks are trivially 1; squeeze them)
+    # Initial left contractions at site 1. Cores have layout (L, I, R); L=1 at boundary.
     b1 = reshape(b_prev.ttv_vec[1], dims[1], b_prev.ttv_rks[2])
     H1 = reshape(H.tto_vec[1], dims[1], dims[1], H.tto_rks[2])
+    # @tensor here would expand to 2 permutes + 1 gemm anyway — keep the macro for clarity.
     @tensor Ay₁_tmp[i₁,α₂,β₂] := H1[i₁,j₁,β₂] * b1[j₁,α₂]
-    Ay₁ = reshape(Ay₁_tmp, dims[1], 1, b_prev.ttv_rks[2], H.tto_rks[2])
+    Ay₁ = reshape(Ay₁_tmp, 1, dims[1], b_prev.ttv_rks[2], H.tto_rks[2])
 
     Yₖ    = Vector{Array{T,3}}(undef, m)
-    Yₖ[1] = reshape(Ay₁, dims[1], 1, b_prev.ttv_rks[2] * H.tto_rks[2])
+    Yₖ[1] = reshape(Ay₁, 1, dims[1], b_prev.ttv_rks[2] * H.tto_rks[2])
     for (i,b) in enumerate(B_window)
         Yₖ[1+i] = -h[i] .* b.ttv_vec[1]
     end
 
     for k = 1:N-1
-        # Sketch contraction: Zₖ accumulates all m terms
-        Zₖ = zeros(T, dims[k], out_rks[k], s_rks[k+1])
-        @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[1][iₖ,ρₖ,αₖ₊₁] * W_HB[k+1][αₖ₊₁,ρₖ₊₁]
+        # Sketch contraction: Zₖ accumulates all m terms. Layout (L, I, R).
+        # Each term is reshape(Y, ρₖ*iₖ, αₖ₊₁) × W = (ρₖ*iₖ, ρₖ₊₁). One gemm per term.
+        Zₖ = zeros(T, out_rks[k], dims[k], s_rks[k+1])
+        Zₖ_flat = reshape(Zₖ, out_rks[k]*dims[k], s_rks[k+1])
+        mul!(Zₖ_flat,
+             reshape(Yₖ[1], out_rks[k]*dims[k], :),
+             W_HB[k+1],
+             true, true)
         for (i,W) in enumerate(W_B_window)
-            @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[1+i][iₖ,ρₖ,αₖ₊₁] * W[k+1][αₖ₊₁,ρₖ₊₁]
+            mul!(Zₖ_flat,
+                 reshape(Yₖ[1+i], out_rks[k]*dims[k], :),
+                 W[k+1],
+                 true, true)
         end
 
-        Q, _ = qr!(reshape(Zₖ, dims[k]*out_rks[k], s_rks[k+1]))
+        Q, _ = qr!(reshape(Zₖ, out_rks[k]*dims[k], s_rks[k+1]))
         Q    = Matrix(Q)
         out_rks[k+1] = size(Q, 2)
-        vec_out[k]   = reshape(Q, dims[k], out_rks[k], out_rks[k+1])
+        vec_out[k]   = reshape(Q, out_rks[k], dims[k], out_rks[k+1])
         ot[k] = 1
 
         # Propagate left contractions to site k+1
         Yₖ₊₁ = Vector{Array{T,3}}(undef, m)
 
-        y₁ₖ    = reshape(Yₖ[1], dims[k], out_rks[k], b_prev.ttv_rks[k+1], H.tto_rks[k+1])
-        Ay₁ₖ₊₁ = zeros(T, dims[k+1], out_rks[k+1], b_prev.ttv_rks[k+2], H.tto_rks[k+2])
-        @tensoropt (ρₖ,ρₖ₊₁,αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂) Ay₁ₖ₊₁[iₖ₊₁,ρₖ₊₁,αₖ₊₂,βₖ₊₂] = y₁ₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁] * vec_out[k][iₖ,ρₖ,ρₖ₊₁] * b_prev.ttv_vec[k+1][jₖ₊₁,αₖ₊₁,αₖ₊₂] * H.tto_vec[k+1][iₖ₊₁,jₖ₊₁,βₖ₊₁,βₖ₊₂]
-        Yₖ₊₁[1] = reshape(Ay₁ₖ₊₁, dims[k+1], out_rks[k+1],
+        y₁ₖ    = reshape(Yₖ[1], out_rks[k], dims[k], b_prev.ttv_rks[k+1], H.tto_rks[k+1])
+        Ay₁ₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], b_prev.ttv_rks[k+2], H.tto_rks[k+2])
+        @tensoropt (ρₖ,ρₖ₊₁,αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂) Ay₁ₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂,βₖ₊₂] = y₁ₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁] * vec_out[k][ρₖ,iₖ,ρₖ₊₁] * b_prev.ttv_vec[k+1][αₖ₊₁,jₖ₊₁,αₖ₊₂] * H.tto_vec[k+1][βₖ₊₁,iₖ₊₁,jₖ₊₁,βₖ₊₂]
+        Yₖ₊₁[1] = reshape(Ay₁ₖ₊₁, out_rks[k+1], dims[k+1],
                            b_prev.ttv_rks[k+2] * H.tto_rks[k+2])
 
         for (i,b) in enumerate(B_window)
-            Yₖ₊₁[1+i] = zeros(T, dims[k+1], out_rks[k+1], b.ttv_rks[k+2])
-            @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ,ρₖ₊₁) Yₖ₊₁[1+i][iₖ₊₁,ρₖ₊₁,αₖ₊₂] =
-                Yₖ[1+i][iₖ,ρₖ,αₖ₊₁] * vec_out[k][iₖ,ρₖ,ρₖ₊₁] *
-                b.ttv_vec[k+1][iₖ₊₁,αₖ₊₁,αₖ₊₂]
+            Yₖ₊₁[1+i] = zeros(T, out_rks[k+1], dims[k+1], b.ttv_rks[k+2])
+            # 3-tensor env propagation — keep @tensoropt; replacement needs 2 large gemms + permutes.
+            @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ,ρₖ₊₁) Yₖ₊₁[1+i][ρₖ₊₁,iₖ₊₁,αₖ₊₂] =
+                Yₖ[1+i][ρₖ,iₖ,αₖ₊₁] * vec_out[k][ρₖ,iₖ,ρₖ₊₁] *
+                b.ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
         end
 
         Yₖ = Yₖ₊₁
     end
 
-    # Last core: direct sum of all left contractions (all shape (dims[N], out_rks[N], 1))
-    vec_out[N] = reshape(sum(Yₖ), dims[N], out_rks[N], 1)    
+    # Last core: direct sum of all left contractions (all shape (out_rks[N], dims[N], 1)).
+    vec_out[N] = reshape(sum(Yₖ), out_rks[N], dims[N], 1)
+
     b_new = tt_rounding(TTvector{T,N}(N, vec_out, dims, out_rks, ot); rmax=rmax)
 
     # ── W_B_new: full sketch of b_new (enters the sliding window) ─────────

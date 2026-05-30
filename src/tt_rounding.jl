@@ -23,22 +23,24 @@ function r_and_d_to_rks(rks,dims;rmax=1024)
 	return new_rks
 end
 
-#local ttvec rank increase function with noise ϵ_wn
+#local ttvec rank increase function with noise ϵ_wn. Cores have layout (L, I, R).
 function tt_up_rks_noise(tt_vec,tt_ot_i,rkm,rk,ϵ_wn)
-	vec_out = zeros(eltype(tt_vec),size(tt_vec,1),rkm,rk)
-	vec_out[:,1:size(tt_vec,2),1:size(tt_vec,3)] = tt_vec
+	ni = size(tt_vec, 2)
+	L_old, R_old = size(tt_vec, 1), size(tt_vec, 3)
+	vec_out = zeros(eltype(tt_vec), rkm, ni, rk)
+	vec_out[1:L_old, :, 1:R_old] = tt_vec
 	if !iszero(ϵ_wn)
-		if rkm == size(tt_vec,2) && rk>size(tt_vec,3)
-			Q = rand_orthogonal(size(tt_vec,1)*rkm,rk-size(tt_vec,3))
-			vec_out[:,:,size(tt_vec,3)+1:rk] = ϵ_wn*reshape(Q,size(tt_vec,1),rkm,rk-size(tt_vec,3))
-			tt_ot_i =0
-		elseif rk == size(tt_vec,3) && rkm>size(tt_vec,2)
-			Q = rand_orthogonal(rkm-size(tt_vec,2),size(tt_vec,1)*rk)
-			vec_out[:,size(tt_vec,2)+1:rkm,:] = ϵ_wn*reshape(Q,size(tt_vec,1),rkm-size(tt_vec,2),rk)
-			tt_ot_i =0
-		elseif rk>size(tt_vec,3) && rkm>size(tt_vec,2)
-			Q = rand_orthogonal((rkm-size(tt_vec,2))*size(tt_vec,1),(rk-size(tt_vec,3)))
-			vec_out[:,size(tt_vec,2)+1:rkm,size(tt_vec,3)+1:rk] = ϵ_wn*reshape(Q,size(tt_vec,1),rkm-size(tt_vec,2),rk-size(tt_vec,3))
+		if rkm == L_old && rk > R_old
+			Q = rand_orthogonal(rkm*ni, rk - R_old)
+			vec_out[:, :, R_old+1:rk] = ϵ_wn*reshape(Q, rkm, ni, rk - R_old)
+			tt_ot_i = 0
+		elseif rk == R_old && rkm > L_old
+			Q = rand_orthogonal(rkm - L_old, ni*rk)
+			vec_out[L_old+1:rkm, :, :] = ϵ_wn*reshape(Q, rkm - L_old, ni, rk)
+			tt_ot_i = 0
+		elseif rk > R_old && rkm > L_old
+			Q = rand_orthogonal((rkm - L_old)*ni, rk - R_old)
+			vec_out[L_old+1:rkm, :, R_old+1:rk] = ϵ_wn*reshape(Q, rkm - L_old, ni, rk - R_old)
 		end
 	end
 	return vec_out
@@ -67,32 +69,51 @@ function orthogonalize(x_tt::TTvector{T,N};i=1::Int) where {T<:Number,N}
 	@assert(1≤i≤d, DimensionMismatch("Impossible orthogonalization"))
 	y_rks = r_and_d_to_rks(x_tt.ttv_rks,x_tt.ttv_dims)
 	y_tt = zeros_tt(T,x_tt.ttv_dims,y_rks)
+	# Cores have layout (L, I, R). Left-orthogonalization: unfold each core
+	# as (L*I, R) — a contiguous column-major reshape — and QR.
 	FR = ones(T,1,1)
-	yleft_temp =zeros(T,maximum(x_tt.ttv_rks),maximum(x_tt.ttv_dims),maximum(x_tt.ttv_rks))
+	yleft_temp = zeros(T, maximum(x_tt.ttv_rks), maximum(x_tt.ttv_dims), maximum(x_tt.ttv_rks))
 	for j in 1:i-1
 		y_tt.ttv_ot[j]=1
-		@tensoropt((βⱼ₋₁,αⱼ),	yleft_temp[1:y_tt.ttv_rks[j],1:x_tt.ttv_dims[j],1:x_tt.ttv_rks[j+1]][αⱼ₋₁,iⱼ,αⱼ] = FR[αⱼ₋₁,βⱼ₋₁]*x_tt.ttv_vec[j][iⱼ,βⱼ₋₁,αⱼ])
-		F = qr(reshape(yleft_temp[1:y_tt.ttv_rks[j],1:x_tt.ttv_dims[j],1:x_tt.ttv_rks[j+1]],x_tt.ttv_dims[j]*y_tt.ttv_rks[j],:))
+		# FR (αⱼ₋₁, βⱼ₋₁) × core (βⱼ₋₁, iⱼ*αⱼ) → (αⱼ₋₁, iⱼ*αⱼ). Single gemm into the view.
+		let view_lhs = view(yleft_temp, 1:y_tt.ttv_rks[j], 1:x_tt.ttv_dims[j], 1:x_tt.ttv_rks[j+1]),
+			c = x_tt.ttv_vec[j]
+			mul!(reshape(view_lhs, y_tt.ttv_rks[j], :),
+			     FR,
+			     reshape(c, size(c,1), :))
+		end
+		F = qr(reshape(yleft_temp[1:y_tt.ttv_rks[j],1:x_tt.ttv_dims[j],1:x_tt.ttv_rks[j+1]], y_tt.ttv_rks[j]*x_tt.ttv_dims[j], :))
 		y_tt.ttv_rks[j+1] = size(Matrix(F.Q),2)
-		y_tt.ttv_vec[j] = permutedims(reshape(Matrix(F.Q),y_tt.ttv_rks[j],x_tt.ttv_dims[j],y_tt.ttv_rks[j+1]),[2 1 3])
+		y_tt.ttv_vec[j] = reshape(Matrix(F.Q), y_tt.ttv_rks[j], x_tt.ttv_dims[j], y_tt.ttv_rks[j+1])
 		FR = F.R[1:y_tt.ttv_rks[j+1],:]
 	end
+	# Right-orthogonalization: unfold each core as (L, I*R) and LQ.
 	FL = ones(T,1,1)
-	(i<x_tt.N) && (yright_temp =zeros(T,maximum(x_tt.ttv_rks),maximum(y_tt.ttv_rks),maximum(x_tt.ttv_dims)))
+	(i<x_tt.N) && (yright_temp = zeros(T, maximum(x_tt.ttv_rks), maximum(x_tt.ttv_dims), maximum(y_tt.ttv_rks)))
 	for j in d:-1:i+1
 		y_tt.ttv_ot[j]=-1
-		yright_temp = zeros(T,x_tt.ttv_rks[j],y_tt.ttv_rks[j+1],x_tt.ttv_dims[j])
-		@tensoropt((αⱼ₋₁,αⱼ),	yright_temp[1:x_tt.ttv_rks[j],1:y_tt.ttv_rks[j+1],1:x_tt.ttv_dims[j]][αⱼ₋₁,βⱼ,iⱼ] = x_tt.ttv_vec[j][iⱼ,αⱼ₋₁,αⱼ]*FL[αⱼ,βⱼ])
-		F = lq(reshape(yright_temp[1:x_tt.ttv_rks[j],1:y_tt.ttv_rks[j+1],1:x_tt.ttv_dims[j]],x_tt.ttv_rks[j],:))
+		yright_temp = zeros(T, x_tt.ttv_rks[j], x_tt.ttv_dims[j], y_tt.ttv_rks[j+1])
+		# core (αⱼ₋₁*iⱼ, αⱼ) × FL (αⱼ, βⱼ) → (αⱼ₋₁*iⱼ, βⱼ). Single gemm.
+		let c = x_tt.ttv_vec[j]
+			mul!(reshape(yright_temp, x_tt.ttv_rks[j]*x_tt.ttv_dims[j], :),
+			     reshape(c, size(c,1)*size(c,2), :),
+			     FL)
+		end
+		F = lq(reshape(yright_temp[1:x_tt.ttv_rks[j],1:x_tt.ttv_dims[j],1:y_tt.ttv_rks[j+1]], x_tt.ttv_rks[j], :))
 		y_tt.ttv_rks[j] = size(Matrix(F.Q),1)
-		y_tt.ttv_vec[j] = permutedims(reshape(Matrix(F.Q),y_tt.ttv_rks[j],y_tt.ttv_rks[j+1],x_tt.ttv_dims[j]),[3 1 2])
+		y_tt.ttv_vec[j] = reshape(Matrix(F.Q), y_tt.ttv_rks[j], x_tt.ttv_dims[j], y_tt.ttv_rks[j+1])
 		FL = F.L[:,1:y_tt.ttv_rks[j]]
 	end
 	y_tt.ttv_ot[i]=0
-	y_tt.ttv_vec[i] = zeros(T,y_tt.ttv_dims[i],y_tt.ttv_rks[i],y_tt.ttv_rks[i+1])
-	@simd for k in 1:x_tt.ttv_dims[i]
-		y_tt.ttv_vec[i][k,:,:] = FR*x_tt.ttv_vec[i][k,:,:]*FL
-	end
+	# center = FR × core × FL. Two gemms:
+	#   tmp[γ, μ*β]  = core[γ, μ*δ] × FL_reshaped? Order: core×FL first since core is the big factor.
+	#   tmp[γ*μ, β]  = core[γ*μ, δ] × FL[δ, β]
+	#   center[α, μ*β] = FR[α, γ] × tmp[γ, μ*β]
+	c = x_tt.ttv_vec[i]
+	γ, μ, δ = size(c)
+	tmp = reshape(c, γ*μ, δ) * FL
+	y_tt.ttv_vec[i] = reshape(FR * reshape(tmp, γ, μ*size(FL,2)),
+	                          size(FR,1), μ, size(FL,2))
 	return y_tt
 end
 
@@ -189,8 +210,8 @@ function _tt_rounding(y_tt::TTvector{T,N}; tol=1e-12, rmax=2^14, direction=:left
             rj_prev = y_tt.ttv_rks[j]
             rj = y_tt.ttv_rks[j+1]
 
-            # Unfold: (rj_prev) x (nj * rj)
-            M = reshape(permutedims(y_tt.ttv_vec[j], (2, 1, 3)), rj_prev, nj * rj)
+            # Unfold core (L, I, R) as (L) × (I*R) — pure column-major reshape.
+            M = reshape(y_tt.ttv_vec[j], rj_prev, nj * rj)
 
             u, s, v = try
                 svd(M, full=false)
@@ -201,19 +222,19 @@ function _tt_rounding(y_tt::TTvector{T,N}; tol=1e-12, rmax=2^14, direction=:left
             # Enforce maximum rank
             _, k = floor(s, tol_per_bond)
             k = min(k, rmax, sum(s .> 0.0))
-            
-            # Update current core (j) with V^T
+
+            # Update current core (j) with V^T — V_trunc is (k, I*R), reshape to (k, I, R).
             V_trunc = adjoint(@view v[:, 1:k])
-            y_tt.ttv_vec[j] = permutedims(reshape(V_trunc, k, nj, rj), (2, 1, 3))
-            
-            # Absorb U*S into the left core (j-1)
-            US = @view(u[:, 1:k]) .* s[1:k]' 
+            y_tt.ttv_vec[j] = reshape(V_trunc, k, nj, rj)
+
+            # Absorb U*S into the left core (j-1). Unfold (L', I', L) as (L'*I', L).
+            US = @view(u[:, 1:k]) .* s[1:k]'
             nj_prev = y_tt.ttv_dims[j-1]
             rj_prev_prev = y_tt.ttv_rks[j-1]
-            
-            left_core_mat = reshape(y_tt.ttv_vec[j-1], nj_prev * rj_prev_prev, rj_prev)
-            y_tt.ttv_vec[j-1] = reshape(left_core_mat * US, nj_prev, rj_prev_prev, k)
-            
+
+            left_core_mat = reshape(y_tt.ttv_vec[j-1], rj_prev_prev * nj_prev, rj_prev)
+            y_tt.ttv_vec[j-1] = reshape(left_core_mat * US, rj_prev_prev, nj_prev, k)
+
             y_tt.ttv_rks[j] = k
             y_tt.ttv_ot[j] = -1 # Right-orthogonal
         end
@@ -232,10 +253,10 @@ function _tt_rounding(y_tt::TTvector{T,N}; tol=1e-12, rmax=2^14, direction=:left
             nj = y_tt.ttv_dims[j]
             rj_prev = y_tt.ttv_rks[j]
             rj = y_tt.ttv_rks[j+1]
-            
-            # Unfold: (nj * rj_prev) x (rj)
-            M = reshape(y_tt.ttv_vec[j], nj * rj_prev, rj)
-            
+
+            # Unfold core (L, I, R) as (L*I) × (R) — pure column-major reshape.
+            M = reshape(y_tt.ttv_vec[j], rj_prev * nj, rj)
+
             u, s, v = try
                 svd(M, full=false)
             catch e
@@ -245,22 +266,20 @@ function _tt_rounding(y_tt::TTvector{T,N}; tol=1e-12, rmax=2^14, direction=:left
             _, k = floor(s, tol_per_bond)
             k = min(k, rmax, sum(s .> 0.0))
 
-            # Update current core (j) with U
-            y_tt.ttv_vec[j] = reshape(@view(u[:, 1:k]), nj, rj_prev, k)
-            
-            # Absorb S*V^T into the right core (j+1)
+            # Update current core (j) with U — U is (L*I, k), reshape to (L, I, k).
+            y_tt.ttv_vec[j] = reshape(@view(u[:, 1:k]), rj_prev, nj, k)
+
+            # Absorb S*V^T into the right core (j+1).
             SVT = s[1:k] .* adjoint(@view v[:, 1:k])
-            
+
             nj_next = y_tt.ttv_dims[j+1]
             rj_next = y_tt.ttv_rks[j+2]
-            
-            # Permute right core to (left_bond, physical, right_bond) for valid matrix multiplication
-            right_core_mat = reshape(permutedims(y_tt.ttv_vec[j+1], (2, 1, 3)), rj, nj_next * rj_next)
+
+            # Right core has layout (L, I, R) — unfold directly as (L) × (I*R).
+            right_core_mat = reshape(y_tt.ttv_vec[j+1], rj, nj_next * rj_next)
             new_right_core_flat = SVT * right_core_mat
-            
-            # Permute back to standard struct layout: (physical, left_bond, right_bond)
-            y_tt.ttv_vec[j+1] = permutedims(reshape(new_right_core_flat, k, nj_next, rj_next), (2, 1, 3))
-            
+            y_tt.ttv_vec[j+1] = reshape(new_right_core_flat, k, nj_next, rj_next)
+
             y_tt.ttv_rks[j+1] = k
             y_tt.ttv_ot[j] = 1 # Left-orthogonal
         end
@@ -287,13 +306,19 @@ function tt_svdvals(x_tt::TTvector{T,N};tol=1e-14) where {T<:Number,N}
 	Σ = Array{Array{Float64,1},1}(undef,N-1)
 	y_tt = orthogonalize(x_tt)
 	y_rks = r_and_d_to_rks(y_tt.ttv_rks,y_tt.ttv_dims)
+	# Unfolding (L*I, R) is a contiguous reshape under (L, I, R) layout.
 	core_temp = zeros(T,maximum(y_tt.ttv_dims.*y_tt.ttv_rks[1:end-1]),maximum(y_tt.ttv_rks))
-	core_temp[1:y_tt.ttv_dims[1]*y_tt.ttv_rks[1],1:y_tt.ttv_rks[2]] = reshape(y_tt.ttv_vec[1],y_tt.ttv_dims[1]*y_tt.ttv_rks[1],y_tt.ttv_rks[2])
+	core_temp[1:y_tt.ttv_rks[1]*y_tt.ttv_dims[1],1:y_tt.ttv_rks[2]] = reshape(y_tt.ttv_vec[1],y_tt.ttv_rks[1]*y_tt.ttv_dims[1],y_tt.ttv_rks[2])
 	for j in 1:N-1
-		u,s,v = svd(@view(core_temp[1:y_tt.ttv_dims[j]*y_rks[j],1:y_tt.ttv_rks[j+1]]))
+		u,s,v = svd(@view(core_temp[1:y_rks[j]*y_tt.ttv_dims[j],1:y_tt.ttv_rks[j+1]]))
 		Σ[j],_ = floor(s,tol)
-		core_view = reshape(view(core_temp,1:y_tt.ttv_dims[j+1]*y_rks[j+1],1:y_tt.ttv_rks[j+2]),y_tt.ttv_dims[j+1],y_rks[j+1],y_tt.ttv_rks[j+2])
-		@tensor core_view[i2,α,β] = (Diagonal(s)*v')[α,z]*y_tt.ttv_vec[j+1][i2,z,β]
+		core_view = reshape(view(core_temp,1:y_rks[j+1]*y_tt.ttv_dims[j+1],1:y_tt.ttv_rks[j+2]),y_rks[j+1],y_tt.ttv_dims[j+1],y_tt.ttv_rks[j+2])
+		# M (α,z) × core (z, i2*β) → (α, i2*β). Single gemm into the view.
+		let M = Diagonal(s) * v', c = y_tt.ttv_vec[j+1]
+			mul!(reshape(core_view, y_rks[j+1], :),
+			     M,
+			     reshape(c, size(c,1), :))
+		end
 	end
 	return Σ
 end
@@ -319,17 +344,18 @@ function floor(s::AbstractVector{<:Real},tol;degen_tol=1e-5)
 end
 
 function left_compression(A,B;tol=1e-12)
+    # Cores have layout (L, I, R). Unfold A as (L_A*I_A) × R_A; unfold B as L_B × (I_B*R_B).
     dim_A = [i for i in size(A)]
     dim_B = [i for i in size(B)]
 
-    B = permutedims(B, [2,1,3]) #B r_1 x n_2 x r_2
-    U = reshape(A,:,dim_A[3])
-    u,s,v = svd(U*reshape(B, dim_B[2],:),full=false) #u is the new A, dim(u) = n_1r_0 x tilde(r)_1
-    s_trunc,_ = floor(s,tol)
-    dim_B[2] = length(s_trunc)
-    U = reshape(u[:,1:dim_B[2]],dim_A[1],dim_A[2],dim_B[2])
-    B = reshape(Diagonal(s_trunc)*v[:,1:dim_B[2]]',dim_B[2],dim_B[1],dim_B[3])
-    return U, permutedims(B,[2,1,3])
+    U = reshape(A, :, dim_A[3])
+    V = reshape(B, dim_B[1], :)
+    u,s,v = svd(U*V, full=false)
+    s_trunc, _ = floor(s, tol)
+    k = length(s_trunc)
+    A_new = reshape(u[:, 1:k], dim_A[1], dim_A[2], k)
+    B_new = reshape(Diagonal(s_trunc)*v[:, 1:k]', k, dim_B[2], dim_B[3])
+    return A_new, B_new
 end
 
 """

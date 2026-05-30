@@ -60,21 +60,23 @@ function init_H(x_tt::TTvector{T},A_tto::TToperator{T},N::Int,rmax) where {T<:Nu
 end
 
 function update_H!(x_vec::Array{T,3},A_vec::Array{T,4},Hi::AbstractArray{T,3},Him::AbstractArray{T,3}) where T<:Number
-	@tensor Him[a,α,β] = ((conj.(x_vec)[j,α,αₖ]*Hi[z,αₖ,βₖ])*A_vec[j,k,a,z])*x_vec[k,β,βₖ] #size (rAim, rim, rim)
-	nothing 
+	# Vector core (L,I,R); operator core (L,i,j,R).
+	@tensor Him[a,α,β] = ((conj.(x_vec)[α,j,αₖ]*Hi[z,αₖ,βₖ])*A_vec[a,j,k,z])*x_vec[β,k,βₖ]
+	nothing
 end
 
 function update_G!(x_vec::Array{T,3},A_vec::Array{T,4},Gi::AbstractArray{T,3},Gip::AbstractArray{T,3}) where T<:Number
-	@tensoropt((ϕ,χ), Gip[a,α,β] = conj.(x_vec)[j,ϕ,α]*Gi[z,ϕ,χ]*x_vec[k,χ,β]*A_vec[j,k,z,a]) #size (rAi, ri, ri)
+	@tensoropt((ϕ,χ), Gip[a,α,β] = conj.(x_vec)[ϕ,j,α]*Gi[z,ϕ,χ]*x_vec[χ,k,β]*A_vec[z,j,k,a])
 	nothing
 end
 
 #returns the contracted tensor A_i[\\mu_i] ⋯ A_j[\\mu_j] ∈ R^{R^A_{i-1} × n_i × n_i × ⋯ × n_j × n_j ×  R^A_j}
 function Amid(A_tto::TToperator{T},i::Int,j::Int) where {T<:Number}
-	A = permutedims(A_tto.tto_vec[i],(3,1,2,4))
+	# Operator core already (L, i, j, R) — no permute needed.
+	A = copy(A_tto.tto_vec[i])
 	for k in i+1:j
 		C = reshape(A,A_tto.tto_rks[i],prod(A_tto.tto_dims[i:k-1]),:,A_tto.tto_rks[k])
-		@tensor Atemp[αk,Ik,ik,Jk,jk,βk] := A_tto.tto_vec[k][ik,jk,ξk,βk]*C[αk,Ik,Jk,ξk]
+		@tensor Atemp[αk,Ik,ik,Jk,jk,βk] := A_tto.tto_vec[k][ξk,ik,jk,βk]*C[αk,Ik,Jk,ξk]
 		A = reshape(Atemp,A_tto.tto_rks[i],prod(A_tto.tto_dims[i:k]),:,A_tto.tto_rks[k+1])
 	end
 	return A #size R^A_{i-1} × (n_i⋯n_j) × (n_i⋯n_j) × R^A_j
@@ -104,21 +106,43 @@ function init_Hb(x_tt::TTvector{T},b_tt::TTvector{T},N::Integer,rmax) where {T<:
 end
 
 function update_Hb!(x_vec::Array{T,3},b_vec::Array{T,3},H_bi::AbstractArray{T,2},H_bim::AbstractArray{T,2}) where T<:Number
-	H_bimview = @view(H_bim[1:size(x_vec,2),1:size(b_vec,2)])
-	@tensor H_bimview[α,β] = (H_bi[ϕ,χ]*b_vec[i,β,χ])*conj.(x_vec)[i,α,ϕ]
+	# H_bim[α, β] = sum_{ϕ, χ, i} H_bi[ϕ, χ] × b_vec[β, i, χ] × conj(x_vec)[α, i, ϕ]. Two gemms.
+	α, ni, ϕd = size(x_vec)
+	β, _, χd  = size(b_vec)
+	H_bimview = @view(H_bim[1:α, 1:β])
+	# Step 1: bH[β*i, ϕ] = b_vec[β*i, χ] × transpose(H_bi[ϕ, χ]).
+	bH = reshape(b_vec, β*ni, χd) * transpose(H_bi)
+	# Step 2: H_bim[α, β] = reshape(conj(x_vec), α, i*ϕ) × transpose(reshape(bH, β, i*ϕ)).
+	mul!(H_bimview,
+	     reshape(conj.(x_vec), α, ni*ϕd),
+	     transpose(reshape(bH, β, ni*ϕd)))
 	nothing
 end
 
 function update_Gb!(x_vec::Array{T,3},b_vec::Array{T,3},G_bi::AbstractArray{T,2},G_bip::AbstractArray{T,2}) where T<:Number
-	@tensor G_bip[α,β] = (G_bi[ϕ,χ]*b_vec[i,χ,β])*conj.(x_vec)[i,ϕ,α]
+	# G_bip[α, β] = sum_{ϕ, χ, i} G_bi[ϕ, χ] × b_vec[χ, i, β] × conj(x_vec)[ϕ, i, α]. Two gemms.
+	ϕd, ni, αd = size(x_vec)
+	χd, _,  βd = size(b_vec)
+	# Step 1: bG[ϕ, i*β] = G_bi[ϕ, χ] × reshape(b_vec, χ, i*β).
+	bG = G_bi * reshape(b_vec, χd, ni*βd)
+	# Step 2: G_bip[α, β] = sum_{ϕ, i} conj(x_vec)[ϕ, i, α] × reshape(bG, ϕ, i, β)[ϕ, i, β].
+	#   Flatten conj(x_vec) (ϕ*i, α); flatten bG (ϕ*i, β). transpose(conj_x) × bG.
+	mul!(G_bip,
+	     transpose(reshape(conj.(x_vec), ϕd*ni, αd)),
+	     reshape(bG, ϕd*ni, βd))
 	nothing
 end
 
 function b_mid(b_tt::TTvector{T},i::Integer,j::Integer) where {T<:Number}
-	b_out = permutedims(b_tt.ttv_vec[i],(2,1,3))
+	# b core already (L, I, R) — no permute needed.
+	b_out = copy(b_tt.ttv_vec[i])
 	for k in i+1:j
-		@tensor btemp[αk,ik,jk,βk] := b_out[αk,ik,ξk]*b_tt.ttv_vec[k][jk,ξk,βk]
-		b_out = reshape(btemp,b_tt.ttv_rks[i],:,b_tt.ttv_rks[k+1]) #size r^b_{i-1} × (n_i⋯n_k) × r^b_k
+		# btemp[αk, ik, jk, βk] = b_out[αk, ik, ξk] * b[k][ξk, jk, βk].
+		# Reshape (αk*ik, ξk) × (ξk, jk*βk) = (αk*ik, jk*βk). One gemm.
+		c = b_tt.ttv_vec[k]
+		b_out = reshape(reshape(b_out, size(b_out,1)*size(b_out,2), :) *
+		                reshape(c, size(c,1), :),
+		                b_tt.ttv_rks[i], :, b_tt.ttv_rks[k+1])
 	end
 	return b_out
 end
@@ -155,11 +179,13 @@ function right_core_move!(x_tt::TTvector{T},V,V_move,i::Int,N,tol::Float64,r_max
 		push!(dmrg_info.ttsvd_weights, svd_truncation)
 	end
 
-	x_tt.ttv_vec[i] = permutedims(reshape(u_V[:,1:x_tt.ttv_rks[i+1]],x_tt.ttv_rks[i],x_tt.ttv_dims[i],:),(2,1,3))
+	# Core (L, I, R) — U is (L*I, k), reshape directly.
+	x_tt.ttv_vec[i] = reshape(u_V[:,1:x_tt.ttv_rks[i+1]],x_tt.ttv_rks[i],x_tt.ttv_dims[i],:)
 	x_tt.ttv_ot[i] = 1
 	x_tt.ttv_ot[i+1]=0
 	V_moveview = @view(V_move[1:x_tt.ttv_rks[i+1],1:prod(x_tt.ttv_dims[i+1:i+N-1]),1:size(V,3)])
-	@tensor V_moveview[αk,ik,βk] = reshape(v_V'[1:x_tt.ttv_rks[i+1],:],x_tt.ttv_rks[i+1],:,size(V,3))[αk,ik,βk]
+	# Pure copy: V_moveview ← reshape(v_V'[1:k,:], k, ?, R). No contraction.
+	copyto!(V_moveview, reshape(v_V'[1:x_tt.ttv_rks[i+1],:], x_tt.ttv_rks[i+1], :, size(V,3)))
 	for ak in axes(V_moveview,1)
 		V_moveview[ak,:,:] = V_moveview[ak,:,:]*(s_V[ak])
 	end
@@ -178,11 +204,12 @@ function left_core_move!(x_tt::TTvector{T},V,V_move,j::Int,N,tol::Float64,r_max:
 		push!(dmrg_info.ttsvd_weights, svd_truncation)
 	end
 
-	x_tt.ttv_vec[j] = permutedims(reshape(v_V'[1:x_tt.ttv_rks[j],:],x_tt.ttv_rks[j],:,x_tt.ttv_rks[j+1]),(2,1,3))
+	x_tt.ttv_vec[j] = reshape(v_V'[1:x_tt.ttv_rks[j],:],x_tt.ttv_rks[j],:,x_tt.ttv_rks[j+1])
 	x_tt.ttv_ot[j] = -1
 	x_tt.ttv_ot[j-1]=0
 	V_moveview = @view(V_move[1:size(V,1),1:prod(x_tt.ttv_dims[j+1-N:j-1]),1:x_tt.ttv_rks[j]])
-	@tensor V_moveview[αk,ik,βk] = reshape(u_V[:,1:x_tt.ttv_rks[j]],size(V,1),:,x_tt.ttv_rks[j])[αk,ik,βk]
+	# Pure copy: V_moveview ← reshape(u_V[:,1:k], size(V,1), ?, k). No contraction.
+	copyto!(V_moveview, reshape(u_V[:,1:x_tt.ttv_rks[j]], size(V,1), :, x_tt.ttv_rks[j]))
 	for bk in axes(V_moveview,3)
 		V_moveview[:,:,bk] = V_moveview[:,:,bk]*s_V[bk]
 	end
@@ -269,7 +296,12 @@ function update_right(tt_opt,V0,V_view,V_move,V_temp,i,N,tol,rmax,Ai,Gi_view,Gip
 
 	V_moveview = @view(V_move[1:tt_opt.ttv_rks[i+1],1:prod(tt_opt.ttv_dims[i+1:i+N-1]),1:tt_opt.ttv_rks[i+N]])
 	V_tempview = @view(V_temp[1:size(V_moveview,1),1:size(V_moveview,2),1:tt_opt.ttv_dims[i+N],1:tt_opt.ttv_rks[i+1+N]])
-	@tensor V_tempview[αk,J,ik,γk] = V_moveview[αk,J,βk]*tt_opt.ttv_vec[i+N][ik,βk,γk]
+	# V_moveview[αk*J, βk] × core[βk, ik*γk] → (αk*J, ik*γk). Single gemm.
+	let c = tt_opt.ttv_vec[i+N]
+		mul!(reshape(V_tempview, size(V_moveview,1)*size(V_moveview,2), :),
+		     reshape(V_moveview, size(V_moveview,1)*size(V_moveview,2), :),
+		     reshape(c, size(c,1), :))
+	end
 	V0_view = @view(V0[1:tt_opt.ttv_rks[i+1],1:prod(tt_opt.ttv_dims[i+1:i+N-1]),1:tt_opt.ttv_rks[i+N]])
 	V0_view = reshape(V_tempview,size(V_tempview,1),:,size(V_tempview,4))
 
@@ -287,7 +319,14 @@ function update_left(tt_opt,V0,V_view,V_move,V_temp,i,N,tol,rmax,Aip,Hi_view,Him
 	#update the initialization
 	V_moveview = @view(V_move[1:tt_opt.ttv_rks[i],1:prod(tt_opt.ttv_dims[i:i+N-2]),1:tt_opt.ttv_rks[i+N-1]])
 	V_tempview = @view(V_temp[1:tt_opt.ttv_rks[i-1],1:size(V_moveview,2),1:tt_opt.ttv_dims[i-1],1:size(V_moveview,3)])
-	@tensor V_tempview[αk,J,ik,γk] =  V_moveview[βk,J,γk]*tt_opt.ttv_vec[i-1][ik,αk,βk]
+	# V_tempview[αk, J*ik, γk] = (core[αk*ik, βk] flattened) × (V_moveview[βk, J*γk]).
+	# Result is naturally (αk, ik, J, γk); we want (αk, J, ik, γk) so permute J↔ik after.
+	let c = tt_opt.ttv_vec[i-1]
+		tmp = reshape(reshape(c, size(c,1)*size(c,2), :) *
+		              reshape(V_moveview, size(V_moveview,1), :),
+		              size(c,1), size(c,2), size(V_moveview,2), size(V_moveview,3))
+		permutedims!(V_tempview, tmp, (1, 3, 2, 4))
+	end
 	V0_view = @view(V0[1:tt_opt.ttv_rks[i],1:prod(tt_opt.ttv_dims[i:i+N-2]),1:tt_opt.ttv_rks[i+N-1]])
 	V0_view = reshape(V_tempview,size(V_tempview,1),:,size(V_tempview,4))
 
@@ -328,29 +367,34 @@ function ttv_after_dmrg_microstep!(tt_opt,rmax,V,schedule;j=tt_opt.N,verbose,dmr
 			push!(dmrg_info.ttsvd_weights, svd_truncation)
 		end
 		if left_to_right
-			tt_opt.ttv_vec[j-1] = permutedims(reshape(u_V[:,1:tt_opt.ttv_rks[j]]*Diagonal(s_V[1:tt_opt.ttv_rks[j]]), tt_opt.ttv_rks[j-1], dims[j],tt_opt.ttv_rks[j]),(2,1,3))
+			# Cores (L, I, R) — direct reshape, no permute.
+			tt_opt.ttv_vec[j-1] = reshape(u_V[:,1:tt_opt.ttv_rks[j]]*Diagonal(s_V[1:tt_opt.ttv_rks[j]]), tt_opt.ttv_rks[j-1], dims[j-1], tt_opt.ttv_rks[j])
 			tt_opt.ttv_ot[j-1] = 0
-			tt_opt.ttv_vec[j] = permutedims(reshape(v_V'[1:tt_opt.ttv_rks[j],:],tt_opt.ttv_rks[j],dims[j],tt_opt.ttv_rks[j+1]),(2,1,3))
+			tt_opt.ttv_vec[j] = reshape(v_V'[1:tt_opt.ttv_rks[j],:], tt_opt.ttv_rks[j], dims[j], tt_opt.ttv_rks[j+1])
 			tt_opt.ttv_ot[j] = -1
 		else
-			tt_opt.ttv_vec[j-1] = permutedims(reshape(u_V[:,1:tt_opt.ttv_rks[j]], tt_opt.ttv_rks[j-1], dims[j],tt_opt.ttv_rks[j]),(2,1,3))
+			tt_opt.ttv_vec[j-1] = reshape(u_V[:,1:tt_opt.ttv_rks[j]], tt_opt.ttv_rks[j-1], dims[j-1], tt_opt.ttv_rks[j])
 			tt_opt.ttv_ot[j-1] = 1
-			tt_opt.ttv_vec[j] = permutedims(reshape(Diagonal(s_V[1:tt_opt.ttv_rks[j]])*v_V'[1:tt_opt.ttv_rks[j],:],tt_opt.ttv_rks[j],dims[j],tt_opt.ttv_rks[j+1]),(2,1,3))
+			tt_opt.ttv_vec[j] = reshape(Diagonal(s_V[1:tt_opt.ttv_rks[j]])*v_V'[1:tt_opt.ttv_rks[j],:], tt_opt.ttv_rks[j], dims[j], tt_opt.ttv_rks[j+1])
 			tt_opt.ttv_ot[j] = 0
 		end
 	else #N=1
 		if left_to_right
 			l,q = lq(reshape(V,tt_opt.ttv_rks[j],:))
-			tt_opt.ttv_vec[j-1] = reshape(reshape(tt_opt.ttv_vec[j-1],tt_opt.ttv_dims[j-1]*tt_opt.ttv_rks[j-1],:)*l, tt_opt.ttv_dims[j-1],tt_opt.ttv_rks[j-1],:)
+			# Core (L, I, R) — unfold left core as (L*I, R) and absorb l on the right.
+			tt_opt.ttv_vec[j-1] = reshape(reshape(tt_opt.ttv_vec[j-1],tt_opt.ttv_rks[j-1]*tt_opt.ttv_dims[j-1],:)*l, tt_opt.ttv_rks[j-1], tt_opt.ttv_dims[j-1], :)
 			tt_opt.ttv_ot[j-1] = 0
-			tt_opt.ttv_vec[j] = permutedims(reshape(Matrix(q),tt_opt.ttv_rks[j],tt_opt.ttv_dims[j],tt_opt.ttv_rks[j+1]),(2,1,3))
+			tt_opt.ttv_vec[j] = reshape(Matrix(q), tt_opt.ttv_rks[j], tt_opt.ttv_dims[j], tt_opt.ttv_rks[j+1])
 			tt_opt.ttv_ot[j] = -1
-		else 
+		else
 			q,r = qr(reshape(V,tt_opt.ttv_rks[j]*tt_opt.ttv_dims[j],:))
-			@tensor vec_temp[i,α,β] := tt_opt.ttv_vec[j+1][i,ξ,β]*r[α,ξ]
-			tt_opt.ttv_vec[j+1] = vec_temp
+			# Right core (L, I, R) — r (α, ξ) × core (ξ, i*β) → (α, i*β). Single gemm.
+			let c = tt_opt.ttv_vec[j+1]
+				tt_opt.ttv_vec[j+1] = reshape(r * reshape(c, size(c,1), :),
+				                              size(r,1), size(c,2), size(c,3))
+			end
 			tt_opt.ttv_ot[j+1] = 0
-			tt_opt.ttv_vec[j] = permutedims(reshape(Matrix(q),tt_opt.ttv_rks[j],tt_opt.ttv_dims[j],tt_opt.ttv_rks[j+1]),(2,1,3))
+			tt_opt.ttv_vec[j] = reshape(Matrix(q), tt_opt.ttv_rks[j], tt_opt.ttv_dims[j], tt_opt.ttv_rks[j+1])
 			tt_opt.ttv_ot[j] = 1
 		end
 	end

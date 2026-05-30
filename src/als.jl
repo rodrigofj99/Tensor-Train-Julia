@@ -20,7 +20,8 @@ function init_H(x_tt::TTvector{T},A_tto::TToperator{T}) where {T<:Number}
 end
 
 function update_H!(x_vec::Array{T,3},A_vec::Array{T,4},Hi::Array{T,3},Him::Array{T,3}) where T<:Number
-	@tensoropt((ϕ,χ), Him[a,α,β] = conj.(x_vec)[j,α,ϕ]*Hi[z,ϕ,χ]*x_vec[k,β,χ]*A_vec[j,k,a,z]) #size (rim, rim, rAim)
+	# Vector core (L,I,R); operator core (L,i,j,R). Him: (R_A, L_x, L_x).
+	@tensoropt((ϕ,χ), Him[a,α,β] = conj.(x_vec)[α,j,ϕ]*Hi[z,ϕ,χ]*x_vec[β,k,χ]*A_vec[a,j,k,z])
 	nothing
 end
 
@@ -38,32 +39,54 @@ function init_Hb(x_tt::TTvector{T},b_tt::TTvector{T}) where {T<:Number}
 end
 
 function update_Hb!(x_vec::Array{T,3},b_vec::Array{T,3},H_bi::Array{T,2},H_bim::Array{T,2}) where T<:Number
-	@tensoropt((ϕ,χ), H_bim[α,β] = H_bi[ϕ,χ]*b_vec[i,β,χ]*conj.(x_vec)[i,α,ϕ])
+	# H_bim[α, β] = sum_{ϕ, χ, i} H_bi[ϕ, χ] * b_vec[β, i, χ] * conj(x_vec)[α, i, ϕ]. Two gemms.
+	# Step 1: bH[β, i, ϕ] = sum_χ b_vec[β, i, χ] * H_bi[χ, ϕ]. Flat (β*i, χ) × (χ, ϕ).
+	α, ni, ϕd = size(x_vec)
+	β, _, χd = size(b_vec)
+	bH = reshape(b_vec, β*ni, χd) * transpose(H_bi)   # (β*i, ϕ)
+	# Step 2: H_bim[α, β] = sum_{i, ϕ} conj(x_vec)[α, i, ϕ] × bH[β, i, ϕ].
+	#   Flatten conj(x_vec) (α, i*ϕ) × transpose(bH (β, i*ϕ)) → (α, β).
+	mul!(H_bim,
+	     reshape(conj.(x_vec), α, ni*ϕd),
+	     transpose(reshape(bH, β, ni*ϕd)))
 	nothing
 end
 
 function update_G!(x_vec::Array{T,3},A_vec::Array{T,4},Gi::AbstractArray{T,5},Gip::AbstractArray{T,5}) where T<:Number
-	@tensor Gip[j,α,k,β,J] = (conj.(x_vec)[l,ϕ,α]*(Gi[l,ϕ,m,χ,L]*x_vec[m,χ,β]))*A_vec[j,k,L,J] 
+	# Gi/Gip layout (L_x_bra, I_bra, L_x_ket, I_ket, R_A). Vector (L,I,R); operator (L,i,j,R).
+	@tensor Gip[α,j,β,k,J] = (conj.(x_vec)[ϕ,l,α]*(Gi[ϕ,l,χ,m,L]*x_vec[χ,m,β]))*A_vec[L,j,k,J]
 	nothing
 end
 
 function update_Gb!(x_vec::Array{T,3},b_vec::Array{T,3},G_bi::AbstractArray{T,3},G_bip::AbstractArray{T,3}) where T<:Number
-	@tensoropt((ϕ,χ), G_bip[i,α,β] = b_vec[i,ϕ,β]*G_bi[j,χ,ϕ]*conj.(x_vec)[j,χ,α])
-	nothing	
+	# G_b layout (L_x, I, R_b); vector (L,I,R).
+	# G_bip[α, i, β] = sum_{χ, j, ϕ} conj(x_vec)[χ, j, α] * G_bi[χ, j, ϕ] * b_vec[ϕ, i, β]. Two gemms.
+	χd, jd, αd = size(x_vec)   # x_vec (L_x_prev, I, L_x_curr=α)
+	ϕd, _, βd  = size(b_vec)
+	# Step 1: Xb[α, ϕ] = sum_{χ, j} conj(x_vec)[χ, j, α] × G_bi[χ, j, ϕ].
+	#   Flatten conj(x_vec) (χ*j, α), G_bi (χ*j, ϕ); transpose(X) × G.
+	Xb = transpose(reshape(conj.(x_vec), χd*jd, αd)) * reshape(G_bi, χd*jd, ϕd)  # (α, ϕ)
+	# Step 2: G_bip[α, i*β] = Xb[α, ϕ] × reshape(b_vec, ϕ, i*β).
+	mul!(reshape(G_bip, αd, size(b_vec,2)*βd),
+	     Xb,
+	     reshape(b_vec, ϕd, size(b_vec,2)*βd))
+	nothing
 end
 
-#full assemble of matrix K
+#full assemble of matrix K; local core layout (L_x, I, R_x), so K_dims = (L_x, I, R_x).
 function K_full(Gi::Array{T,5},Hi::Array{T,3},K_dims::NTuple{3,Int}) where T<:Number
 	K = zeros(T,prod(K_dims),prod(K_dims))
 	Krshp = reshape(K,(K_dims...,K_dims...))
-	@tensor Krshp[a,b,c,d,e,f] = Gi[a,b,d,e,z]*Hi[z,c,f] #size (ni,rim,ri,ni,rim,ri)
+	# Gi[L_x_bra, I_bra, L_x_ket, I_ket, R_A]; Hi[R_A, R_x_bra, R_x_ket].
+	@tensor Krshp[a,b,c,d,e,f] = Gi[a,b,d,e,z]*Hi[z,c,f]
 	return K
 end
 
 function Ksolve(Gi::Array{T,5},G_bi::Array{T,3},Hi::Array{T,3},H_bi::Array{T,2}) where T<:Number
-	K_dims = (size(Gi,1),size(Gi,2),size(Hi,2))
+	K_dims = (size(Gi,1),size(Gi,2),size(Hi,2))  # (L_x, I, R_x)
 	K = K_full(Gi,Hi,K_dims)
-	@tensor Pb[i,α1,α2] := G_bi[i,α1,β]*H_bi[α2,β] #size (ni,rim,ri)
+	# Pb[α1, i, α2] = G_b[α1, i, β] * H_b[α2, β]. Reshape (α1*i, β) × (β, α2) = (α1*i, α2). One gemm.
+	Pb = reshape(reshape(G_bi, size(G_bi,1)*size(G_bi,2), :) * transpose(H_bi), K_dims)
 	return reshape(K\Pb[:],K_dims)
 end
 
@@ -82,13 +105,14 @@ function K_eigmin(Gi::Array{T,5},Hi::Array{T,3},ttv_vec::Array{T,3};it_solver=fa
 		K = K_full(Gi,Hi,K_dims)
 		F = eigen(Hermitian(K),1:1)
 		return real(F.values[1])::Real,reshape(F.vectors[:,1],K_dims)::Array{T,3}
-	end	
+	end
 end
 
 function K_eiggenmin(Gi,Hi,Ki,Li,ttv_vec;it_solver=false,itslv_thresh=2500)
+	# Local core layout (L_x, I, R_x); a/d are L_x, b/e are I, c/f are R_x.
 	@tensor begin
-		K[a,b,c,d,e,f] := Gi[d,e,a,b,z]*Hi[z,f,c] #size (ni,rim,ri,ni,rim,ri)	
-		S[a,b,c,d,e,f] := Ki[d,e,a,b,z]*Li[z,f,c] #size (ni,rim,ri,ni,rim,ri)	
+		K[a,b,c,d,e,f] := Gi[d,e,a,b,z]*Hi[z,f,c]
+		S[a,b,c,d,e,f] := Ki[d,e,a,b,z]*Li[z,f,c]
 	end
 	if it_solver || prod(size(K)[1:3]) > itslv_thresh
 		r = lobpcg(reshape(K,prod(size(K)[1:3]),:),reshape(S,prod(size(S)[1:3]),:),false,ttv_vec[:],1;maxiter=500,tol=1e-8)
@@ -103,16 +127,17 @@ function left_core_move(x_tt::TTvector{T},V::Array{T,3},i::Int,x_rks) where {T<:
 	rim,ri = x_rks[i],x_rks[i+1]
 	ni = x_tt.ttv_dims[i]
 
-	# Prepare core movements
-	QV, RV = qr(reshape(permutedims(V, [1 3 2]), ni*ri, :)) #QV: ni*ri x ni*ri; RV ni*ri x rim
-
-	# Apply core movement 3.1
-	x_tt.ttv_vec[i] = permutedims(reshape(Matrix(QV)[:, 1:rim], ni, ri, :),[1 3 2])
-	x_tt.ttv_ot[i] = 1
-
-	# Apply core movement 3.2
-	@tensoropt((b,c,z) , Xim[a,b,c] := x_tt.ttv_vec[i-1][a,b,z]*RV[1:rim,:][c,z]) #size (nim,rim2,rim_new)
-	x_tt.ttv_vec[i-1] = Xim
+	# V has layout (L=rim, I=ni, R=ri). Unfold (rim, ni*ri) and LQ for right-orthogonal.
+	F = lq(reshape(V, rim, :))
+	# Move 3.1: site i becomes right-orthogonal.
+	x_tt.ttv_vec[i] = reshape(Matrix(F.Q), rim, ni, ri)
+	x_tt.ttv_ot[i] = -1
+	# Move 3.2: absorb L factor into right rank of site i-1.
+	# Reshape core (a*b, z) × Lf (z, c) → (a*b, c). Single gemm.
+	Lf = Matrix(F.L)
+	cprev = x_tt.ttv_vec[i-1]
+	x_tt.ttv_vec[i-1] = reshape(reshape(cprev, size(cprev,1)*size(cprev,2), :) * Lf,
+	                            size(cprev,1), size(cprev,2), size(Lf,2))
 	x_tt.ttv_ot[i-1] = 0
 	return x_tt
 end
@@ -120,15 +145,18 @@ end
 function right_core_move(x_tt::TTvector{T},V::Array{T,3},i::Int,x_rks) where {T<:Number}
 	rim,ri = x_rks[i],x_rks[i+1]
 	ni = x_tt.ttv_dims[i]
-	QV, RV = qr(reshape(V, ni*rim, :)) #QV: ni*rim x ni*rim; RV ni*rim x ri
 
-	# Apply core movement 3.1
-	x_tt.ttv_vec[i] = reshape(Matrix(QV)[:, 1:ri], ni, rim, :)
-	x_tt.ttv_ot[i] = -1
-
-	# Apply core movement 3.2
-	@tensoropt((b,c,z), Xip[a,b,c] := RV[1:ri,:][b,z]*x_tt.ttv_vec[i+1][a,z,c]) #size (nip,ri,rip)
-	x_tt.ttv_vec[i+1] = Xip
+	# V layout (L=rim, I=ni, R=ri). Unfold (rim*ni, ri) and QR for left-orthogonal.
+	F = qr(reshape(V, rim*ni, :))
+	# Move 3.1: site i becomes left-orthogonal.
+	x_tt.ttv_vec[i] = reshape(Matrix(F.Q)[:, 1:ri], rim, ni, ri)
+	x_tt.ttv_ot[i] = 1
+	# Move 3.2: absorb R factor into left rank of site i+1.
+	# Rf (a, z) × reshape core (z, b*c) → (a, b*c). Single gemm.
+	Rf = Matrix(F.R)[1:ri, :]
+	cnext = x_tt.ttv_vec[i+1]
+	x_tt.ttv_vec[i+1] = reshape(Rf * reshape(cnext, size(cnext,1), :),
+	                            size(Rf,1), size(cnext,2), size(cnext,3))
 	x_tt.ttv_ot[i+1] = 0
 	return x_tt
 end
@@ -161,13 +189,14 @@ function als_linsolv(A :: TToperator{T}, b :: TTvector{T}, tt_start :: TTvector{
 	G = Array{Array{T}}(undef, d)
 	G_b = Array{Array{T}}(undef, d)
 
-	# Initialize G[1], G_b[1], H[d] and H_b[d]
+	# G layout (L_x, I, L_x, I, R_A); G_b layout (L_x, I, R_b).
 	for i in 1:d
-		G[i] = zeros(T,dims[i],rks[i],dims[i],rks[i],A.tto_rks[i+1])
-		G_b[i] = zeros(dims[i],rks[i],b.ttv_rks[i+1])
+		G[i] = zeros(T,rks[i],dims[i],rks[i],dims[i],A.tto_rks[i+1])
+		G_b[i] = zeros(rks[i],dims[i],b.ttv_rks[i+1])
 	end
-	G[1] = reshape(A.tto_vec[1][:,:,1,:], dims[1],1,dims[1], 1, :)
-	G_b[1] = reshape(b.ttv_vec[1], dims[1], 1, :)
+	# A.tto_vec[1] has layout (1, i, j, R_A); slice the L=1 leg.
+	G[1] = reshape(A.tto_vec[1][1,:,:,:], 1, dims[1], 1, dims[1], :)
+	G_b[1] = reshape(b.ttv_vec[1], 1, dims[1], :)
 
 	#Initialize H and H_b
 	H = init_H(tt_opt,A)
@@ -230,12 +259,12 @@ function als_eigsolv(A :: TToperator{T},
 	# Define the array of ranks of tt_opt [r_0=1,r_1,...,r_d]
 	rks = copy(tt_start.ttv_rks)
 
-	# Initialize the array G
+	# G layout (L_x, I, L_x, I, R_A).
 	G = Array{Array{T}}(undef, d)
 	for i in 1:d
-		G[i] = zeros(T,dims[i],rks[i],dims[i],rks[i],A.tto_rks[i+1])
+		G[i] = zeros(T,rks[i],dims[i],rks[i],dims[i],A.tto_rks[i+1])
 	end
-	G[1] = reshape(A.tto_vec[1][:,:,1,:], dims[1], 1, dims[1], 1, :)
+	G[1] = reshape(A.tto_vec[1][1,:,:,:], 1, dims[1], 1, dims[1], :)
 
 	#Initialize H and H_b
 	H = init_H(tt_opt,A)
@@ -254,7 +283,8 @@ function als_eigsolv(A :: TToperator{T},
 				tt_opt = orthogonalize(tt_opt)
 				H = init_H(tt_opt,A)
 				for i in 1:d-1
-					Gtemp = zeros(dims[i+1],tt_opt.ttv_rks[i+1],dims[i+1],tt_opt.ttv_rks[i+1],A.tto_rks[i+2])
+					# G layout (L_x, I, L_x, I, R_A).
+					Gtemp = zeros(tt_opt.ttv_rks[i+1],dims[i+1],tt_opt.ttv_rks[i+1],dims[i+1],A.tto_rks[i+2])
 					Gtemp[1:size(G[i+1],1),1:size(G[i+1],2),1:size(G[i+1],3),1:size(G[i+1],4),1:size(G[i+1],5)] = G[i+1]
 					G[i+1] = Gtemp
 				end
@@ -302,13 +332,13 @@ function als_gen_eigsolv(A :: TToperator{T}, S::TToperator{T}, tt_start :: TTvec
 	G = Array{Array{T}}(undef, d)
 	K = Array{Array{T}}(undef, d) 
 
-	# Initialize G[1]
+	# G/K layout (L_x, I, L_x, I, R_op).
 	for i in 1:d
-		G[i] = zeros(dims[i],rks[i],dims[i],rks[i],A.tto_rks[i+1])
-		K[i] = zeros(dims[i],rks[i],dims[i],rks[i],S.tto_rks[i+1])
+		G[i] = zeros(rks[i],dims[i],rks[i],dims[i],A.tto_rks[i+1])
+		K[i] = zeros(rks[i],dims[i],rks[i],dims[i],S.tto_rks[i+1])
 	end
-	G[1] = reshape(A.tto_vec[1][:,:,1,:], dims[1],1,dims[1], 1, :)
-	K[1] = reshape(S.tto_vec[1][:,:,1,:], dims[1],1,dims[1], 1, :)
+	G[1] = reshape(A.tto_vec[1][1,:,:,:], 1, dims[1], 1, dims[1], :)
+	K[1] = reshape(S.tto_vec[1][1,:,:,:], 1, dims[1], 1, dims[1], :)
 
 	#Initialize H and H_b
 	H = init_H(tt_opt,A)
