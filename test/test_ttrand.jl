@@ -162,13 +162,13 @@ end
   A = ttv_to_tensor(A_pert)
 
   # Test with explicit ranks
-  A_ttrand = stta(A_pert;rks=[1,2,4,6,6,6,4,2,1])
+  A_ttrand = stta(A_pert,[1,2,4,6,6,6,4,2,1])
   A_rand = ttv_to_tensor(A_ttrand)
   @test isapprox(A,A_rand)
 
   # Test with seed parameters for reproducibility
-  A_stta1 = stta(A_pert;rks=[1,2,4,6,6,6,4,2,1], seed_left=7777, seed_right=8888)
-  A_stta2 = stta(A_pert;rks=[1,2,4,6,6,6,4,2,1], seed_left=7777, seed_right=8888)
+  A_stta1 = stta(A_pert,[1,2,4,6,6,6,4,2,1], seed_left=7777, seed_right=8888)
+  A_stta2 = stta(A_pert,[1,2,4,6,6,6,4,2,1], seed_left=7777, seed_right=8888)
   @test ttv_to_tensor(A_stta1) ≈ ttv_to_tensor(A_stta2)
 
   # Test with automatic rank selection
@@ -177,7 +177,7 @@ end
   @test isapprox(A,A_auto,atol=1e-6)
 
   # Test with different ranks
-  A_stta_different = stta(A_pert;rks=[1,2,4,4,4,4,4,2,1])
+  A_stta_different = stta(A_pert,[1,2,4,4,4,4,4,2,1])
   A_different = ttv_to_tensor(A_stta_different)
   @test isapprox(A,A_different,atol=1e-6)
 end
