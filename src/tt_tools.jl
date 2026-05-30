@@ -700,6 +700,24 @@ function mpo_Nparticle_to_matrix(A::TToperator{T,L},N) where {T,L}
   return mat
 end
 
+# Algebraic upper bound on the TT rank at bond k for a tensor with mode dimensions
+# `dims`: min(ℓ_max, prod(dims[1:k]), prod(dims[k+1:end])). Both products are
+# saturated at ℓ_max independently so a large left product cannot mask a small
+# right product (the typical case at boundary bonds).
+function bond_rank_cap(dims::NTuple{N,Int}, k::Int, ℓ_max::Int) where N
+  p_right = 1
+  @inbounds for i in N:-1:k+1
+    p_right > ℓ_max ÷ dims[i] && (p_right = ℓ_max; break)
+    p_right *= dims[i]
+  end
+  p_left = 1
+  @inbounds for i in 1:k
+    p_left > ℓ_max ÷ dims[i] && (p_left = ℓ_max; break)
+    p_left *= dims[i]
+  end
+  return min(p_left, p_right, ℓ_max)
+end
+
 #TTO representation of the identity matrix
 function id_tto(d;n_dim=2)
   return id_tto(Float64,d;n_dim=n_dim)

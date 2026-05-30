@@ -126,9 +126,16 @@ function ttrand_rounding(y::TTvector{T,N}, rks=default_rank_heuristic(y); orthog
         # Randomized QR decomposition
       @timeit timer "Randomized QR decomposition" begin
       @timeit timer "Sketch" begin
-        Zₖ = zeros(T, dims[k],out_rks[k],sketch_rks[k+1])
-        @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*W[k+1][αₖ₊₁,ρₖ₊₁]
-        Zₖ = reshape(Zₖ,dims[k]*out_rks[k],sketch_rks[k+1])
+        # Honour the per-bond target: take only the first rks[k+1] columns of
+        # the sketch (the heuristic over-provisions due to monotonic-p
+        # enforcement). Cap by sketch availability, the left algebraic row dim
+        # (dims[k]*out_rks[k]), and the right algebraic bound (bond_rank_cap).
+        target_width = min(rks[k+1], sketch_rks[k+1], dims[k]*out_rks[k],
+                           bond_rank_cap(dims, k, sketch_rks[k+1]))
+        Zₖ = zeros(T, dims[k],out_rks[k],target_width)
+        W_sub = view(W[k+1], :, 1:target_width)
+        @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*W_sub[αₖ₊₁,ρₖ₊₁]
+        Zₖ = reshape(Zₖ,dims[k]*out_rks[k],target_width)
       end
       @timeit timer "QR" begin
         Q, _ = qr!(Zₖ)
@@ -185,10 +192,14 @@ function ttrand_rounding(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TTvector{T,
         bₖ = reshape(b.ttv_vec[1], dims[1], 1, b.ttv_rks[2])
         @inbounds begin
           for k in 1:N-1
-            # Randomized QR decomposition
-            Zₖ = zeros(T, dims[k],out_rks[k],sketch_rks[k+1])
-            @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] := Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*WAy[k+1][αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[iₖ,ρₖ,αₖ₊₁]*Wb[k+1][αₖ₊₁,ρₖ₊₁]
-            Zₖ = reshape(Zₖ,dims[k]*out_rks[k],sketch_rks[k+1])
+            # Randomized QR decomposition — slice both sketches to the per-bond target.
+            target_width = min(rks[k+1], sketch_rks[k+1], dims[k]*out_rks[k],
+                               bond_rank_cap(dims, k, sketch_rks[k+1]))
+            Zₖ = zeros(T, dims[k],out_rks[k],target_width)
+            WAy_sub = view(WAy[k+1], :, :, 1:target_width)
+            Wb_sub  = view(Wb[k+1],  :,    1:target_width)
+            @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] := Ayₖ[iₖ,ρₖ,αₖ₊₁,βₖ₊₁]*WAy_sub[αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[iₖ,ρₖ,αₖ₊₁]*Wb_sub[αₖ₊₁,ρₖ₊₁]
+            Zₖ = reshape(Zₖ,dims[k]*out_rks[k],target_width)
             Q, _ = qr!(Zₖ)
             Q = Matrix(Q)
             out_rks[k+1] = size(Q,2)
@@ -247,11 +258,14 @@ function ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rks=default_ra
       @inbounds for k in 1:N-1
         # Randomized QR decomposition
       @timeit timer "Randomized QR decomposition" begin
-        Zₖ = zeros(T, dims[k],out_rks[k],sketch_rks[k+1])
+        target_width = min(rks[k+1], sketch_rks[k+1], dims[k]*out_rks[k],
+                           bond_rank_cap(dims, k, sketch_rks[k+1]))
+        Zₖ = zeros(T, dims[k],out_rks[k],target_width)
         for j=1:m
-          @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*W[j][k+1][αₖ₊₁,ρₖ₊₁]
+          Wj_sub = view(W[j][k+1], :, 1:target_width)
+          @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,ρₖ,ρₖ₊₁] += Yₖ[j][iₖ,ρₖ,αₖ₊₁]*Wj_sub[αₖ₊₁,ρₖ₊₁]
         end
-        Zₖ = reshape(Zₖ,dims[k]*out_rks[k],sketch_rks[k+1])
+        Zₖ = reshape(Zₖ,dims[k]*out_rks[k],target_width)
         Q, _ = qr!(Zₖ)
         Q = Matrix(Q)
         out_rks[k+1] = size(Q,2)
@@ -318,12 +332,15 @@ function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T
         end
         @inbounds begin
           for k in 1:N-1
-            # Randomized QR decomposition
-            Zₖ = zeros(T, dims[k],out_rks[k],sketch_rks[k+1])
+            # Randomized QR decomposition — slice each summand's sketch to the per-bond target.
+            target_width = min(rks[k+1], sketch_rks[k+1], dims[k]*out_rks[k],
+                               bond_rank_cap(dims, k, sketch_rks[k+1]))
+            Zₖ = zeros(T, dims[k],out_rks[k],target_width)
             for j=1:m
-              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,αₖ,βₖ₊₁] += Yₖ[j][iₖ,αₖ,αₖ₊₁]*W[j][k+1][αₖ₊₁,βₖ₊₁]
+              Wj_sub = view(W[j][k+1], :, 1:target_width)
+              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[iₖ,αₖ,βₖ₊₁] += Yₖ[j][iₖ,αₖ,αₖ₊₁]*Wj_sub[αₖ₊₁,βₖ₊₁]
             end
-            Zₖ = reshape(Zₖ,dims[k]*out_rks[k],sketch_rks[k+1])
+            Zₖ = reshape(Zₖ,dims[k]*out_rks[k],target_width)
             Q, _ = qr!(Zₖ)
             Q = Matrix(Q)
             out_rks[k+1] = size(Q,2)
@@ -383,12 +400,15 @@ function ttrand_rounding(y::NTuple{M,TTvector{T,N}}, rks=default_rank_heuristic(
                     )
       yₖ = reshape(yₖ, dims[1], 1, prod(y[i].ttv_rks[2] for i=1:M))
       @inbounds for k in 1:N-1
-        # Randomized QR decomposition
+        # Randomized QR decomposition — slice the Hadamard sketch to the per-bond target.
         @timeit timer "Randomized QR decomposition" begin
-          Zₖ = zeros(T, dims[k],out_rks[k],sketch_rks[k+1])
+          target_width = min(rks[k+1], sketch_rks[k+1], dims[k]*out_rks[k],
+                             bond_rank_cap(dims, k, sketch_rks[k+1]))
+          Zₖ = zeros(T, dims[k],out_rks[k],target_width)
           W_reshaped = reshape(W[k+1], prod(y[i].ttv_rks[k+1] for i=1:M), sketch_rks[k+1])
-          @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*W_reshaped[αₖ₊₁,ρₖ₊₁]
-          Zₖ = reshape(Zₖ,dims[k]*out_rks[k],sketch_rks[k+1])
+          W_sub = view(W_reshaped, :, 1:target_width)
+          @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[iₖ,ρₖ,ρₖ₊₁] = yₖ[iₖ,ρₖ,αₖ₊₁]*W_sub[αₖ₊₁,ρₖ₊₁]
+          Zₖ = reshape(Zₖ,dims[k]*out_rks[k],target_width)
           Q, _ = qr!(Zₖ)
           Q = Matrix(Q)
 

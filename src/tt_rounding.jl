@@ -169,33 +169,37 @@ end
 
 
 """
-Internal function for rounding. It's meant to be used by a wrapper
+Internal function for rounding. It's meant to be used by a wrapper.
+
+The per-bond truncation budget is `tol/√(N−1)` of the local unfolding's Frobenius
+norm; summed over the N−1 bonds this guarantees ‖x − x̂‖_F ≤ tol·‖x‖_F.
 """
 function _tt_rounding(y_tt::TTvector{T,N}; tol=1e-12, rmax=2^14, direction=:left) where {T<:Number,N}
+    tol_per_bond = N > 1 ? tol / sqrt(N - 1) : tol
     if direction == :left
         # =====================================================================
         # RIGHT-TO-LEFT COMPRESSION SWEEP (Requires Left-Orthogonalization)
-        # ===================================================================== 
-        if norm(y_tt.ttv_vec[N]) < tol 
+        # =====================================================================
+        if norm(y_tt.ttv_vec[N]) < tol
             return zeros_tt(T, y_tt.ttv_dims, y_tt.ttv_rks)
         end
-        
+
         for j in N:-1:2
             nj = y_tt.ttv_dims[j]
             rj_prev = y_tt.ttv_rks[j]
             rj = y_tt.ttv_rks[j+1]
-            
+
             # Unfold: (rj_prev) x (nj * rj)
             M = reshape(permutedims(y_tt.ttv_vec[j], (2, 1, 3)), rj_prev, nj * rj)
-            
+
             u, s, v = try
                 svd(M, full=false)
             catch e
                 e isa LAPACKException ? svd(M, full=false, alg=LinearAlgebra.QRIteration()) : rethrow(e)
             end
-            
+
             # Enforce maximum rank
-            _, k = floor(s, tol)
+            _, k = floor(s, tol_per_bond)
             k = min(k, rmax, sum(s .> 0.0))
             
             # Update current core (j) with V^T
@@ -237,10 +241,10 @@ function _tt_rounding(y_tt::TTvector{T,N}; tol=1e-12, rmax=2^14, direction=:left
             catch e
                 e isa LAPACKException ? svd(M, full=false, alg=LinearAlgebra.QRIteration()) : rethrow(e)
             end
-            
-            _, k = floor(s, tol)
+
+            _, k = floor(s, tol_per_bond)
             k = min(k, rmax, sum(s .> 0.0))
-            
+
             # Update current core (j) with U
             y_tt.ttv_vec[j] = reshape(@view(u[:, 1:k]), nj, rj_prev, k)
             

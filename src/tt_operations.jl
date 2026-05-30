@@ -286,6 +286,41 @@ function *(x::TTvector{T,N}, y::TTvector{T,N}) where {T<:Number,N}
     return out
 end
 
+"""
+    hadamard_norm_sq(y::NTuple{M,TTvector{T,N}}) -> T
+
+Compute `‖y[1] ⊙ y[2] ⊙ … ⊙ y[M]‖_F²` exactly, without materialising the
+rank-`prod_l rk_l` Hadamard product as a TT. Streaming chain-contraction
+with peak memory `O((prod_l rk_l)²)` and time
+`O(N · max_dim · (prod_l rk_l)³)`.
+
+This is essentially as expensive as `norm(prod_l y[l])` — useful as a
+verification tool for the cheaper sketch-based norm in
+`ttrand_rounding_adaptive`, but not intended for production paths where
+the randomized estimator (Al Daas et al., arXiv 2511.03598, Remark 3.1)
+is preferred.
+"""
+function hadamard_norm_sq(y::NTuple{M,TTvector{T,N}}) where {T<:Number,N,M}
+    @assert all(y[l].ttv_dims == y[1].ttv_dims for l in 1:M)
+    dims = y[1].ttv_dims
+    S = ones(T, 1, 1)
+    for k in 1:N
+        rk_new = prod(y[l].ttv_rks[k+1] for l in 1:M)
+        S_new = zeros(T, rk_new, rk_new)
+        for iₖ in 1:dims[k]
+            C = y[1].ttv_vec[k][iₖ, :, :]
+            for l in 2:M
+                C = kron(C, y[l].ttv_vec[k][iₖ, :, :])
+            end
+            mul!(S_new, C', S * C, one(T), one(T))
+        end
+        S = S_new
+    end
+    return real(S[1, 1])
+end
+
+hadamard_norm(y::NTuple{M,TTvector{T,N}}) where {T<:Number,N,M} = sqrt(hadamard_norm_sq(y))
+
 # ------------------------------------------------------------------------
 # dot returns the scalar dot product of two TTvectors A and B.
 #

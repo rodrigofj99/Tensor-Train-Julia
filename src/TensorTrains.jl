@@ -4,7 +4,7 @@ include("tt_tools.jl")
 export TTvector,TToperator,ttv_decomp,tto_decomp,ttv_to_tensor,tto_to_tensor,ones_tt,zeros_tt,zeros_tto,rand_tt,rand_tto,tt_to_vidal,vidal_to_tensor,vidal_to_left_canonical, json_to_mps, json_to_mpo, id_tto
 
 include("tt_operations.jl")
-export *, +, dot, -, /, outer_product
+export *, +, dot, -, /, outer_product, hadamard_norm, hadamard_norm_sq
 
 include("tt_rounding.jl")
 export tt_svdvals, tt_rounding!, tt_rounding, tt_compression_par, orthogonalize, tt_up_rks, norm, r_and_d_to_rks
@@ -42,6 +42,9 @@ export ttrand_rounding, stta, tt_hmt, default_rank_heuristic
 
 include("sketches.jl")
 export tt_recursive_sketch, stta_sketch, partial_contraction, tt_sketch
+
+include("tt_adaptive_rounding.jl")
+export ttrand_rounding_adaptive
 
 include("FCIDUMP.jl")
 export read_electron_integral_tensors,read_electron_integral_tensors_nosymmetry

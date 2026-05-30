@@ -87,6 +87,27 @@ end
   @test isapprox(A,A_rand_auto,atol=1e-6)
 end
 
+@testset "ttrand_rounding honours per-bond rank profile" begin
+  using Random
+  # A tapered (peaked) profile is exactly the case the recursive-sketch heuristic
+  # plateaus due to its monotonic-p enforcement. The output ranks must match the
+  # requested target ranks exactly (within algebraic caps).
+  Random.seed!(42)
+  N = 6
+  dims = ntuple(_ -> 4, N)
+  y = rand_tt(Float64, dims, 12; orthogonal=true)
+  target = [1, 4, 8, 10, 8, 4, 1]
+  ŷ = ttrand_rounding(y, target; block_rks=6, seed=2024)
+  @test ŷ.ttv_rks == target
+
+  # Same check on the NTuple (Hadamard) variant
+  ya = rand_tt(Float64, dims, 6; orthogonal=true)
+  yb = rand_tt(Float64, dims, 6; orthogonal=true)
+  target_h = [1, 4, 8, 10, 8, 4, 1]
+  ŷ_h = ttrand_rounding((ya, yb), target_h; block_rks=6, seed=2024)
+  @test ŷ_h.ttv_rks == target_h
+end
+
 @testset "stta_sketch" begin
   dims = (3,3,3,3)
   rks = [1,3,3,3,1]
