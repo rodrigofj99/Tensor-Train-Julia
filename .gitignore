@@ -1,3 +1,17 @@
 out/
 Challenge/
 examples/data/
+
+# macOS
+**/.DS_Store
+
+# LaTeX build byproducts
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.synctex.gz
+
+# generated data dumps / figures in examples/
+examples/*.json
+examples/*.pdf
