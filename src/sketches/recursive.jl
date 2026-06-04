@@ -79,37 +79,50 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
         max_sketch_buffer_size = maximum(block_rks_vec[k+1] * dims[k] * block_rks_vec[k] * p[k] for k in 1:N)
         sketch_buffer = Vector{T}(undef, max_sketch_buffer_size)
 
-        max_contract_buffer1_size = 0
-        max_contract_buffer2_size = 0
+        # Batched-kernel buffer for the (a, z, β, p) AV intermediate.
+        max_contract_buffer_size = 0
         for k in 1:N
           z = dims[k]
           a = A.ttv_rks[k]
           α = A.ttv_rks[k+1]
           b = block_rks_vec[k]
           β = block_rks_vec[k+1]
-          buf1_size, buf2_size = contract_sketch_core_backwards_buffers_size(z, a, α, β, b)
-          max_contract_buffer1_size = max(max_contract_buffer1_size, buf1_size)
-          max_contract_buffer2_size = max(max_contract_buffer2_size, buf2_size)
+          buf, = contract_sketch_core_backwards_batched_buffers_size(z, a, α, β, b, p[k])
+          max_contract_buffer_size = max(max_contract_buffer_size, buf)
         end
-        contract_buffer = (Vector{TW}(undef, max_contract_buffer1_size), Vector{TW}(undef, max_contract_buffer2_size))
+        contract_buffer = (Vector{TW}(undef, max_contract_buffer_size),)
       end
 
+      # GC.@preserve sketch_buffer and contract_buffer over the entire loop —
+      # both are unsafe_wrap'd inside generate_sketch_blocks and the contract
+      # kernels, and without preserve Julia's escape analysis can free them
+      # between calls while the wrapped Arrays are still alive. The resulting
+      # heap corruption only manifests during a later GC sweep (typically deep
+      # in the det baseline of a long-running sweep — a heisenbug).
       @timeit timer "contraction_reverse" begin
-        @inbounds for k in N:-1:1
-          @timeit timer "sketch_generation" begin
-            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; buffer=sketch_buffer, timer=timer)
-          end
+        GC.@preserve sketch_buffer contract_buffer begin
+          @inbounds for k in N:-1:1
+            @timeit timer "sketch_generation" begin
+              # generate_sketch_blocks returns (β, z, b, p); the batched kernel
+              # wants S in (z, β, b, p) layout so AV[a, z, β, p] reshapes
+              # directly to (a, z·β, p) for the per-p inner gemm. This permute
+              # is tiny (β·z·b·p ≈ 62 KB at the worst Matern bond) and
+              # eliminates a 128 MB permute on AV inside the kernel.
+              B_sketch_βzbp = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; buffer=sketch_buffer, timer=timer)
+              B_sketch = permutedims(B_sketch_βzbp, (2, 1, 3, 4))  # (z, β, b, p)
+            end
 
-          @timeit timer "W_allocation" begin
-            W[k] = zeros(TW, A.ttv_rks[k], block_rks_vec[k], p[k])
-          end
+            @timeit timer "W_allocation" begin
+              W[k] = zeros(TW, A.ttv_rks[k], block_rks_vec[k], p[k])
+            end
 
-          @timeit timer "tensor_contraction" begin
-            for j=1:p[k]
-              W_next_j = view(W[k+1],:,:,(k<N ? j : 1))
-              B_j = view(B_sketch,:,:,:,j)
-              W_k_j = view(W[k],:,:,j)
-              contract_sketch_core_backwards!(W_k_j, A.ttv_vec[k], B_j, W_next_j; buffer=contract_buffer)
+            @timeit timer "tensor_contraction" begin
+              if k < N
+                V_batched = view(W[k+1], :, :, 1:p[k])
+              else
+                V_batched = repeat(W[k+1], 1, 1, p[k])  # W[N+1] = ones(1,1,1)
+              end
+              contract_sketch_core_backwards!(W[k], A.ttv_vec[k], B_sketch, V_batched; buffer=contract_buffer)
             end
           end
         end
@@ -136,37 +149,38 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
         max_sketch_buffer_size = maximum(block_rks_vec[k] * dims[k] * block_rks_vec[k+1] * p[k+1] for k in 1:N)
         sketch_buffer = Vector{T}(undef, max_sketch_buffer_size)
 
-        max_contract_buffer1_size = 0
-        max_contract_buffer2_size = 0
+        max_contract_buffer_size = 0
         for k in 1:N
           z = dims[k]
           α = A.ttv_rks[k]
           a = A.ttv_rks[k+1]
           β = block_rks_vec[k]
           b = block_rks_vec[k+1]
-          buf1_size, buf2_size = contract_sketch_core_forwards_buffers_size(z, α, a, β, b)
-          max_contract_buffer1_size = max(max_contract_buffer1_size, buf1_size)
-          max_contract_buffer2_size = max(max_contract_buffer2_size, buf2_size)
+          buf1, _ = contract_sketch_core_forwards_batched_buffers_size(z, α, a, β, b, p[k+1])
+          max_contract_buffer_size = max(max_contract_buffer_size, buf1)
         end
-        contract_buffer = (Vector{TW}(undef, max_contract_buffer1_size), Vector{TW}(undef, max_contract_buffer2_size))
+        contract_buffer = (Vector{TW}(undef, max_contract_buffer_size), Vector{TW}(undef, max_contract_buffer_size))
       end
 
+      # GC.@preserve: see backward branch for rationale.
       @timeit timer "contraction_forward" begin
-        @inbounds for k in 1:N
-          @timeit timer "sketch_generation" begin
-            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; buffer=sketch_buffer, timer=timer)
-          end
+        GC.@preserve sketch_buffer contract_buffer begin
+          @inbounds for k in 1:N
+            @timeit timer "sketch_generation" begin
+              B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; buffer=sketch_buffer, timer=timer)
+            end
 
-          @timeit timer "W_allocation" begin
-            W[k+1] = zeros(TW, A.ttv_rks[k+1], block_rks_vec[k+1], p[k+1])
-          end
+            @timeit timer "W_allocation" begin
+              W[k+1] = zeros(TW, A.ttv_rks[k+1], block_rks_vec[k+1], p[k+1])
+            end
 
-          @timeit timer "tensor_contraction" begin
-            for j=1:p[k+1]
-              W_k_j = view(W[k],:,:,(k>1 ? j : 1))
-              B_j = view(B_sketch,:,:,:,j)
-              W_next_j = view(W[k+1],:,:,j)
-              contract_sketch_core_forwards!(W_next_j, A.ttv_vec[k], B_j, W_k_j; buffer=contract_buffer)
+            @timeit timer "tensor_contraction" begin
+              if k > 1
+                V_batched = view(W[k], :, :, 1:p[k+1])
+              else
+                V_batched = repeat(W[k], 1, 1, p[k+1])  # W[1] = ones(1,1,1) — tile.
+              end
+              contract_sketch_core_forwards!(W[k+1], A.ttv_vec[k], B_sketch, V_batched; buffer=contract_buffer)
             end
           end
         end

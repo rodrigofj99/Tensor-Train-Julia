@@ -2,7 +2,7 @@
 
 julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "9f7e306ce49d9387b4d1a777487d8d833045caa7"
+project_hash = "00db82ecf9228677a306df3008b52422d25b3c7d"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -71,6 +71,16 @@ deps = ["Colors"]
 git-tree-sha1 = "e092fa223bf66a3c41f9c022bd074d916dc303e7"
 uuid = "27a7e980-b3e6-11e9-2bcd-0b925532e340"
 version = "0.4.2"
+
+[[deps.AppleAccelerate]]
+deps = ["Libdl", "LinearAlgebra", "SparseArrays"]
+git-tree-sha1 = "d3fe615e394f765b7ef7e0a1ca10b007305d7e6f"
+uuid = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
+version = "0.6.0"
+weakdeps = ["AbstractFFTs"]
+
+    [deps.AppleAccelerate.extensions]
+    AppleAccelerateAbstractFFTsExt = "AbstractFFTs"
 
 [[deps.ArgCheck]]
 git-tree-sha1 = "f9e9a66c9b7be1ad7372bbd9b062d9230c30c5ce"

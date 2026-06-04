@@ -28,11 +28,10 @@ const DATA_PATH = joinpath(@__DIR__, "data", "matern_cores.jls")
 
 function load_matern_tt()::TTvector{Float64,8}
     isfile(DATA_PATH) || error("Missing $DATA_PATH — see top-of-file docstring for how to produce it.")
-    cores_raw = deserialize(DATA_PATH)
-    N = length(cores_raw)
-    # MATLAB convention: cores[i] has shape (L, I, R). Julia TTvector wants (I, L, R).
-    cores = [permutedims(c, (2, 1, 3)) for c in cores_raw]
-    dims = ntuple(i -> size(cores[i], 1), N)
+    cores = deserialize(DATA_PATH)
+    N = length(cores)
+    # Cores serialized in (L, I, R) layout — matches TTvector's post-refactor convention.
+    dims = ntuple(i -> size(cores[i], 2), N)
     rks = vcat(1, [size(c, 3) for c in cores])
     ot = zeros(Int, N)
     return TTvector{Float64,N}(N, cores, dims, rks, ot)
@@ -40,8 +39,6 @@ end
 
 function run_matern_sweep(; ref_tol::Float64 = 1e-10,
                             εs = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7),
-                            ℓ_min::Int = 4,
-                            ℓ_inc::Int = 4,
                             n_trials::Int = 50,
                             seed::Int = 1234,
                             dir::String = "out/matern_blockrks_sweep")
@@ -49,30 +46,46 @@ function run_matern_sweep(; ref_tol::Float64 = 1e-10,
     println("Loading Matérn kernel TT from $DATA_PATH …")
     y = load_matern_tt()
     N = y.N
+    # init_f=0.1 sets the per-bond INITIAL sketch width (10% of the bond's rank
+    # cap). ℓ_inc is only a small absolute FLOOR on the per-iteration increment:
+    # the increment grows locally inside the algorithm as 0.2·current_cols, so the
+    # effective step scales with the *local* bond rank, not the global ℓ_max.
+    # (Tying ℓ_inc to ℓ_max over-inflates mid-bond ranks where ℓ_max ≫ the
+    # typical bond rank — e.g. Kronecker/Hadamard products.)
+    ℓ_inc = 4
+    n_samples = max(ℓ_inc, 20)
+    init_f = 0.1
     println("  N=$N, mode size=$(y.ttv_dims[1]), input ranks=$(y.ttv_rks)")
+    println("  params: init_f=$init_f  ℓ_inc(floor)=$ℓ_inc  n_samples=$n_samples  (increment grows locally as 0.2·rank)")
     reference = tt_rounding(y; tol=ref_tol)
     println("  Reference (det @ tol=$ref_tol) max rk = $(maximum(reference.ttv_rks))")
     ref_norm = norm(reference)
     println("  ‖ref‖ = $(round(ref_norm, sigdigits=6))")
 
+    # `orth`: whether to QR-orthogonalize the per-block sketch vectors.
+    #   `false` matches MATLAB's KRP (raw Gaussian, no normalisation) — Khatri-Rao
+    #     in the strict sense of the original paper.
+    #   `true` is our TTStack-style orthogonalised sketch (within-block QR).
     variants = (
-      (label="KRP",       blk=1, inc=1),
-      (label="N/ext=1",   blk=N, inc=1),
-      (label="N/ext=8",   blk=N, inc=8),
-      (label="N/ext=16",  blk=N, inc=16),
-      (label="N/ext=32",  blk=N, inc=32),
+      (label="KRP/Gauss", blk=1, inc=1, orth=false),
+      (label="KRP",       blk=1, inc=1, orth=true),
+      (label="N/ext=1",   blk=N, inc=1, orth=true),
+      (label="N/ext=8",   blk=N, inc=8, orth=true),
+      (label="N/ext=16",  blk=N, inc=16, orth=true),
+      (label="N/ext=32",  blk=N, inc=32, orth=true),
     )
 
     println("\n--- Warmup ---")
     for v in variants
-        _ = ttrand_rounding_adaptive(y, first(εs); ℓ_min=ℓ_min, ℓ_inc=ℓ_inc,
+        _ = ttrand_rounding_adaptive(y, first(εs); ℓ_min=1, init_f=init_f, ℓ_inc=ℓ_inc,
+                                      n_samples=n_samples, orthogonal=v.orth,
                                       block_rks=v.blk, block_rks_inc=v.inc, seed=seed)
     end
     _ = tt_rounding(y; tol=first(εs))
 
     adapt_results = Dict{String, Dict{Symbol, Any}}()
     for v in variants
-        println("\n--- Adaptive sweep $(v.label) (block_rks=$(v.blk), block_rks_inc=$(v.inc), ℓ_inc=$ℓ_inc) ---")
+        println("\n--- Adaptive sweep $(v.label) (block_rks=$(v.blk), block_rks_inc=$(v.inc), orth=$(v.orth), ℓ_inc=$ℓ_inc) ---")
         flush(stdout)
         d = Dict{Symbol, Any}(:ε => Float64[], :rk_med => Float64[],
                               :err_med => Float64[], :err_q25 => Float64[],
@@ -88,7 +101,9 @@ function run_matern_sweep(; ref_tol::Float64 = 1e-10,
             for t = 1:n_trials
                 local ŷ
                 tm = @elapsed ŷ = ttrand_rounding_adaptive(y, ε;
-                                                           ℓ_min=ℓ_min, ℓ_inc=ℓ_inc,
+                                                           ℓ_min=1, init_f=init_f, ℓ_inc=ℓ_inc,
+                                                           n_samples=n_samples,
+                                                           orthogonal=v.orth,
                                                            block_rks=v.blk,
                                                            block_rks_inc=v.inc,
                                                            seed=seed + 1000*t)
@@ -150,6 +165,7 @@ function run_matern_sweep(; ref_tol::Float64 = 1e-10,
         @printf("  tol=%.0e → max rk=%d, err=%.3e, t=%.3fs\n",
                 ε, maximum(ŷ.ttv_rks), err, median(times))
     end
+    serialize(joinpath(dir, "det.jls"), det)
 
     variant_labels = [v.label for v in variants]
     plot_matern_sweep(adapt_results, det; N=N, variant_labels=variant_labels,
@@ -157,12 +173,14 @@ function run_matern_sweep(; ref_tol::Float64 = 1e-10,
     return (adapt=adapt_results, det=det)
 end
 
-const _VARIANT_COLOURS = Dict("KRP"      => :tomato,
+const _VARIANT_COLOURS = Dict("KRP/Gauss" => :purple,
+                              "KRP"      => :tomato,
                               "N/ext=1"  => :gold,
                               "N/ext=8"  => :darkorange,
                               "N/ext=16" => :firebrick,
                               "N/ext=32" => :darkred)
-const _VARIANT_MARKERS = Dict("KRP"      => :circle,
+const _VARIANT_MARKERS = Dict("KRP/Gauss" => :xcross,
+                              "KRP"      => :circle,
                               "N/ext=1"  => :star5,
                               "N/ext=8"  => :diamond,
                               "N/ext=16" => :utriangle,

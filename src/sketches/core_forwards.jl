@@ -61,6 +61,49 @@ function contract_sketch_core_forwards_buffers_size(z::Int, α::Int, a::Int, β:
   end
 end
 
+"""
+    contract_sketch_core_forwards!(W, A, S, V; buffer=(nothing,nothing))
+
+Batched (p-axis) version of the forward A·S·V kernel.
+  W: (a, b, p) — output, modified in-place
+  A: (α, z, a) — shared across p
+  S: (β, z, b, p) — block sketches, per-p
+  V: (α, β, p) — previous sketch weights, per-p
+
+Symmetric to the backward batched kernel: contracts α first via one batched
+`V_batched' × A_flat` gemm of shape `(β*p, α) × (α, z*a)`, then runs a per-p
+inner gemm. See backward variant for ordering rationale.
+"""
+function contract_sketch_core_forwards!(W::AbstractArray{T,3}, A::AbstractArray{T,3}, S::AbstractArray{T,4}, V::AbstractArray{T,3};
+                                buffer=(nothing,nothing)) where T
+  a, b, p = size(W)
+  α, β, _ = size(V)
+  z = size(A, 2)
+  @assert size(A) === (α, z, a)        "Factor A has the wrong dimensions: need $((α,z,a)), got $(size(A))"
+  @assert size(V) === (α, β, p)        "Factor V has the wrong dimensions: need $((α,β,p)), got $(size(V))"
+  @assert size(S) === (β, z, b, p)     "Factor S has the wrong dimensions: need $((β,z,b,p)), got $(size(S))"
+
+  # Step 1: VA[β*p, z*a] = V_batched'[β*p, α] × A_flat[α, z*a] — one batched gemm
+  # (matches the unbatched order-1 path: tall left factor with α reduced first).
+  V_mat   = reshape(V, α, β*p)
+  A_flat  = reshape(A, α, z*a)
+  VA      = mul!!(transpose(V_mat), A_flat, buffer=buffer[2])
+  VA_4d   = reshape(VA, β, p, z, a)
+  # Permute (β, p, z, a) → (β, z, a, p) so per-p slice is contiguous (β*z, a).
+  VA_perm = permutedims!!(VA_4d, (1, 3, 4, 2), buffer=buffer[1])
+  VA_perm_3d = reshape(VA_perm, β*z, a, p)
+
+  # Step 2 per-p: W[:, :, j] = VA_perm[:, :, j]' × reshape(S[:, :, :, j], β*z, b)
+  @inbounds for j in 1:p
+    @views mul!(W[:, :, j], transpose(VA_perm_3d[:, :, j]), reshape(S[:, :, :, j], β*z, b))
+  end
+  return W
+end
+
+function contract_sketch_core_forwards_batched_buffers_size(z::Int, α::Int, a::Int, β::Int, b::Int, p::Int)
+  return (β*z*a*p, β*z*a*p)  # buffer[1] for VA_perm, buffer[2] for VA
+end
+
 function contract_sketch_core_forwards!(W::AbstractArray{T,3}, A::AbstractArray{T,3}, B::AbstractArray{T,4}, S::AbstractArray{T,3}, V::AbstractArray{T,3};
                                 buffer=(nothing,nothing,nothing)) where T
 

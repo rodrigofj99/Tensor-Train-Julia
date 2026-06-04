@@ -3,9 +3,9 @@
     contract_sketch_core_backwards!(W, A, B, S, V; buffer=(nothing,nothing,nothing), timer=TimerOutput())
 
 Efficient contraction kernel for backward tensor train sketching:
-W[a,b] = A[z,a,α] * S[β,z,b] * V[α,β]
+W[a,b] = A[a,z,α] * V[α,β] * S[β,z,b]
 or
-W[a,b,c] = A[z,a,α] * B[ζ,z,b,β] * S[γ,ζ,c] * V[α,β,γ]
+W[a,b,c] = A[a,z,α] * B[b,ζ,z,β] * S[γ,ζ,c] * V[α,β,γ]
 
 Uses adaptive contraction ordering based on rank sizes to minimize overall cost:
 # Arguments
@@ -68,6 +68,50 @@ function contract_sketch_core_backwards_buffers_size(z::Int, a::Int, α::Int, β
   else
     return (α*z*b, a*α*z)  # buffer[1] for VS, buffer[2] for A_permuted
   end
+end
+
+"""
+    contract_sketch_core_backwards!(W, A, S, V; buffer=(nothing,))
+
+Batched (p-axis) version of the A·S·V backward kernel.
+  W: (a, b, p) — output, modified in-place
+  A: (a, z, α) — shared across p
+  S: (z, β, b, p) — block sketches, per-p (note: physical mode z FIRST)
+  V: (α, β, p) — previous sketch weights, per-p
+
+Always uses order A (contract α first): the leading gemm
+`A_unfold[a*z, α] × V_batched[α, β*p]` is a single BLAS call regardless of p.
+The natural `AV[a, z, β, p]` reshape matches `S[z, β, b, p]` directly — the
+non-batched kernel's `(a, z, β) → (a, β, z)` AV permute is **eliminated** by
+storing S with z first. This is cheap because it pushes the (much smaller)
+`(β·z·b·p)` permute to S, but on B_sketch — see recursive.jl for the
+corresponding generation step.
+"""
+function contract_sketch_core_backwards!(W::AbstractArray{T,3}, A::AbstractArray{T,3}, S::AbstractArray{T,4}, V::AbstractArray{T,3};
+                                buffer=(nothing,)) where T
+  a, b, p = size(W)
+  α, β, _ = size(V)
+  z = size(A, 2)
+  @assert size(A) === (a, z, α)        "Factor A has the wrong dimensions: need $((a,z,α)), got $(size(A))"
+  @assert size(V) === (α, β, p)        "Factor V has the wrong dimensions: need $((α,β,p)), got $(size(V))"
+  @assert size(S) === (z, β, b, p)     "Factor S has the wrong dimensions: need $((z,β,b,p)), got $(size(S))"
+
+  # Step 1: AV[a*z, β*p] = A_unfold[a*z, α] × V_batched[α, β*p] — one batched gemm
+  AV = mul!!(reshape(A, a*z, α), reshape(V, α, β*p), buffer=buffer[1])
+  AV_4d = reshape(AV, a, z, β, p)
+  AV_3d = reshape(AV_4d, a, z*β, p)  # pure reshape — S's (z, β) layout matches
+
+  # Step 2 per-p: W[:, :, j] = AV[:, :, j] × reshape(S[:, :, :, j], z*β, b)
+  @inbounds for j in 1:p
+    @views mul!(W[:, :, j], AV_3d[:, :, j], reshape(S[:, :, :, j], z*β, b))
+  end
+  return W
+end
+
+function contract_sketch_core_backwards_batched_buffers_size(z::Int, a::Int, α::Int, β::Int, b::Int, p::Int)
+  # Single buffer of (a, z, β, p) for the AV gemm output. No second buffer
+  # needed since the (a, z, β) → (a, β, z) permute is gone.
+  return (a*z*β*p,)
 end
 
 function contract_sketch_core_backwards!(W::AbstractArray{T,3}, A::AbstractArray{T,3}, B::AbstractArray{T,4}, S::AbstractArray{T,3}, V::AbstractArray{T,3};

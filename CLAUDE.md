@@ -69,6 +69,7 @@ The codebase is organized into focused modules in `src/`:
 - **tt_operations.jl**: Arithmetic operations (+, -, *, /, dot, outer_product)
 - **tt_rounding.jl**: Compression and orthogonalization (tt_rounding, orthogonalize, tt_svdvals, norm)
 - **tt_randtools.jl**: Randomized algorithms (ttrand_rounding, stta, tt_hmt for sketching)
+- **tt_adaptive_rounding.jl**: Adaptive randomized TT rounding to a target Frobenius tolerance (`ttrand_rounding_adaptive`); recursive-sketch helpers live in `src/sketches/`
 - **als.jl**: Alternating Linear Scheme (one-site DMRG) for linear systems and eigenvalue problems
 - **mals.jl**: Modified ALS (two-site DMRG)
 - **dmrg.jl**: DMRG with scheduling (DMRGScheduler, sweep schedules, adaptive rank control)
@@ -96,9 +97,29 @@ DMRG uses a scheduler system (`DMRGScheduler`) with:
 - Critical for numerical stability in DMRG
 
 **Randomized Methods**: `tt_randtools.jl` implements sketching-based compression:
-- `ttrand_rounding`: Randomized TT rounding
+- `ttrand_rounding`: Randomized TT rounding (fixed target ranks)
 - `stta`: Sketched TT approximation
 - `tt_hmt`: TT-HMT for randomized compression
+
+`tt_adaptive_rounding.jl` implements `ttrand_rounding_adaptive` (Al Daas et al.,
+arXiv:2511.03598): a single left-to-right sweep that grows each bond's basis from a
+recursive (TTStack) sketch until a sketch-based residual estimate falls below the
+per-bond budget `τ = ε·‖y‖_F/√(N-1)`. Overloads cover a single TT, a linear
+combination `Σ αⱼ yⱼ`, an operator residual `A·y − b`, and a Hadamard product
+`y₁ ⊙ … ⊙ y_M` — each sketching the target implicitly (never forming it). Key knobs:
+- `init_f`: per-bond *initial* basis width as a fraction of the bond's rank cap
+  (localizes the `ℓ_min` floor).
+- `ℓ_inc`: small absolute floor on the per-iteration increment; the increment is
+  otherwise local (`0.2·current_cols`), so it scales with the bond rank, **not**
+  `ℓ_max`. Do not tie `ℓ_inc` to `ℓ_max` — on Kronecker/Hadamard products `ℓ_max`
+  (the Kronecker rank) far exceeds typical bond ranks and over-inflates mid-bond
+  ranks and runtime.
+- `block_rks` / `block_rks_inc`: sketch block ranks for the initial / extension
+  sketches (TTStack vs pure-KRP behaviour).
+
+The basis-expansion helper `expand_basis!` uses two QR sweeps (orthonormalize,
+then project ⊥ Q and re-orthonormalize) and a rank-revealing fallback; the residual
+slice fed to it is sized to `max_basis - current_cols`, so it never over-extracts.
 
 ### Physics Models
 
@@ -127,6 +148,21 @@ Tests are organized by module functionality:
 - **Tensor contractions**: Use `@tensor` and `@tensoropt` macros from TensorOperations.jl
 - **Orthogonality tracking**: Always update `ttv_ot` or `tto_ot` when modifying cores
 - **Type parameters**: TTvector and TToperator are parameterized by element type `T` and number of dimensions `M`
+
+## BLAS/LAPACK backend (Apple Silicon)
+
+On Apple Silicon, prefer the default **OpenBLAS** for any correctness-sensitive
+work. Apple's **Accelerate** *LAPACK* (the ILP64 path Julia uses via
+`AppleAccelerate`) has an intermittent, silent correctness bug on the large
+chained SVD/QR factorizations in `tt_rounding`/`orthogonalize` (observed on
+macOS 26 / M-series): the same deterministic rounding returns a wrong result on
+~10–85% of repeated calls (dominant singular component dropped, ranks inflated),
+while OpenBLAS is always correct. Accelerate's *BLAS* (gemm) is fine — only its
+LAPACK is affected (this is why MATLAB, which pairs Accelerate BLAS with NAG
+LAPACK, is unaffected). If you need Accelerate's matrix-engine speed, a hybrid
+(Accelerate BLAS + OpenBLAS LAPACK via `lbt_set_forward`) is correct; otherwise
+run benchmarks under plain OpenBLAS so adaptive and deterministic timings share
+one backend.
 
 ## Git Conventions
 

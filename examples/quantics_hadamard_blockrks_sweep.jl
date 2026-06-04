@@ -5,6 +5,7 @@ using Statistics
 using Printf
 using CairoMakie
 using QuanticsTCI
+using Serialization
 
 include("quantics_example.jl")
 
@@ -51,9 +52,7 @@ function run_blockrks_sweep(; R::Int = 20,
                               tci_tol::Float64 = 1e-10,
                               ref_tol::Float64 = 1e-10,
                               εs = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8),
-                              ℓ_min::Int = 4,
-                              ℓ_inc::Int = 4,
-                              n_trials::Int = 1000,
+                              n_trials::Int = 50,
                               seed::Int = 1234,
                               dir::String = "out/quantics_hadamard_blockrks_sweep")
     mkpath(dir)
@@ -66,19 +65,35 @@ function run_blockrks_sweep(; R::Int = 20,
     ref_norm  = norm(reference)
     println("Reference norm = $(round(ref_norm, sigdigits=6))")
 
-    # Four variants — fix init at N for the last three, sweep inc; first is pure KRP.
+    # init_f=0.1 sets the per-bond INITIAL sketch width. ℓ_inc is only a small
+    # absolute FLOOR on the increment; the per-iteration growth is local
+    # (0.2·current_cols inside the algorithm), so the effective step scales with
+    # the local bond rank, not the global ℓ_max. This matters especially for the
+    # Hadamard/Kronecker product, where ℓ_max (the Kronecker rank, ~720) is far
+    # larger than the true bond ranks — a ℓ_max-tied increment over-inflates the
+    # mid-bond ranks (bonds 25–55).
+    ℓ_inc = 4
+    n_samples = max(ℓ_inc, 20)
+    init_f = 0.1
+    println("  N=$N, mode size=$(tts[1].ttv_dims[1]), raw max rank=$(maximum(raw_product.ttv_rks))")
+    println("  params: init_f=$init_f  ℓ_inc(floor)=$ℓ_inc  n_samples=$n_samples  (increment grows locally as 0.2·rank)")
+
+    # Six variants — pure KRP (Gaussian, MATLAB-style + within-block-QR), plus
+    # four N init / varying ext block ranks. `orth` toggles the within-block QR.
     variants = (
-      (label="KRP",      blk=1, inc=1),
-      (label="N/ext=1",  blk=N, inc=1),
-      (label="N/ext=8",  blk=N, inc=8),
-      (label="N/ext=16", blk=N, inc=16),
-      (label="N/ext=32", blk=N, inc=32),
+      (label="KRP/Gauss", blk=1, inc=1, orth=false),
+      (label="KRP",       blk=1, inc=1, orth=true),
+      (label="N/ext=1",   blk=N, inc=1, orth=true),
+      (label="N/ext=8",   blk=N, inc=8, orth=true),
+      (label="N/ext=16",  blk=N, inc=16, orth=true),
+      (label="N/ext=32",  blk=N, inc=32, orth=true),
     )
 
     # JIT warmup (untimed)
     println("\n--- Warmup ---")
     for v in variants
-        _ = ttrand_rounding_adaptive(tts, first(εs); ℓ_min=ℓ_min, ℓ_inc=ℓ_inc,
+        _ = ttrand_rounding_adaptive(tts, first(εs); ℓ_min=1, init_f=init_f, ℓ_inc=ℓ_inc,
+                                      n_samples=n_samples, orthogonal=v.orth,
                                       block_rks=v.blk, block_rks_inc=v.inc, seed=seed)
     end
     _ = tt_rounding(raw_product; tol=first(εs))
@@ -86,7 +101,8 @@ function run_blockrks_sweep(; R::Int = 20,
     # --- Adaptive sweeps per variant ---
     adapt_results = Dict{String, Dict{Symbol, Any}}()
     for v in variants
-        println("\n--- Adaptive sweep $(v.label) (block_rks=$(v.blk), block_rks_inc=$(v.inc), ℓ_inc=$ℓ_inc) ---")
+        println("\n--- Adaptive sweep $(v.label) (block_rks=$(v.blk), block_rks_inc=$(v.inc), orth=$(v.orth), ℓ_inc=$ℓ_inc) ---")
+        flush(stdout)
         d = Dict{Symbol, Any}(:ε => Float64[], :rk_med => Float64[],
                               :err_med => Float64[], :err_q25 => Float64[],
                               :err_q75 => Float64[],
@@ -101,7 +117,9 @@ function run_blockrks_sweep(; R::Int = 20,
             for t = 1:n_trials
                 local ŷ
                 tm = @elapsed ŷ = ttrand_rounding_adaptive(tts, ε;
-                                                           ℓ_min=ℓ_min, ℓ_inc=ℓ_inc,
+                                                           ℓ_min=1, init_f=init_f, ℓ_inc=ℓ_inc,
+                                                           n_samples=n_samples,
+                                                           orthogonal=v.orth,
                                                            block_rks=v.blk,
                                                            block_rks_inc=v.inc,
                                                            seed=seed + 1000*t)
@@ -129,9 +147,15 @@ function run_blockrks_sweep(; R::Int = 20,
             push!(d[:rk_profile_q75], q75_profile)
             @printf("  ε=%.0e → max rk=%.0f, err=%.3e, t=%.3fs (range %.2e–%.2e)\n",
                     ε, median(rks), median(errs), median(times), minimum(errs), maximum(errs))
+            flush(stdout)
+            serialize(joinpath(dir, "partial_adapt_$(replace(v.label, '/'=>'_'))_ε$ε.jls"),
+                      (label=v.label, ε=ε, errs=errs, rks=rks, times=times, rk_profiles=rk_profiles))
         end
         adapt_results[v.label] = d
+        serialize(joinpath(dir, "adapt_$(replace(v.label, '/'=>'_')).jls"), d)
+        flush(stdout)
     end
+    serialize(joinpath(dir, "adapt_all.jls"), adapt_results)
 
     # --- Deterministic baseline at matched tolerance ---
     # Form the Kronecker raw_product inside the timer per trial — this is the
@@ -158,6 +182,7 @@ function run_blockrks_sweep(; R::Int = 20,
         @printf("  tol=%.0e → max rk=%d, err=%.3e, t=%.3fs\n",
                 ε, maximum(ŷ.ttv_rks), err, median(times))
     end
+    serialize(joinpath(dir, "det.jls"), det)
 
     variant_labels = [v.label for v in variants]
     plot_blockrks_sweep(adapt_results, det; R=R, N=N, variant_labels=variant_labels,
@@ -165,12 +190,14 @@ function run_blockrks_sweep(; R::Int = 20,
     return (adapt=adapt_results, det=det)
 end
 
-const _VARIANT_COLOURS = Dict("KRP"      => :tomato,
+const _VARIANT_COLOURS = Dict("KRP/Gauss" => :purple,
+                              "KRP"      => :tomato,
                               "N/ext=1"  => :gold,
                               "N/ext=8"  => :darkorange,
                               "N/ext=16" => :firebrick,
                               "N/ext=32" => :darkred)
-const _VARIANT_MARKERS = Dict("KRP"      => :circle,
+const _VARIANT_MARKERS = Dict("KRP/Gauss" => :xcross,
+                              "KRP"      => :circle,
                               "N/ext=1"  => :star5,
                               "N/ext=8"  => :diamond,
                               "N/ext=16" => :utriangle,
@@ -280,4 +307,6 @@ function plot_blockrks_sweep(adapt, det; R, N, variant_labels, n_trials, ℓ_inc
     return fig
 end
 
-run_blockrks_sweep()
+if abspath(PROGRAM_FILE) == @__FILE__
+    run_blockrks_sweep(n_trials=5)
+end

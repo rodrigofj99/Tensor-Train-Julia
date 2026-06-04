@@ -51,9 +51,13 @@ function qtt_to_ttvector(qtt_obj::QuanticsTCI.QuanticsTensorCI2{T}) where {T}
     cores = qtt_obj.tci.sitetensors
     N = length(cores)
 
+    # TCI's sitetensors are already in (L, I, R) layout — matches TTvector's
+    # post-refactor convention (see TensorCrossInterpolation
+    # abstracttensortrain.jl: size(.., 1) is the link dim, size(.., 2:end-1) the
+    # local dims). No permutedims needed.
     ttv_cores = Vector{Array{T,3}}(undef, N)
     for i=1:N
-        ttv_cores[i] = permutedims(cores[i], (2,1,3))
+        ttv_cores[i] = copy(cores[i])
     end
 
     # Determine dimensions - for quantics, should be all binary
