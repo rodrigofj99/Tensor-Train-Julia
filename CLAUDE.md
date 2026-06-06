@@ -117,6 +117,16 @@ combination `Σ αⱼ yⱼ`, an operator residual `A·y − b`, and a Hadamard p
 - `block_rks` / `block_rks_inc`: sketch block ranks for the initial / extension
   sketches (TTStack vs pure-KRP behaviour).
 
+**Oblivious-embedding facts (do not re-derive these the hard way).** TTStack is an
+*oblivious* (data-independent) subspace embedding: its distortion depends on the
+embedding dimension and the dimension of the subspace being embedded, **not on the
+internal TT rank of the vectors**. A high-rank and a low-rank TT are sketched with the
+same fidelity at a given embedding size — so the recursive/embedding rank never needs to
+exceed (or even track) the vectors' TT ranks. Conversely, the pure Khatri–Rao product
+sketch (`block_rks=1`, `orthogonal=false`) is **worst for rank-1 TTs**: its variance is
+highest there and improves as the input rank grows, which is the opposite of the
+intuition that low-rank inputs are "easier" to sketch.
+
 The basis-expansion helper `expand_basis!` uses two QR sweeps (orthonormalize,
 then project ⊥ Q and re-orthonormalize) and a rank-revealing fallback; the residual
 slice fed to it is sized to `max_basis - current_cols`, so it never over-extracts.
@@ -148,6 +158,15 @@ Tests are organized by module functionality:
 - **Tensor contractions**: Use `@tensor` and `@tensoropt` macros from TensorOperations.jl
 - **Orthogonality tracking**: Always update `ttv_ot` or `tto_ot` when modifying cores
 - **Type parameters**: TTvector and TToperator are parameterized by element type `T` and number of dimensions `M`
+- **Rounding a solution vs the residual it produces**: rounding a TT solution `x` at tolerance
+  `δ` perturbs the residual of a linear system by `‖A·δx‖ ≈ ‖A‖·δ·‖x‖`. For a **stiff**
+  operator (`‖A‖ ≫ 1`, e.g. an unpreconditioned FEM stiffness operator with `‖A‖~1e3–1e4`),
+  a seemingly tight `tol=1e-8` round inflates `‖Ax−b‖` to `~1e-5`. **Do not round the
+  un-preconditioned solution at a loose tolerance**: round the *preconditioned* variable `u`
+  (where `x = M⁻¹u` and `‖A·M⁻¹‖≈1`, so rounding is harmless), or round `x` at `tol/‖A‖`.
+  This was the (config-invariant, hence very confusing) residual floor in the cookie
+  sketched-GMRES experiments — the iterate's true residual was already `~5e-8`, but a final
+  `tt_rounding(x; tol=1e-8)` blew the *reported* residual up to `~3e-5`.
 
 ## BLAS/LAPACK backend (Apple Silicon)
 

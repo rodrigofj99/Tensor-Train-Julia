@@ -360,16 +360,21 @@ function expand_basis!(H::TToperator{T,N},
                       orthogonal::Bool=true,
                       block_rks=8,
                       seed::Int=1234,
+                      prec=identity,
                       k_trunc::Int=length(B_window)) where {T,N}
     # rks = ones(Int, N+1); rks[1] = max(s, rmax); rks[2:N] .= rmax
 
     b_prev   = B_window[end]
     dims     = b_prev.ttv_dims
+    # Right preconditioning: the operator image is H·(M⁻¹ b_prev). `prec` preserves ranks,
+    # so only the operator-image construction below uses `w_prev`; the Gram–Schmidt
+    # subtraction keeps the stored (unpreconditioned) basis vectors in `B_window`.
+    w_prev   = prec(b_prev)
 
-    # ── Sketch of H*b_prev
+    # ── Sketch of H*w_prev
 
-    sketch_Hb_prev, WHb_raw, s_rks = tt_combined_sketch(T, H, b_prev, 2rmax, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)
-    W_HB           = [reshape(WHb_raw[k], b_prev.ttv_rks[k]*H.tto_rks[k], s_rks[k]) for k=1:N+1]
+    sketch_Hb_prev, WHb_raw, s_rks = tt_combined_sketch(T, H, w_prev, 2rmax, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)
+    W_HB           = [reshape(WHb_raw[k], w_prev.ttv_rks[k]*H.tto_rks[k], s_rks[k]) for k=1:N+1]
 
     # rks = [s; rmax*ones(Int, N-1); 1]
     # _ = tt_recursive_sketch(T, H, b_prev, rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)
@@ -384,14 +389,14 @@ function expand_basis!(H::TToperator{T,N},
     ot = zeros(Int, N)
 
     # Initial left contractions at site 1. Cores have layout (L, I, R); L=1 at boundary.
-    b1 = reshape(b_prev.ttv_vec[1], dims[1], b_prev.ttv_rks[2])
+    b1 = reshape(w_prev.ttv_vec[1], dims[1], w_prev.ttv_rks[2])
     H1 = reshape(H.tto_vec[1], dims[1], dims[1], H.tto_rks[2])
     # @tensor here would expand to 2 permutes + 1 gemm anyway — keep the macro for clarity.
     @tensor Ay₁_tmp[i₁,α₂,β₂] := H1[i₁,j₁,β₂] * b1[j₁,α₂]
-    Ay₁ = reshape(Ay₁_tmp, 1, dims[1], b_prev.ttv_rks[2], H.tto_rks[2])
+    Ay₁ = reshape(Ay₁_tmp, 1, dims[1], w_prev.ttv_rks[2], H.tto_rks[2])
 
     Yₖ    = Vector{Array{T,3}}(undef, m)
-    Yₖ[1] = reshape(Ay₁, 1, dims[1], b_prev.ttv_rks[2] * H.tto_rks[2])
+    Yₖ[1] = reshape(Ay₁, 1, dims[1], w_prev.ttv_rks[2] * H.tto_rks[2])
     for (i,b) in enumerate(B_window)
         Yₖ[1+i] = -h[i] .* b.ttv_vec[1]
     end
@@ -421,11 +426,11 @@ function expand_basis!(H::TToperator{T,N},
         # Propagate left contractions to site k+1
         Yₖ₊₁ = Vector{Array{T,3}}(undef, m)
 
-        y₁ₖ    = reshape(Yₖ[1], out_rks[k], dims[k], b_prev.ttv_rks[k+1], H.tto_rks[k+1])
-        Ay₁ₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], b_prev.ttv_rks[k+2], H.tto_rks[k+2])
-        @tensoropt (ρₖ,ρₖ₊₁,αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂) Ay₁ₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂,βₖ₊₂] = y₁ₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁] * vec_out[k][ρₖ,iₖ,ρₖ₊₁] * b_prev.ttv_vec[k+1][αₖ₊₁,jₖ₊₁,αₖ₊₂] * H.tto_vec[k+1][βₖ₊₁,iₖ₊₁,jₖ₊₁,βₖ₊₂]
+        y₁ₖ    = reshape(Yₖ[1], out_rks[k], dims[k], w_prev.ttv_rks[k+1], H.tto_rks[k+1])
+        Ay₁ₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], w_prev.ttv_rks[k+2], H.tto_rks[k+2])
+        @tensoropt (ρₖ,ρₖ₊₁,αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂) Ay₁ₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂,βₖ₊₂] = y₁ₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁] * vec_out[k][ρₖ,iₖ,ρₖ₊₁] * w_prev.ttv_vec[k+1][αₖ₊₁,jₖ₊₁,αₖ₊₂] * H.tto_vec[k+1][βₖ₊₁,iₖ₊₁,jₖ₊₁,βₖ₊₂]
         Yₖ₊₁[1] = reshape(Ay₁ₖ₊₁, out_rks[k+1], dims[k+1],
-                           b_prev.ttv_rks[k+2] * H.tto_rks[k+2])
+                           w_prev.ttv_rks[k+2] * H.tto_rks[k+2])
 
         for (i,b) in enumerate(B_window)
             Yₖ₊₁[1+i] = zeros(T, out_rks[k+1], dims[k+1], b.ttv_rks[k+2])
@@ -697,4 +702,170 @@ function sketched_rayleigh_ritz(H::TToperator{T,N}, b0::TTvector{T,N},
     end
 
     return λ, ψ_rr, stages, seeds_used
+end
+
+# ── Operator interface for `sketched_gmres` ─────────────────────────────────────
+# `op` is either a `TToperator` (generic; product sketched via the operator-vector
+# recursive sketch) or a function `x ↦ [𝒦_k·x]` returning the Kronecker/MPO summands of
+# `A·x` (sum-of-Kronecker form). The summand path never forms a dense operator core and
+# reuses the plain linear-combination adaptive overload — by linearity `S·(A·x)=∑ₖ S·𝒦ₖx`.
+_sg_embed(op::TToperator{T,N}, pv, s, orthogonal, seed, block_rks) where {T,N} =
+    Base.vec(tt_combined_sketch(T, op, pv, s, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)[1])
+function _sg_embed(op, pv, s, orthogonal, seed, block_rks)
+    summ = op(pv); TT = eltype(summ[1])
+    S = Base.vec(tt_combined_sketch(TT, summ[1], s, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)[1])
+    for k = 2:length(summ)
+        S = S .+ Base.vec(tt_combined_sketch(TT, summ[k], s, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)[1])
+    end
+    return S
+end
+_sg_round(op::TToperator{T,N}, pv, h, window, ε, orthogonal, block_rks, seed) where {T,N} =
+    ttrand_rounding_adaptive(vcat(one(T), -h), op, vcat([pv], window), ε; orthogonal=orthogonal, block_rks=block_rks, seed=seed)
+function _sg_round(op, pv, h, window, ε, orthogonal, block_rks, seed)
+    summ = op(pv); TT = eltype(summ[1])
+    ttrand_rounding_adaptive(vcat(ones(TT, length(summ)), -h), vcat(summ, window), ε; orthogonal=orthogonal, block_rks=block_rks, seed=seed)
+end
+_sg_apply(op::TToperator, x) = op * x
+_sg_apply(op, x) = reduce(+, op(x))
+_sg_resid(op, x, b) = norm(tt_rounding(_sg_apply(op, x) - b; tol=1e-10)) / norm(b)
+
+"""
+    sketched_gmres(op, b, x0; prec=identity, m=50, tol=1e-8, rmax=256,
+                   max_iters=m, sketch_size=2max_iters, k_trunc=2, ε_cap=0.1,
+                   final_trim=true, orthogonal=true, block_rks=8, seed=1234,
+                   sample_res=true, verbose=true) -> (x, history)
+
+Sketched GMRES (Nakatsukasa & Tropp, arXiv:2111.00113) for the TT linear system `A x = b`,
+with optional right preconditioner `prec` (a function `v ↦ M⁻¹ v`, default identity). `op` is
+either a `TToperator` `A`, or — for a sum-of-Kronecker / sum-of-MPO operator — a function
+`x ↦ [𝒦_k·x]` returning the operator summands (cheap, rank-preserving; no dense core).
+
+A fixed common embedding `S` (same `seed` throughout, dimension `sketch_size = 2·max_iters` —
+an `O(m)` embedding sized from the expected iteration count) drives the cheap truncated-window
+sketched Gram–Schmidt and the small least-squares. Each new Krylov vector `H·M⁻¹·v_j − ∑ hᵢ vᵢ`
+is formed by the mixed **adaptive** rounding
+`ttrand_rounding_adaptive([1; −h], H, [M⁻¹v_j; window], ε_basis,j)` — the operator product is
+sketched implicitly and `∑ hᵢ vᵢ` is never formed.
+
+The per-vector tolerance **relaxes like an inexact Krylov solver**:
+`ε_basis,j = clamp(tol / relres_{j−1}, tol, ε_cap)` — tight while the residual is large, loose as
+it shrinks — so the basis stays at its bounded natural rank instead of inflating by chasing
+components the solver does not need. `final_trim` adds a deterministic trim. The LS column is
+`D[j] = S·(H·M⁻¹·v_j)`; the solution is `x = x₀ + M⁻¹(∑ yᵢ vᵢ)`.
+
+`history` is a `Vector{NamedTuple}` with `(iter, res_sketch)` per step; the final entry also
+carries `res_sample`, a sampled estimate of `‖b − H x‖/‖b‖`.
+"""
+function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
+                        prec=identity, m::Int=50, tol::Real=1e-8, rmax::Int=256,
+                        max_iters::Int=m, sketch_size::Int=2max_iters, k_trunc::Int=2,
+                        ε_cap::Real=0.1, final_trim::Bool=true, orthogonal::Bool=true,
+                        block_rks=8, seed::Int=1234, sample_res::Bool=true,
+                        track_cond::Bool=false, track_exact::Bool=false, verbose::Bool=true) where {T,N}
+    s = sketch_size                         # common embedding dimension (= 2·max_iters)
+    # Initial residual r0 = b − A x0 (x0 typically the zero TT).
+    x0_zero = all(c -> all(iszero, c), x0.ttv_vec)
+    r0 = x0_zero ? tt_rounding(b; tol=tol, rmax=rmax) :
+                   tt_rounding(b - _sg_apply(op, x0); tol=tol, rmax=rmax)
+
+    # ── Sketch-normalize r0 → v1 (base sketch boundary = s) ────────────────────
+    sketch_r0, = tt_combined_sketch(T, r0, s, s;
+                                    orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)
+    rhs = copy(sketch_r0)                   # S r0  — least-squares right-hand side
+    β   = norm(sketch_r0)
+    v1  = r0 / β
+
+    B_window        = TTvector{T,N}[v1]     # truncated GS window
+    B_sketch_window = [sketch_r0 ./ β]      # S·v_i for window vectors
+    V = TTvector{T,N}[v1]                   # full basis (kept for the assembly)
+    D = Vector{Vector{T}}()                 # full sketched images S·(H M⁻¹ v_j)
+    history = NamedTuple[]
+    local y
+    k = 0
+    relres_prev = one(T)                    # relative residual of the previous step
+
+    # Basis-conditioning diagnostics: κ(C) of the sketched basis [S·v_i] (cheap) and, if
+    # track_cond, the exact κ(V)=√κ(Gram) via TT inner products (the "actual" basis condition).
+    Vsk  = Vector{Vector{T}}([sketch_r0 ./ β])
+    Gram = zeros(T, m + 1, m + 1)
+    track_cond && (Gram[1, 1] = dot(v1, v1))
+
+    for j = 1:m
+        # Inexact-Krylov relaxation: tighter early, looser as the residual shrinks.
+        ε_basis = clamp(tol / relres_prev, tol, ε_cap)
+
+        pv = prec(B_window[end])            # M⁻¹ v_j
+        # Embedding of A·M⁻¹·v_j (drives the sketched GS and is the LS column D[j]).
+        S_Hv = _sg_embed(op, pv, s, orthogonal, seed, block_rks)
+        h = reduce(hcat, B_sketch_window) \ S_Hv      # sketched GS against the window
+        push!(D, S_Hv)
+
+        # New Krylov vector = A·M⁻¹·v_j − ∑ hᵢ vᵢ, rounded adaptively (∑ never formed).
+        w = _sg_round(op, pv, h, B_window, ε_basis, orthogonal, block_rks, seed)
+        final_trim && (w = tt_rounding(w; tol=ε_basis))
+
+        S_w, = tt_combined_sketch(T, w, s, s;
+                                  orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)
+        βw = norm(S_w)
+        w = w / βw
+        push!(V, w)
+        push!(B_window, w);              length(B_window) > k_trunc && popfirst!(B_window)
+        push!(B_sketch_window, S_w ./ βw); length(B_sketch_window) > k_trunc && popfirst!(B_sketch_window)
+
+        # ── Basis conditioning ────────────────────────────────────────────────
+        push!(Vsk, S_w ./ βw)
+        κ_C = cond(reduce(hcat, Vsk))       # sketched basis condition (what the GS sees)
+        κ_V = T(NaN)
+        if track_cond
+            jj = length(V)                  # = j+1; w is V[jj]
+            for i = 1:jj
+                Gram[i, jj] = dot(V[i], w);  Gram[jj, i] = Gram[i, jj]
+            end
+            κ_V = sqrt(cond(Symmetric(Gram[1:jj, 1:jj])))
+        end
+
+        Dmat = reduce(hcat, D)              # s × j
+        y    = qr(Dmat, ColumnNorm()) \ rhs
+        res_sketch = norm(rhs - Dmat * y) / β
+
+        # Exact residual of the current iterate xⱼ = M⁻¹(∑_{i≤j} yᵢ vᵢ): ‖H xⱼ − b‖/‖b‖.
+        res_exact = T(NaN)
+        if track_exact
+            uj = y[1] * V[1]
+            for i = 2:j
+                uj = uj + y[i] * V[i]
+            end
+            uj = tt_rounding(uj; tol=tol, rmax=rmax)
+            xj = x0_zero ? prec(uj) : x0 + prec(uj)
+            res_exact = _sg_resid(op, xj, b)
+        end
+
+        push!(history, (iter=j, res_sketch=res_sketch, res_exact=res_exact, ε_basis=ε_basis, κ_sketch=κ_C, κ_basis=κ_V))
+        verbose && (println("  sGMRES it $(lpad(j,2))  sketched = $(round(res_sketch, sigdigits=4))  EXACT = $(round(res_exact, sigdigits=4))  ε_basis = $(round(ε_basis, sigdigits=2))  rank = $(maximum(w.ttv_rks))  κ(V) = $(round(κ_V, sigdigits=3))"); flush(stdout))
+        relres_prev = max(res_sketch, tol)
+        k = j
+        res_sketch < tol && break
+    end
+
+    # ── Assemble x = x0 + M⁻¹ (∑_i y_i v_i) ───────────────────────────────────
+    # Deterministic exact weighted sum + rounding (the randomized ttrand_rounding here was a
+    # fixed-seed perturbation, a candidate for the config-invariant residual floor).
+    u = y[1] * V[1]
+    for i = 2:k
+        u = u + y[i] * V[i]
+    end
+    u = tt_rounding(u; tol=tol, rmax=rmax)
+    x = x0_zero ? prec(u) : x0 + prec(u)
+    # NOTE: do NOT round x here. Rounding the un-preconditioned solution at tolerance δ
+    # perturbs the residual by ‖H·δ‖ ≈ ‖H‖·δ; for the stiff cookie operator (‖H‖~1e3–1e4)
+    # a tol=1e-8 round inflates ‖Hx−b‖ to ~1e-5. The preconditioned variable u is already
+    # rounded above (harmless, since ‖H·M⁻¹‖≈1). If a final trim is needed, use tol/‖H‖.
+
+    if sample_res
+        res_final = _sg_resid(op, x, b)            # exact ‖A x − b‖/‖b‖
+        history[end] = merge(history[end], (res_sample=res_final,))
+        verbose && println("  sGMRES true relres = $(round(res_final, sigdigits=4))")
+    end
+
+    return x, history
 end

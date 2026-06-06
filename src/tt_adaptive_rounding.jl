@@ -504,6 +504,227 @@ end
 
 
 """
+    ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, ε::Real;
+                              ℓ_min=4, ℓ_inc=4, n_samples=…, ℓ_max=…,
+                              orthogonal=true, block_rks=N, seed=1234,
+                              WAy_init=nothing, sketch_rks_init=nothing,
+                              timer=TimerOutput()) -> TTvector{T,N}
+
+Adaptive randomized rounding of the mixed combination `α[1]·(A·y[1]) + ∑_{j≥2} α[j]·y[j]` to a
+relative Frobenius tolerance `ε`, sketching the operator product `A·y[1]` **implicitly** (never
+formed). This is the tolerance-based analog of `ttrand_rounding(α, A, y, rks)`.
+
+The operator term (`A·y[1]`) and each vector term `y[j]` are sketched with the **same seed** (so
+the boundary sketch `α[1]·W_{Ay}[1] + ∑ α[j]·W[j][1]` is an unbiased estimate of the target norm),
+then a single adaptive left-to-right sweep grows each bond's basis until the sketched residual
+falls below the per-bond budget `τ = ε·‖target‖_F/√(N−1)`.
+
+`WAy_init`/`sketch_rks_init` (optional) reuse a pre-built reverse operator sketch of `A·y[1]`
+(built with the same `seed` at width `ℓ_min+n_samples`), so a caller that already sketched `A·y[1]`
+need not recompute it; the cheaper vector sketches `y[2..m]` are always built internally.
+"""
+function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, ε::Real;
+                                   ℓ_min::Int=4,
+                                   ℓ_inc::Int=4,
+                                   n_samples::Int=max(N÷2, ℓ_inc),
+                                   ℓ_max::Int=maximum(A.tto_rks .* y[1].ttv_rks) + sum((maximum(y[j].ttv_rks) for j=2:length(y)); init=0),
+                                   orthogonal::Bool=true,
+                                   block_rks::Int=N,
+                                   seed::Int=1234,
+                                   WAy_init=nothing,
+                                   sketch_rks_init=nothing,
+                                   timer::TimerOutput=TimerOutput()) where {T,N}
+  @assert n_samples >= ℓ_inc "n_samples ($n_samples) must be ≥ ℓ_inc ($ℓ_inc)"
+  @timeit timer "ttrand_rounding_adaptive" begin
+    m = length(α)
+    @assert length(y) == m
+    dims = y[1].ttv_dims
+    @assert all(y[j].ttv_dims == dims for j=2:m)
+
+    vec = Vector{Array{T,3}}(undef, N)
+    # Term 1 → operator sketch of A·y[1] (3D per bond); terms j≥2 → vector sketches (2D per bond).
+    # Same seed across all terms for linearity.
+    local WAy, sketch_rks
+    W = Vector{Vector{Matrix{T}}}(undef, m)
+    @timeit timer "reverse_sketch" begin
+      if WAy_init === nothing
+        WAy, sketch_rks = tt_recursive_sketch(T, A, y[1], ℓ_min+n_samples; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
+      else
+        WAy = WAy_init
+        sketch_rks = sketch_rks_init
+      end
+      for j = 2:m
+        Wⱼ, skⱼ = tt_recursive_sketch(T, y[j], ℓ_min+n_samples; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
+        W[j] = Wⱼ
+        @assert skⱼ == sketch_rks
+      end
+      seed = seed + 1
+    end
+    out_rks = ones(Int, N+1)
+    ot = zeros(Int, N)
+
+    # Boundary sketch of the whole combination (linearity via shared seed)
+    bnd = α[1] .* Base.vec(WAy[1])
+    for j = 2:m
+      bnd = bnd .+ α[j] .* Base.vec(W[j][1])
+    end
+    y_norm = norm(bnd)
+    τ = ε * y_norm / sqrt(N - 1)
+    rks_inc = ones(Int, N+1)
+    rks_inc[1] = 0
+    rks_inc[2:N] .= n_samples
+
+    @timeit timer "orthogonalization" begin
+      # Term 1 partial product: Ayₖ layout (L=1, I, R_y, R_A), scaled by α[1].
+      Ayₖ = zeros(T, 1, dims[1], y[1].ttv_rks[2], A.tto_rks[2])
+      let Ayₖ_3d = reshape(Ayₖ, dims[1], y[1].ttv_rks[2], A.tto_rks[2]),
+          y1     = reshape(y[1].ttv_vec[1], dims[1], y[1].ttv_rks[2]),
+          A1     = reshape(A.tto_vec[1], dims[1], dims[1], A.tto_rks[2])
+        @tensor Ayₖ_3d[iₖ,αₖ₊₁,βₖ₊₁] = A1[iₖ,jₖ,βₖ₊₁] * y1[jₖ,αₖ₊₁]
+      end
+      Ayₖ .*= α[1]
+      # Terms j≥2 partial products, scaled by α[j].
+      Yₖ = Vector{Array{T,3}}(undef, m)
+      for j = 2:m
+        Yₖ[j] = α[j].*reshape(y[j].ttv_vec[1], 1, dims[1], y[j].ttv_rks[2])
+      end
+
+      @inbounds for k in 1:N-1
+        max_basis = bond_rank_cap(dims, k, ℓ_max)
+        @timeit timer "Randomized adaptive QR decomposition" begin
+          @timeit timer "Sketch" begin
+            Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
+            WAyₖ₊₁ = WAy[k+1][:, :, 1:ℓ_min]
+            @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[ρₖ,iₖ,ρₖ₊₁] += Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*WAyₖ₊₁[αₖ₊₁,βₖ₊₁,ρₖ₊₁]
+            for j = 2:m
+              Wⱼₖ₊₁ = W[j][k+1][:, 1:ℓ_min]
+              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[ρₖ,iₖ,ρₖ₊₁] += Yₖ[j][ρₖ,iₖ,αₖ₊₁]*Wⱼₖ₊₁[αₖ₊₁,ρₖ₊₁]
+            end
+            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min)
+          end
+          @timeit timer "QR" begin
+            Q_factor, _ = qr!(Zₖ)
+            Q_init = Matrix(Q_factor)
+            current_cols = size(Q_init, 2)
+            buf_cols = max(max_basis, current_cols)
+            Q_storage = Matrix{T}(undef, out_rks[k]*dims[k], buf_cols)
+            @views Q_storage[:, 1:current_cols] .= Q_init
+            Q = view(Q_storage, :, 1:current_cols)
+            ℓ = ℓ_min
+          end
+
+          @timeit timer "Initial residual sketch" begin
+            S_full = zeros(T, out_rks[k]*dims[k], n_samples)
+            let S_full_3d = reshape(S_full, out_rks[k], dims[k], n_samples)
+              WAy_view = view(WAy[k+1], :, :, ℓ_min+1:ℓ_min+n_samples)
+              @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[ρₖ,iₖ,ρₖ₊₁] += Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*WAy_view[αₖ₊₁,βₖ₊₁,ρₖ₊₁]
+              for j = 2:m
+                Wⱼ_view = view(W[j][k+1], :, ℓ_min+1:ℓ_min+n_samples)
+                @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[ρₖ,iₖ,ρₖ₊₁] += Yₖ[j][ρₖ,iₖ,αₖ₊₁]*Wⱼ_view[αₖ₊₁,ρₖ₊₁]
+              end
+            end
+          end
+          Sₖ = Matrix{T}(undef, out_rks[k]*dims[k], n_samples)
+          @timeit timer "Residual sketch" begin
+            copyto!(Sₖ, S_full)
+            mul!(Sₖ, Q, Q' * Sₖ, -one(T), one(T))
+          end
+
+          @timeit timer "Adaptive basis expansion" begin
+            while norm(Sₖ) > τ * sqrt(n_samples/sketch_rks[k+1]) && current_cols < max_basis
+              @timeit timer "Add new orthonormal directions" begin
+                ℓ_inc_eff = clamp(max(ℓ_inc, ceil(Int, 0.2 * current_cols)), 1, min(n_samples, max_basis - current_cols))
+                rank_n = expand_basis!(Q_storage, current_cols, view(Sₖ, :, 1:ℓ_inc_eff))
+                if rank_n == 0
+                  break
+                end
+                current_cols += rank_n
+                Q = view(Q_storage, :, 1:current_cols)
+                ℓ += ℓ_inc_eff
+              end
+              @timeit timer "S_full shift" begin
+                m_rows = size(S_full, 1)
+                n_keep = n_samples - ℓ_inc_eff
+                GC.@preserve S_full Base.unsafe_copyto!(S_full, 1, S_full, m_rows*ℓ_inc_eff+1, m_rows*n_keep)
+              end
+              @timeit timer "Recursive sketch" begin
+                if sketch_rks[k+1] < ℓ+n_samples
+                  s_prev_kp1 = sketch_rks[k+1]
+                  WAy_extra, sk_extra = tt_recursive_sketch(T, A, y[1], rks_inc; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
+                  W_extra = Vector{Vector{Matrix{T}}}(undef, m)
+                  for j = 2:m
+                    Wⱼ_extra, skⱼ_extra = tt_recursive_sketch(T, y[j], rks_inc; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
+                    W_extra[j] = Wⱼ_extra
+                    @assert skⱼ_extra == sk_extra
+                  end
+                  seed = seed + 1
+                  for l = k+1:N
+                    s_prev = sketch_rks[l]
+                    new_total = s_prev + sk_extra[l]
+                    WAy[l] = cat(WAy[l], WAy_extra[l], dims=3)
+                    WAy[l][:, :, 1:s_prev] .*= sqrt(s_prev / new_total)
+                    WAy[l][:, :, (s_prev+1):end] .*= sqrt(sk_extra[l] / new_total)
+                    for j = 2:m
+                      W[j][l] = cat(W[j][l], W_extra[j][l], dims=2)
+                      W[j][l][:, 1:s_prev] .*= sqrt(s_prev / new_total)
+                      W[j][l][:, (s_prev+1):end] .*= sqrt(sk_extra[l] / new_total)
+                    end
+                    sketch_rks[l] = new_total
+                  end
+                  S_full[:, 1:n_samples-ℓ_inc_eff] .*= sqrt(s_prev_kp1 / sketch_rks[k+1])
+                end
+              end
+              @timeit timer "S_full tail contraction" begin
+                tail_buf = zeros(T, out_rks[k], dims[k], ℓ_inc_eff)
+                WAy_tail = view(WAy[k+1], :, :, ℓ+n_samples-ℓ_inc_eff+1:ℓ+n_samples)
+                @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) tail_buf[ρₖ,iₖ,ρₖ₊₁] += Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*WAy_tail[αₖ₊₁,βₖ₊₁,ρₖ₊₁]
+                for j = 2:m
+                  Wⱼ_tail = view(W[j][k+1], :, ℓ+n_samples-ℓ_inc_eff+1:ℓ+n_samples)
+                  @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) tail_buf[ρₖ,iₖ,ρₖ₊₁] += Yₖ[j][ρₖ,iₖ,αₖ₊₁]*Wⱼ_tail[αₖ₊₁,ρₖ₊₁]
+                end
+                copyto!(view(S_full, :, n_samples-ℓ_inc_eff+1:n_samples),
+                        reshape(tail_buf, out_rks[k]*dims[k], ℓ_inc_eff))
+              end
+              @timeit timer "Residual sketch" begin
+                copyto!(Sₖ, S_full)
+                mul!(Sₖ, Q, Q' * Sₖ, -one(T), one(T))
+              end
+            end
+          end
+
+          @timeit timer "Update core" begin
+            out_rks[k+1] = size(Q, 2)
+            vec[k] = reshape(Q, out_rks[k], dims[k], out_rks[k+1])
+            ot[k] = 1
+          end
+        end
+        @timeit timer "Update partial products" begin
+          # Term 1 operator update.
+          Ayₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], y[1].ttv_rks[k+2], A.tto_rks[k+2])
+          @tensoropt (αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂,ρₖ₊₁) Ayₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂,βₖ₊₂] = Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y[1].ttv_vec[k+1][αₖ₊₁,jₖ₊₁,αₖ₊₂]*A.tto_vec[k+1][βₖ₊₁,iₖ₊₁,jₖ₊₁,βₖ₊₂]
+          Ayₖ = Ayₖ₊₁
+          # Terms j≥2 vector updates.
+          Yₖ₊₁ = Vector{Array{T,3}}(undef, m)
+          for j = 2:m
+            Yₖ₊₁[j] = zeros(T, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2])
+            @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁) Yₖ₊₁[j][ρₖ₊₁,iₖ₊₁,αₖ₊₂] = Yₖ[j][ρₖ,iₖ,αₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
+          end
+          Yₖ = Yₖ₊₁
+        end
+        rks_inc[k+1] = 0
+      end
+      # Last core: operator term + vector terms.
+      vec[N] = reshape(Ayₖ, out_rks[N], dims[N], out_rks[N+1])
+      for j = 2:m
+        vec[N] = vec[N] .+ reshape(Yₖ[j], out_rks[N], dims[N], out_rks[N+1])
+      end
+    end
+    return TTvector{T,N}(N, vec, dims, out_rks, ot)
+  end
+end
+
+
+"""
     ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TTvector{T,N}, ε::Real;
                               ℓ_min=4, ℓ_inc=4, ℓ_max=…,
                               orthogonal=true, block_rks=N,

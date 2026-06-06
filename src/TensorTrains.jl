@@ -20,7 +20,7 @@ export dmrg_linsolv, dmrg_eigsolv, dmrg_schedule, dmrg_schedule_default
 
 include("tt_solvers.jl")
 export tt_cg, tt_gmres, gradient_fixed_step, eig_arnoldi, davidson,
-       dot_operator, expand_basis!, sketched_rr, sketched_rayleigh_ritz
+       dot_operator, expand_basis!, sketched_rr, sketched_rayleigh_ritz, sketched_gmres
 
 include("models.jl")
 export hubbard_1D, hubbard_2D, PPP_C_NH_N, hV_to_mpo, hV_to_mpo_tree, site_switch, half_filling, slater, part_num, one_e_two_e_integrals_to_hV, one_body_diagonal
