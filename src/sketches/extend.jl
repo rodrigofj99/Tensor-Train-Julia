@@ -91,18 +91,18 @@ function extend_recursive_sketch!(g::SketchGroup{TW}, A::TTvector{TA,N}, target:
   return g
 end
 
-# Per-group scalar weights w_g (Σ w_g = 1) at bond l for the chosen averaging scheme. Combining
-# unbiased per-block estimators of unequal variance ⇒ inverse-variance (precision) weighting is the
-# BLUE; :equal / :column are oblivious closed-form approximations (see PLAN.md / Stage 6).
-function _group_weights(groups, l::Int, weighting::Symbol)
+# Per-group scalar weights w_g (Σ w_g = 1) at bond l from the per-group prefix sample counts `cnt`.
+# Combining unbiased per-block estimators of unequal variance ⇒ inverse-variance (precision)
+# weighting is the BLUE; :equal / :column are oblivious closed-form approximations (PLAN.md/Stage 6).
+function _group_weights(groups, l::Int, cnt::AbstractVector{Int}, weighting::Symbol)
   if weighting === :equal
-    raw = Float64[g.counts[l] for g in groups]                       # ∝ samples → overall 1/√Σcounts
+    raw = Float64[cnt[gi] for gi in eachindex(groups)]                          # ∝ samples → 1/√Σcnt
   elseif weighting === :column
-    raw = Float64[g.counts[l]*g.brv[l] for g in groups]              # ∝ columns (embedding-dim model)
+    raw = Float64[cnt[gi]*groups[gi].brv[l] for gi in eachindex(groups)]        # ∝ columns
   elseif weighting === :precision
-    # Provisional empirical inverse-variance: per-group sample variance of raw per-sample slab norms
-    # at this bond. Exact per-bond-residual form is finalized in Stage 6.
-    raw = Float64[g.counts[l] == 0 ? 0.0 : g.counts[l] / max(_slab_var(g, l), eps()) for g in groups]
+    # Provisional empirical inverse-variance: per-group sample variance of the leading per-sample
+    # slab norms. Exact per-bond-residual form is finalized in Stage 6.
+    raw = Float64[cnt[gi] == 0 ? 0.0 : cnt[gi] / max(_slab_var(groups[gi], l, cnt[gi]), eps()) for gi in eachindex(groups)]
   else
     error("unknown block-averaging weighting :$weighting (use :equal, :column, or :precision)")
   end
@@ -110,8 +110,7 @@ function _group_weights(groups, l::Int, weighting::Symbol)
   return raw ./ s
 end
 
-function _slab_var(g::SketchGroup, l::Int)
-  p = g.counts[l]
+function _slab_var(g::SketchGroup, l::Int, p::Int)
   p <= 1 && return 1.0
   W = g.W[l]
   e = [sum(abs2, @view W[:, :, s]) for s in 1:p]
@@ -120,23 +119,26 @@ function _slab_var(g::SketchGroup, l::Int)
 end
 
 """
-    finalize_cols(groups, l, rks_l; weighting=:equal) -> Matrix
+    finalize_cols(groups, l, rks_l; weighting=:equal, nsamp=nothing) -> Matrix
 
 Combine the groups' raw partials at bond `l` into the normalized sketch columns
 `[√w₁ · group₁ | √w₂ · group₂ | …] · (per-group 1/√count)`, an unbiased isometry for any
-`Σ w_g = 1`. `rks_l = A.ttv_rks[l]` (the row dimension).
+`Σ w_g = 1`. `rks_l = A.ttv_rks[l]`. `nsamp[gi]` optionally caps each group to its leading samples
+(a prefix), so several caches grown to different sizes can be combined at a common size.
 """
 function finalize_cols(groups::AbstractVector{<:SketchGroup{T}}, l::Int, rks_l::Int;
-                       weighting::Symbol=:equal) where {T}
-  ws = _group_weights(groups, l, weighting)
+                       weighting::Symbol=:equal, nsamp=nothing) where {T}
+  cnt = nsamp === nothing ? [g.counts[l] for g in groups] : nsamp
+  @assert all(cnt[gi] <= groups[gi].counts[l] for gi in eachindex(groups)) "finalize_cols: nsamp exceeds available samples"
+  ws = _group_weights(groups, l, cnt, weighting)
   blocks = Matrix{T}[]
   for (gi, g) in enumerate(groups)
-    g.counts[l] == 0 && continue
-    # View the used slabs only (g.W[l] may carry spare geometric capacity).
-    M = reshape(view(g.W[l], :, :, 1:g.counts[l]), rks_l, g.brv[l]*g.counts[l])
+    cnt[gi] == 0 && continue
+    # View the leading cnt[gi] slabs (g.W[l] may carry more samples and/or spare capacity).
+    M = reshape(view(g.W[l], :, :, 1:cnt[gi]), rks_l, g.brv[l]*cnt[gi])
     # Divide (not multiply-by-reciprocal) so the single-group :equal case is bit-identical to
     # tt_recursive_sketch's `W ./= sqrt(count)`.
-    push!(blocks, M ./ sqrt(g.counts[l] / ws[gi]))
+    push!(blocks, M ./ sqrt(cnt[gi] / ws[gi]))
   end
   return reduce(hcat, blocks)
 end
@@ -201,9 +203,11 @@ function ensure_columns!(cache::CachedSketch, A::TTvector{TA,N}, want::AbstractV
 end
 
 """
-    sketch_matrix(cache, l, rks_l; weighting=:equal) -> Matrix
+    sketch_matrix(cache, l, rks_l; weighting=:equal, nsamp=nothing) -> Matrix
 
-Normalized sketch columns at bond `l` (combines all groups via `finalize_cols`).
+Normalized sketch columns at bond `l` (combines all groups via `finalize_cols`). `nsamp[gi]`
+optionally caps each group to its leading samples so caches grown to different sizes combine at a
+common size.
 """
-sketch_matrix(cache::CachedSketch, l::Int, rks_l::Int; weighting::Symbol=:equal) =
-  finalize_cols(cache.groups, l, rks_l; weighting=weighting)
+sketch_matrix(cache::CachedSketch, l::Int, rks_l::Int; weighting::Symbol=:equal, nsamp=nothing) =
+  finalize_cols(cache.groups, l, rks_l; weighting=weighting, nsamp=nsamp)

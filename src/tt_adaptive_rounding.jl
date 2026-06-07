@@ -345,24 +345,31 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
     @assert all(y[j].ttv_dims == dims for j=2:m)
 
     vec = Vector{Array{T,3}}(undef, N)
-    # Per-term reusable sketch caches (uniform block_rks ⇒ one group each). When the caller passes
-    # `caches` (persisted across calls, e.g. a GMRES window vector), they are reused and extended in
-    # place; otherwise build throwaway caches. The criterion below is total-independent (the
-    # sketch_rks factor cancels the 1/√count column normalization), so the grow pattern is free.
-    if caches === nothing
-      caches = [cached_sketch(T, y[j], block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer) for j=1:m]
-    end
+    # Per-term reusable sketch caches (uniform block_rks ⇒ one group each). `caches` may be nothing
+    # (build all throwaway), or a length-m vector whose entries are either a persisted CachedSketch
+    # (reused & extended in place across calls, e.g. a GMRES window vector) or nothing (term changes
+    # every call, e.g. an operator summand — build a throwaway). The criterion below is
+    # total-independent (the sketch_rks factor cancels the 1/√count column normalization), so the
+    # grow pattern is free.
+    _fresh(j) = cached_sketch(T, y[j], block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
+    caches = caches === nothing ? [_fresh(j) for j=1:m] :
+                                  [caches[j] === nothing ? _fresh(j) : caches[j] for j=1:m]
+    # All terms are combined at a COMMON per-bond sample count `p_target` (a prefix of each cache),
+    # so caches grown to different sizes across calls (a grown window vector vs a fresh summand)
+    # stay consistent — otherwise their 1/√count normalizations would not match. p_target starts at
+    # the initial heuristic, which every cache has at least, and grows with the adaptive loop.
+    brv = caches[1].groups[1].brv
+    p_target = _heuristic_p(ℓ_min+n_samples, brv, N)
+    sketch_rks = brv .* p_target
     # Working sketch: only the active bond's right-neighbour W[j][k+1] is materialized at a time
-    # (re-derived from the cache at each bond and after each growth). W[j][1] (the boundary) is
-    # materialized once for the norm estimate.
+    # (re-derived from the cache at each bond and after each growth, as the common prefix). W[j][1]
+    # (the boundary) is materialized once for the norm estimate.
     W = [Vector{Matrix{T}}(undef, N+1) for j=1:m]
     @timeit timer "reverse_sketch" begin
       for j = 1:m
-        W[j][1] = sketch_matrix(caches[j], 1, y[j].ttv_rks[1])
+        W[j][1] = sketch_matrix(caches[j], 1, y[j].ttv_rks[1]; nsamp=[p_target[1]])
       end
     end
-    _total_cols(l) = sum(g.brv[l]*g.counts[l] for g in caches[1].groups)
-    sketch_rks = [_total_cols(l) for l=1:N+1]
 
     out_rks = ones(Int, N+1)
     ot = zeros(Int, N)
@@ -375,12 +382,13 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
       Yₖ = [α[j].*reshape(y[j].ttv_vec[1], 1, dims[1], y[j].ttv_rks[2]) for j=1:m]
       @inbounds for k in 1:N-1
         max_basis = bond_rank_cap(dims, k, ℓ_max)
-        # Materialize the active bond's right-neighbour from the cache (it may have grown while
-        # earlier bonds were processed). This is the only W[j] bond read at bond k.
+        # Materialize the active bond's right-neighbour from the cache at the common prefix
+        # p_target[k+1] (it may have grown while earlier bonds were processed). This is the only
+        # W[j] bond read at bond k.
         @timeit timer "reverse_sketch" for j = 1:m
-          W[j][k+1] = sketch_matrix(caches[j], k+1, y[j].ttv_rks[k+1])
+          W[j][k+1] = sketch_matrix(caches[j], k+1, y[j].ttv_rks[k+1]; nsamp=[p_target[k+1]])
         end
-        sketch_rks[k+1] = _total_cols(k+1)
+        sketch_rks[k+1] = brv[k+1]*p_target[k+1]
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
             Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
@@ -450,19 +458,23 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
               @timeit timer "Recursive sketch" begin
                 if sketch_rks[k+1] < ℓ+n_samples
                   s_prev_kp1 = sketch_rks[k+1]
-                  # Grow each cache so bonds k+1:N have ≥ ℓ+n_samples columns (only the missing
-                  # samples are computed, reusing what's cached). The adaptive criterion is
+                  # Grow the COMMON sample target so bonds k+1:N have ≥ ℓ+n_samples columns, then
+                  # ensure every cache reaches it (only missing samples computed; caches already
+                  # larger keep their extra, used only as a prefix). The criterion is
                   # total-independent, so any sufficient growth gives the same decisions.
-                  want = copy(sketch_rks)
                   for l = k+1:N
-                    want[l] = max(want[l], ℓ+n_samples)
+                    p_target[l] = max(p_target[l], cld(ℓ+n_samples, brv[l]))
                   end
+                  for l = 2:N
+                    p_target[l] = max(p_target[l], p_target[l-1])   # keep non-decreasing
+                  end
+                  want = brv .* p_target
                   for j = 1:m
                     ensure_columns!(caches[j], y[j], want; seed=seed, orthogonal=orthogonal, timer=timer)
-                    W[j][k+1] = sketch_matrix(caches[j], k+1, y[j].ttv_rks[k+1])
+                    W[j][k+1] = sketch_matrix(caches[j], k+1, y[j].ttv_rks[k+1]; nsamp=[p_target[k+1]])
                   end
                   for l = k+1:N
-                    sketch_rks[l] = _total_cols(l)
+                    sketch_rks[l] = brv[l]*p_target[l]
                   end
                   # Rescale S_full's kept columns to the new 1/√count normalization so they are
                   # consistent with the freshly materialized (new-normalization) tail columns below.
