@@ -48,11 +48,8 @@ numerical stability and consistent spectral properties across different rank reg
 - Randomized tensor train decomposition with block sketching
 - See ttrand_rounding, stta for usage examples
 """
-function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, oversampling=1, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N}
+function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, oversampling=1, block_offset=nothing, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N}
   @timeit timer "tt_recursive_sketch" begin
-    rng = Random.default_rng()
-    Random.seed!(rng, seed)
-
     dims = A.ttv_dims
     TW = typeof(one(T)*one(TA))
     W = Vector{Array{TW,3}}(undef, N+1)
@@ -108,7 +105,7 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
               # directly to (a, z·β, p) for the per-p inner gemm. This permute
               # is tiny (β·z·b·p ≈ 62 KB at the worst Matern bond) and
               # eliminates a 128 MB permute on AV inside the kernel.
-              B_sketch_βzbp = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; buffer=sketch_buffer, timer=timer)
+              B_sketch_βzbp = generate_sketch_blocks(seed, k, (block_offset===nothing ? 0 : block_offset[k]), T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; reverse=true, buffer=sketch_buffer, timer=timer)
               B_sketch = permutedims(B_sketch_βzbp, (2, 1, 3, 4))  # (z, β, b, p)
             end
 
@@ -167,7 +164,7 @@ function tt_recursive_sketch(::Type{T}, A::TTvector{TA,N}, rks; orthogonal=true,
         GC.@preserve sketch_buffer contract_buffer begin
           @inbounds for k in 1:N
             @timeit timer "sketch_generation" begin
-              B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; buffer=sketch_buffer, timer=timer)
+              B_sketch = generate_sketch_blocks(seed, k, (block_offset===nothing ? 0 : block_offset[k]), T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; reverse=false, buffer=sketch_buffer, timer=timer)
             end
 
             @timeit timer "W_allocation" begin
@@ -204,11 +201,8 @@ function tt_recursive_sketch(A::TTvector{T,N},rks_or_rmax; orthogonal=true, reve
   return tt_recursive_sketch(Float64,A,rks_or_rmax; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, p=p, timer=timer)
 end
 
-function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, oversampling=1, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,TH<:Number,N}
+function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, oversampling=1, block_offset=nothing, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,TH<:Number,N}
   @timeit timer "tt_recursive_sketch" begin
-    rng = Random.default_rng()
-    Random.seed!(rng, seed)
-
     dims = A.ttv_dims
     TW = typeof(one(T)*one(TA)*one(TH))
     W = Vector{Array{TW,4}}(undef, N+1)
@@ -260,7 +254,7 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
       @timeit timer "contraction_reverse" begin
         @inbounds for k in N:-1:1
           @timeit timer "sketch_generation" begin
-            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; timer=timer, buffer=sketch_buffer)
+            B_sketch = generate_sketch_blocks(seed, k, (block_offset===nothing ? 0 : block_offset[k]), T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; reverse=true, timer=timer, buffer=sketch_buffer)
           end
 
           @timeit timer "W_allocation" begin
@@ -322,7 +316,7 @@ function tt_recursive_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, 
       @timeit timer "contraction_forward" begin
         @inbounds for k in 1:N
           @timeit timer "sketch_generation" begin
-            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; timer=timer)
+            B_sketch = generate_sketch_blocks(seed, k, (block_offset===nothing ? 0 : block_offset[k]), T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; reverse=false, timer=timer)
           end
 
           @timeit timer "W_allocation" begin
@@ -361,11 +355,8 @@ function tt_recursive_sketch(H::TToperator{TH,N}, A::TTvector{TA,N}, rks_or_rmax
   return tt_recursive_sketch(Float64, H, A, rks_or_rmax; orthogonal=orthogonal, reverse=reverse, seed=seed, block_rks=block_rks, p=p, timer=timer)
 end
 
-function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, oversampling=1, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N,M}
+function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rks; orthogonal=true, reverse=true, seed=1234, block_rks::Int=N, p=0, oversampling=1, block_offset=nothing, timer::TimerOutput = TimerOutput()) where {T<:Number,TA<:Number,N,M}
   @timeit timer "tt_recursive_sketch" begin
-    rng = Random.default_rng()
-    Random.seed!(rng, seed)
-
     dims = A[1].ttv_dims
     @assert all(a.ttv_dims == dims for a in A)
     TW = typeof(one(T)*one(TA))
@@ -411,7 +402,7 @@ function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rks; orthog
       @timeit timer "contraction_reverse" begin
         @inbounds for k in N:-1:1
           @timeit timer "sketch_generation" begin
-            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; buffer=sketch_buffer, timer=timer)
+            B_sketch = generate_sketch_blocks(seed, k, (block_offset===nothing ? 0 : block_offset[k]), T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p[k], orthogonal; reverse=true, buffer=sketch_buffer, timer=timer)
           end
 
           @timeit timer "W_allocation" begin
@@ -467,7 +458,7 @@ function tt_recursive_sketch(::Type{T}, A::NTuple{M,TTvector{TA,N}}, rks; orthog
       @timeit timer "contraction_forward" begin
         @inbounds for k in 1:N
           @timeit timer "sketch_generation" begin
-            B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; buffer=sketch_buffer, timer=timer)
+            B_sketch = generate_sketch_blocks(seed, k, (block_offset===nothing ? 0 : block_offset[k]), T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p[k+1], orthogonal; reverse=false, buffer=sketch_buffer, timer=timer)
           end
 
           @timeit timer "W_allocation" begin

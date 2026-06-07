@@ -29,8 +29,6 @@ written directly into the result matrix as they are produced.
 function tt_sketch(::Type{T}, A::TTvector{TA,N}, s::Int;
                          reverse::Bool=true, orthogonal::Bool=true,
                          seed::Int=1234, block_rks::Int=N) where {T<:Number, TA<:Number, N}
-  rng = Random.default_rng()
-  Random.seed!(rng, seed)
 
   dims = A.ttv_dims
   TW = typeof(one(T) * one(TA))
@@ -83,7 +81,7 @@ function tt_sketch(::Type{T}, A::TTvector{TA,N}, s::Int;
     W_prev = ones(TW, 1, 1, 1)  # W[N+1]: p-slice dimension is 1 (boundary)
     W_curr = W_prev
     @inbounds for k in N:-1:1
-      B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p, orthogonal; buffer=sketch_buffer)
+      B_sketch = generate_sketch_blocks(seed, k, 0, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p, orthogonal; reverse=true, buffer=sketch_buffer)
       W_curr = zeros(TW, A.ttv_rks[k], block_rks_vec[k], p)
       for j in 1:p
         contract_sketch_core_backwards!(view(W_curr,:,:,j), A.ttv_vec[k], view(B_sketch,:,:,:,j), view(W_prev,:,:,(k<N ? j : 1)); buffer=contract_buffer)
@@ -94,7 +92,7 @@ function tt_sketch(::Type{T}, A::TTvector{TA,N}, s::Int;
     W_prev = ones(TW, 1, 1, 1)  # W[1]: p-slice dimension is 1 (boundary)
     W_curr = W_prev
     @inbounds for k in 1:N
-      B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p, orthogonal; buffer=sketch_buffer)
+      B_sketch = generate_sketch_blocks(seed, k, 0, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p, orthogonal; reverse=false, buffer=sketch_buffer)
       W_curr = zeros(TW, A.ttv_rks[k+1], block_rks_vec[k+1], p)
       for j in 1:p
         contract_sketch_core_forwards!(view(W_curr,:,:,j), A.ttv_vec[k], view(B_sketch,:,:,:,j), view(W_prev,:,:,(k>1 ? j : 1)); buffer=contract_buffer)
@@ -113,8 +111,6 @@ end
 function tt_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, s::Int;
                    reverse::Bool=true, orthogonal::Bool=true,
                    seed::Int=1234, block_rks::Int=N) where {T<:Number, TH<:Number, TA<:Number, N}
-  rng = Random.default_rng()
-  Random.seed!(rng, seed)
 
   dims = A.ttv_dims
   TW = typeof(one(T) * one(TA) * one(TH))
@@ -173,7 +169,7 @@ function tt_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, s::Int;
     W_prev = ones(TW, 1, 1, 1, 1)  # W[N+1]: shape (rks_A, rks_H, b_rks, p), all 1 at boundary
     W_curr = W_prev
     @inbounds for k in N:-1:1
-      B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p, orthogonal; buffer=sketch_buffer)
+      B_sketch = generate_sketch_blocks(seed, k, 0, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p, orthogonal; reverse=true, buffer=sketch_buffer)
       W_curr = zeros(TW, A.ttv_rks[k], H.tto_rks[k], block_rks_vec[k], p)
       for j in 1:p
         contract_sketch_core_backwards!(view(W_curr,:,:,:,j), A.ttv_vec[k], H.tto_vec[k], view(B_sketch,:,:,:,j), view(W_prev,:,:,:,(k<N ? j : 1)); buffer=contract_buffer)
@@ -184,7 +180,7 @@ function tt_sketch(::Type{T}, H::TToperator{TH,N}, A::TTvector{TA,N}, s::Int;
     W_prev = ones(TW, 1, 1, 1, 1)  # W[1]: shape (rks_A, rks_H, b_rks, p), all 1 at boundary
     W_curr = W_prev
     @inbounds for k in 1:N
-      B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p, orthogonal; buffer=sketch_buffer)
+      B_sketch = generate_sketch_blocks(seed, k, 0, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p, orthogonal; reverse=false, buffer=sketch_buffer)
       W_curr = zeros(TW, A.ttv_rks[k+1], H.tto_rks[k+1], block_rks_vec[k+1], p)
       for j in 1:p
         contract_sketch_core_forwards!(view(W_curr,:,:,:,j), A.ttv_vec[k], H.tto_vec[k], view(B_sketch,:,:,:,j), view(W_prev,:,:,:,(k>1 ? j : 1)); buffer=contract_buffer)
@@ -203,8 +199,6 @@ end
 function tt_sketch(::Type{T}, A::NTuple{M, TTvector{TA,N}}, s::Int;
                    reverse::Bool=true, orthogonal::Bool=true,
                    seed::Int=1234, block_rks::Int=N) where {T<:Number, TA<:Number, N, M}
-  rng = Random.default_rng()
-  Random.seed!(rng, seed)
 
   dims = A[1].ttv_dims
   TW = typeof(one(T) * one(TA))
@@ -261,7 +255,7 @@ function tt_sketch(::Type{T}, A::NTuple{M, TTvector{TA,N}}, s::Int;
     W_prev = ones(TW, ntuple(i->1, M+2)...)  # W[N+1]: (M TT-rks, b_rks, p), all 1 at boundary
     W_curr = W_prev
     @inbounds for k in N:-1:1
-      B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p, orthogonal; buffer=sketch_buffer)
+      B_sketch = generate_sketch_blocks(seed, k, 0, T, block_rks_vec[k+1], dims[k], block_rks_vec[k], p, orthogonal; reverse=true, buffer=sketch_buffer)
       W_curr = zeros(TW, ntuple(i -> (i == M+1 ? block_rks_vec[k] : A[i].ttv_rks[k]), M+1)..., p)
       for j in 1:p
         contract_sketch_core_kronecker_backwards!(view(W_curr, ntuple(i->Colon(), M+1)..., j), ntuple(i -> A[i].ttv_vec[k], M), view(B_sketch,:,:,:,j), view(W_prev, ntuple(i->Colon(), M+1)..., (k<N ? j : 1)); buffer=contract_buffer)
@@ -272,7 +266,7 @@ function tt_sketch(::Type{T}, A::NTuple{M, TTvector{TA,N}}, s::Int;
     W_prev = ones(TW, ntuple(i->1, M+2)...)  # W[1]: (M TT-rks, b_rks, p), all 1 at boundary
     W_curr = W_prev
     @inbounds for k in 1:N
-      B_sketch = generate_sketch_blocks(rng, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p, orthogonal; buffer=sketch_buffer)
+      B_sketch = generate_sketch_blocks(seed, k, 0, T, block_rks_vec[k], dims[k], block_rks_vec[k+1], p, orthogonal; reverse=false, buffer=sketch_buffer)
       W_curr = zeros(TW, ntuple(i -> (i == M+1 ? block_rks_vec[k+1] : A[i].ttv_rks[k+1]), M+1)..., p)
       for j in 1:p
         contract_sketch_core_kronecker_forwards!(view(W_curr, ntuple(i->Colon(), M+1)..., j), ntuple(i -> A[i].ttv_vec[k], M), view(B_sketch,:,:,:,j), view(W_prev, ntuple(i->Colon(), M+1)..., (k>1 ? j : 1)); buffer=contract_buffer)

@@ -34,7 +34,17 @@ Three cases with optimized normalization:
 
 The normalization ensures consistent spectral properties across different sketching modes.
 """
-function generate_sketch_blocks(rng, ::Type{T}, left_rank, dim, right_rank, p, orthogonal; buffer=nothing, timer::TimerOutput = TimerOutput()) where T
+# Deterministic per-block seed. A block's Gaussian draw depends only on
+# (base_seed, bond_index, block_index, reverse) — NOT on the call's RNG history — so a
+# recursive sketch and its adaptive per-bond extensions are content-addressable and can be
+# cached/extended reproducibly across calls. `reverse` is mixed in because the forward and
+# reverse sweeps draw differently-shaped blocks at the same bond.
+@inline _block_seed(base_seed::Integer, bond_index::Integer, block_index::Integer, reverse::Bool) =
+    hash((UInt64(0x53_4b_45_54_43_48_00), Int(base_seed), Int(bond_index), Int(block_index), reverse))
+
+function generate_sketch_blocks(base_seed::Integer, bond_index::Integer, block_offset::Integer,
+                                ::Type{T}, left_rank, dim, right_rank, p, orthogonal;
+                                reverse::Bool=true, buffer=nothing, timer::TimerOutput = TimerOutput()) where T
   @assert (!orthogonal) || right_rank <= dim * left_rank
   use_identity = orthogonal && (right_rank == dim * left_rank)
   m = left_rank * dim
@@ -49,6 +59,16 @@ function generate_sketch_blocks(rng, ::Type{T}, left_rank, dim, right_rank, p, o
     end
   end
 
+  # Per-block Gaussian fill: block j (global index block_offset+j) gets its own seeded rng.
+  if !use_identity
+    @timeit timer "random number generator" begin
+      @inbounds for j in 1:p
+        rng_j = Random.Xoshiro(_block_seed(base_seed, bond_index, block_offset + j, reverse))
+        randn!(rng_j, @view block[:, :, j])
+      end
+    end
+  end
+
   if use_identity
     @timeit timer "identity block creation" begin
       fill!(block, T(0))
@@ -59,9 +79,7 @@ function generate_sketch_blocks(rng, ::Type{T}, left_rank, dim, right_rank, p, o
   elseif orthogonal && right_rank == 1
     # Fast path: each block is a single column of length m, orthonormal means
     # unit-norm. Skip the factorisation entirely — Gaussian + per-column
-    # normalise is identical to Stewart for right_rank=1 (and far cheaper than
-    # qr!). The final spectral scaling is sqrt(m/1) = sqrt(m).
-    @timeit timer "random number generator" randn!(rng, block)
+    # normalise is identical to Stewart for right_rank=1. Spectral scaling sqrt(m/1).
     @timeit timer "normalize+scale" begin
       scale_factor = sqrt(T(m))
       @inbounds for j in 1:p
@@ -71,21 +89,15 @@ function generate_sketch_blocks(rng, ::Type{T}, left_rank, dim, right_rank, p, o
     end
   elseif orthogonal
     # Stewart's algorithm: build each block's Q from random Householders via
-    # LAPACK.orgqr! (which internally uses blocked WY assembly). This skips
-    # the geqrf reduction phase that Gaussian + qr! pays for; ~1.5× faster
-    # than the naive qr! + Matrix(F.Q) chain at the block sizes we hit (m ~
-    # left_rank·dim up to a few thousand, right_rank up to ~64).
-    @timeit timer "random number generator" randn!(rng, block)
+    # LAPACK.orgqr! (blocked WY assembly), ~1.5× faster than qr! + Matrix(F.Q).
     @timeit timer "stewart_householders" begin
       tau = Vector{T}(undef, right_rank)
       @inbounds for j in 1:p
-        # Hand-rolled larfg + LAPACK.orgqr! per block (in-place on block[:,:,j])
         _stewart_block!(@view(block[:, :, j]), tau)
       end
     end
     @timeit timer "normalization" block .*= sqrt(T(m) / T(right_rank))
   else # Non-orthogonal Gaussian sketch
-    @timeit timer "random number generator" randn!(rng, block)
     @timeit timer "normalization" block .*= 1/sqrt(T(right_rank))
   end
   return reshape(block, left_rank, dim, right_rank, p)
