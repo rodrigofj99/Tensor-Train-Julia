@@ -357,7 +357,14 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
           @assert skⱼ == sketch_rks
         end
       end
-      seed = seed + 1
+    end
+    # Per-bond block ranks (deterministic from dims+block_rks). `sketch_rks .÷ block_rks_vec`
+    # is the current per-bond block count, so adaptive extensions append blocks at the existing
+    # block offset under ONE base seed — content-addressable & reproducible (no seed+1 batches).
+    block_rks_vec = ones(Int, N+1)
+    block_rks_vec[1:N] .= block_rks
+    for kk = N:-1:1
+      block_rks_vec[kk] = min(block_rks_vec[kk], dims[kk]*block_rks_vec[kk+1])
     end
     out_rks = ones(Int, N+1)
     ot = zeros(Int, N)
@@ -444,14 +451,14 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
                   s_prev_kp1 = sketch_rks[k+1]
                   W_extra = Vector{Vector{Matrix{T}}}(undef, m)
                   local sketch_rks_extra
+                  block_off = sketch_rks .÷ block_rks_vec   # current per-bond block count
                   for j = 1:m
-                    Wⱼ_extra, skⱼ_extra = tt_recursive_sketch(T, y[j], rks_inc; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
+                    Wⱼ_extra, skⱼ_extra = tt_recursive_sketch(T, y[j], rks_inc; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, block_offset=block_off, timer=timer)
                     W_extra[j] = Wⱼ_extra
                     if j == 1
                       sketch_rks_extra = skⱼ_extra
                     end
                   end
-                  seed = seed + 1
                   for l = k+1:N
                     s_prev = sketch_rks[l]
                     new_total = s_prev + sketch_rks_extra[l]
