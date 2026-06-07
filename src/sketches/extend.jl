@@ -70,7 +70,21 @@ function extend_recursive_sketch!(g::SketchGroup{TW}, A::TTvector{TA,N}, target:
       # (or the tiled ones boundary for k = N) — this is what makes a sample globally addressable.
       V = k < N ? Array(view(g.W[k+1], :, :, off+1:target[k])) : repeat(g.W[N+1], 1, 1, add)
       contract_sketch_core_backwards!(Wk_new, A.ttv_vec[k], S, V)
-      g.W[k] = off == 0 ? Wk_new : cat(g.W[k], Wk_new; dims=3)
+      # Geometric-growth append into a capacity buffer (amortized O(final width), avoids the
+      # O(width²) cat blow-up). finalize_cols / _slab_var index only the used 1:counts[k] slabs;
+      # spare capacity is never read.
+      if off == 0
+        g.W[k] = Wk_new
+      else
+        Wk = g.W[k]
+        if size(Wk, 3) < target[k]
+          newcap = max(2*size(Wk, 3), target[k])
+          buf = Array{TW,3}(undef, size(Wk, 1), size(Wk, 2), newcap)
+          copyto!(view(buf, :, :, 1:off), view(Wk, :, :, 1:off))
+          Wk = buf; g.W[k] = buf
+        end
+        copyto!(view(Wk, :, :, off+1:target[k]), Wk_new)
+      end
       g.counts[k] = target[k]
     end
   end
@@ -118,7 +132,8 @@ function finalize_cols(groups::AbstractVector{<:SketchGroup{T}}, l::Int, rks_l::
   blocks = Matrix{T}[]
   for (gi, g) in enumerate(groups)
     g.counts[l] == 0 && continue
-    M = reshape(g.W[l], rks_l, g.brv[l]*g.counts[l])
+    # View the used slabs only (g.W[l] may carry spare geometric capacity).
+    M = reshape(view(g.W[l], :, :, 1:g.counts[l]), rks_l, g.brv[l]*g.counts[l])
     # Divide (not multiply-by-reciprocal) so the single-group :equal case is bit-identical to
     # tt_recursive_sketch's `W ./= sqrt(count)`.
     push!(blocks, M ./ sqrt(g.counts[l] / ws[gi]))
