@@ -335,6 +335,7 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
                                    orthogonal::Bool=true,
                                    block_rks::Int=N,
                                    seed::Int=1234,
+                                   caches=nothing,
                                    timer::TimerOutput=TimerOutput()) where {T,N}
   @assert n_samples >= ℓ_inc "n_samples ($n_samples) must be ≥ ℓ_inc ($ℓ_inc)"
   @timeit timer "ttrand_rounding_adaptive" begin
@@ -344,42 +345,42 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
     @assert all(y[j].ttv_dims == dims for j=2:m)
 
     vec = Vector{Array{T,3}}(undef, N)
-    # Initial sketches — same seed across j for linearity
-    W = Vector{Vector{Matrix{T}}}(undef, m)
-    local sketch_rks
+    # Per-term reusable sketch caches (uniform block_rks ⇒ one group each). When the caller passes
+    # `caches` (persisted across calls, e.g. a GMRES window vector), they are reused and extended in
+    # place; otherwise build throwaway caches. The criterion below is total-independent (the
+    # sketch_rks factor cancels the 1/√count column normalization), so the grow pattern is free.
+    if caches === nothing
+      caches = [cached_sketch(T, y[j], block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer) for j=1:m]
+    end
+    # Working sketch: only the active bond's right-neighbour W[j][k+1] is materialized at a time
+    # (re-derived from the cache at each bond and after each growth). W[j][1] (the boundary) is
+    # materialized once for the norm estimate.
+    W = [Vector{Matrix{T}}(undef, N+1) for j=1:m]
     @timeit timer "reverse_sketch" begin
       for j = 1:m
-        Wⱼ, skⱼ = tt_recursive_sketch(T, y[j], ℓ_min+n_samples; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-        W[j] = Wⱼ
-        if j == 1
-          sketch_rks = skⱼ
-        else
-          @assert skⱼ == sketch_rks
-        end
+        W[j][1] = sketch_matrix(caches[j], 1, y[j].ttv_rks[1])
       end
     end
-    # Per-bond block ranks (deterministic from dims+block_rks). `sketch_rks .÷ block_rks_vec`
-    # is the current per-bond block count, so adaptive extensions append blocks at the existing
-    # block offset under ONE base seed — content-addressable & reproducible (no seed+1 batches).
-    block_rks_vec = ones(Int, N+1)
-    block_rks_vec[1:N] .= block_rks
-    for kk = N:-1:1
-      block_rks_vec[kk] = min(block_rks_vec[kk], dims[kk]*block_rks_vec[kk+1])
-    end
+    _total_cols(l) = sum(g.brv[l]*g.counts[l] for g in caches[1].groups)
+    sketch_rks = [_total_cols(l) for l=1:N+1]
+
     out_rks = ones(Int, N+1)
     ot = zeros(Int, N)
 
     # Boundary sketch of the linear combination (linearity via shared seed)
     y_norm = norm(sum(α[j].*W[j][1] for j=1:m))
     τ = ε * y_norm / sqrt(N - 1)
-    rks_inc = ones(Int, N+1)
-    rks_inc[1] = 0
-    rks_inc[2:N] .= n_samples
 
     @timeit timer "orthogonalization" begin
       Yₖ = [α[j].*reshape(y[j].ttv_vec[1], 1, dims[1], y[j].ttv_rks[2]) for j=1:m]
       @inbounds for k in 1:N-1
         max_basis = bond_rank_cap(dims, k, ℓ_max)
+        # Materialize the active bond's right-neighbour from the cache (it may have grown while
+        # earlier bonds were processed). This is the only W[j] bond read at bond k.
+        @timeit timer "reverse_sketch" for j = 1:m
+          W[j][k+1] = sketch_matrix(caches[j], k+1, y[j].ttv_rks[k+1])
+        end
+        sketch_rks[k+1] = _total_cols(k+1)
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
             Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
@@ -449,40 +450,22 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
               @timeit timer "Recursive sketch" begin
                 if sketch_rks[k+1] < ℓ+n_samples
                   s_prev_kp1 = sketch_rks[k+1]
-                  W_extra = Vector{Vector{Matrix{T}}}(undef, m)
-                  local sketch_rks_extra
-                  block_off = sketch_rks .÷ block_rks_vec   # current per-bond block count
+                  # Grow each cache so bonds k+1:N have ≥ ℓ+n_samples columns (only the missing
+                  # samples are computed, reusing what's cached). The adaptive criterion is
+                  # total-independent, so any sufficient growth gives the same decisions.
+                  want = copy(sketch_rks)
+                  for l = k+1:N
+                    want[l] = max(want[l], ℓ+n_samples)
+                  end
                   for j = 1:m
-                    Wⱼ_extra, skⱼ_extra = tt_recursive_sketch(T, y[j], rks_inc; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, block_offset=block_off, timer=timer)
-                    W_extra[j] = Wⱼ_extra
-                    if j == 1
-                      sketch_rks_extra = skⱼ_extra
-                    end
+                    ensure_columns!(caches[j], y[j], want; seed=seed, orthogonal=orthogonal, timer=timer)
+                    W[j][k+1] = sketch_matrix(caches[j], k+1, y[j].ttv_rks[k+1])
                   end
                   for l = k+1:N
-                    s_prev = sketch_rks[l]
-                    new_total = s_prev + sketch_rks_extra[l]
-                    for j = 1:m
-                      Wjl = W[j][l]
-                      # Geometric-growth append: grow the buffer to ≥ new_total only when its
-                      # capacity is exhausted (amortized O(final width) copies) instead of cat'ing
-                      # a fresh array every extension (was O(width²) work, ~8.8 GiB / 2.8s on the
-                      # cookie solve). Capacity columns past sketch_rks[l] are never read — every
-                      # consumer indexes within sketch_rks, and bond 1 (the only full-matrix read,
-                      # the boundary norm) is never extended (extensions touch l = k+1:N only).
-                      if size(Wjl, 2) < new_total
-                        newcap = max(2*size(Wjl, 2), new_total)
-                        buf = Matrix{T}(undef, size(Wjl, 1), newcap)
-                        copyto!(view(buf, :, 1:s_prev), view(Wjl, :, 1:s_prev))
-                        Wjl = buf
-                        W[j][l] = buf
-                      end
-                      copyto!(view(Wjl, :, s_prev+1:new_total), W_extra[j][l])
-                      @views Wjl[:, 1:s_prev] .*= sqrt(s_prev / new_total)
-                      @views Wjl[:, s_prev+1:new_total] .*= sqrt(sketch_rks_extra[l] / new_total)
-                    end
-                    sketch_rks[l] = new_total
+                    sketch_rks[l] = _total_cols(l)
                   end
+                  # Rescale S_full's kept columns to the new 1/√count normalization so they are
+                  # consistent with the freshly materialized (new-normalization) tail columns below.
                   S_full[:, 1:n_samples-ℓ_inc_eff] .*= sqrt(s_prev_kp1 / sketch_rks[k+1])
                 end
               end
@@ -515,7 +498,6 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
           end
           Yₖ = Yₖ₊₁
         end
-        rks_inc[k+1] = 0
       end
       vec[N] = sum(Yₖ[j] for j=1:m)
     end
