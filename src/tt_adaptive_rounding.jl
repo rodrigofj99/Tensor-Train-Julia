@@ -463,9 +463,23 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
                     s_prev = sketch_rks[l]
                     new_total = s_prev + sketch_rks_extra[l]
                     for j = 1:m
-                      W[j][l] = cat(W[j][l], W_extra[j][l], dims=2)
-                      W[j][l][:, 1:s_prev] .*= sqrt(s_prev / new_total)
-                      W[j][l][:, (s_prev+1):end] .*= sqrt(sketch_rks_extra[l] / new_total)
+                      Wjl = W[j][l]
+                      # Geometric-growth append: grow the buffer to ≥ new_total only when its
+                      # capacity is exhausted (amortized O(final width) copies) instead of cat'ing
+                      # a fresh array every extension (was O(width²) work, ~8.8 GiB / 2.8s on the
+                      # cookie solve). Capacity columns past sketch_rks[l] are never read — every
+                      # consumer indexes within sketch_rks, and bond 1 (the only full-matrix read,
+                      # the boundary norm) is never extended (extensions touch l = k+1:N only).
+                      if size(Wjl, 2) < new_total
+                        newcap = max(2*size(Wjl, 2), new_total)
+                        buf = Matrix{T}(undef, size(Wjl, 1), newcap)
+                        copyto!(view(buf, :, 1:s_prev), view(Wjl, :, 1:s_prev))
+                        Wjl = buf
+                        W[j][l] = buf
+                      end
+                      copyto!(view(Wjl, :, s_prev+1:new_total), W_extra[j][l])
+                      @views Wjl[:, 1:s_prev] .*= sqrt(s_prev / new_total)
+                      @views Wjl[:, s_prev+1:new_total] .*= sqrt(sketch_rks_extra[l] / new_total)
                     end
                     sketch_rks[l] = new_total
                   end
