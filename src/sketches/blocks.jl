@@ -35,16 +35,18 @@ Three cases with optimized normalization:
 The normalization ensures consistent spectral properties across different sketching modes.
 """
 # Deterministic per-block seed. A block's Gaussian draw depends only on
-# (base_seed, bond_index, block_index, reverse) — NOT on the call's RNG history — so a
+# (base_seed, bond_index, block_index, reverse, group) — NOT on the call's RNG history — so a
 # recursive sketch and its adaptive per-bond extensions are content-addressable and can be
 # cached/extended reproducibly across calls. `reverse` is mixed in because the forward and
-# reverse sweeps draw differently-shaped blocks at the same bond.
-@inline _block_seed(base_seed::Integer, bond_index::Integer, block_index::Integer, reverse::Bool) =
-    hash((UInt64(0x53_4b_45_54_43_48_00), Int(base_seed), Int(bond_index), Int(block_index), reverse))
+# reverse sweeps draw differently-shaped blocks at the same bond. `group` gives disjoint block
+# namespaces so independent sketch groups (e.g. an `block_rks` initial sketch and a
+# `block_rks_inc` extension) draw independent blocks even at the same (bond, block_index).
+@inline _block_seed(base_seed::Integer, bond_index::Integer, block_index::Integer, reverse::Bool, group::Integer) =
+    hash((UInt64(0x53_4b_45_54_43_48_00), Int(base_seed), Int(bond_index), Int(block_index), reverse, Int(group)))
 
 function generate_sketch_blocks(base_seed::Integer, bond_index::Integer, block_offset::Integer,
                                 ::Type{T}, left_rank, dim, right_rank, p, orthogonal;
-                                reverse::Bool=true, buffer=nothing, timer::TimerOutput = TimerOutput()) where T
+                                reverse::Bool=true, group::Integer=0, buffer=nothing, timer::TimerOutput = TimerOutput()) where T
   @assert (!orthogonal) || right_rank <= dim * left_rank
   use_identity = orthogonal && (right_rank == dim * left_rank)
   m = left_rank * dim
@@ -63,7 +65,7 @@ function generate_sketch_blocks(base_seed::Integer, bond_index::Integer, block_o
   if !use_identity
     @timeit timer "random number generator" begin
       @inbounds for j in 1:p
-        rng_j = Random.Xoshiro(_block_seed(base_seed, bond_index, block_offset + j, reverse))
+        rng_j = Random.Xoshiro(_block_seed(base_seed, bond_index, block_offset + j, reverse, group))
         randn!(rng_j, @view block[:, :, j])
       end
     end
