@@ -732,8 +732,8 @@ _sg_resid(op, x, b) = norm(tt_rounding(_sg_apply(op, x) - b; tol=1e-10)) / norm(
 """
     sketched_gmres(op, b, x0; prec=identity, m=50, tol=1e-8, rmax=256,
                    max_iters=m, sketch_size=2max_iters, k_trunc=2, ε_cap=0.1,
-                   final_trim=true, orthogonal=true, block_rks=8, seed=1234,
-                   sample_res=true, verbose=true) -> (x, history)
+                   relax_factor=1/max_iters, final_trim=true, orthogonal=true,
+                   block_rks=8, seed=1234, sample_res=true, verbose=true) -> (x, history)
 
 Sketched GMRES (Nakatsukasa & Tropp, arXiv:2111.00113) for the TT linear system `A x = b`,
 with optional right preconditioner `prec` (a function `v ↦ M⁻¹ v`, default identity). `op` is
@@ -748,10 +748,13 @@ is formed by the mixed **adaptive** rounding
 sketched implicitly and `∑ hᵢ vᵢ` is never formed.
 
 The per-vector tolerance **relaxes like an inexact Krylov solver**:
-`ε_basis,j = clamp(tol / relres_{j−1}, tol, ε_cap)` — tight while the residual is large, loose as
-it shrinks — so the basis stays at its bounded natural rank instead of inflating by chasing
-components the solver does not need. `final_trim` adds a deterministic trim. The LS column is
-`D[j] = S·(H·M⁻¹·v_j)`; the solution is `x = x₀ + M⁻¹(∑ yᵢ vᵢ)`.
+`ε_basis,j = clamp(relax_factor · tol / relres_{j−1}, tol, ε_cap)` — tight while the residual is
+large, loose as it shrinks — so the basis stays at its bounded natural rank instead of inflating
+by chasing components the solver does not need. `relax_factor=1` is the (optimistic)
+Bouras–Frayssé heuristic; the default `relax_factor=1/max_iters` is the van-den-Eshof/Simoncini
+safety-factor tightening, which makes the residual actually reach `tol` rather than stagnating
+just above it. `final_trim` adds a deterministic trim. The LS column is `D[j] = S·(A·M⁻¹·v_j)`;
+the solution is `x = x₀ + M⁻¹(∑ yᵢ vᵢ)`.
 
 `history` is a `Vector{NamedTuple}` with `(iter, res_sketch)` per step; the final entry also
 carries `res_sample`, a sampled estimate of `‖b − H x‖/‖b‖`.
@@ -759,7 +762,7 @@ carries `res_sample`, a sampled estimate of `‖b − H x‖/‖b‖`.
 function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
                         prec=identity, m::Int=50, tol::Real=1e-8, rmax::Int=256,
                         max_iters::Int=m, sketch_size::Int=2max_iters, k_trunc::Int=2,
-                        ε_cap::Real=0.1, final_trim::Bool=true, orthogonal::Bool=true,
+                        ε_cap::Real=0.1, relax_factor::Real=1/max_iters, final_trim::Bool=true, orthogonal::Bool=true,
                         block_rks=8, seed::Int=1234, sample_res::Bool=true,
                         track_cond::Bool=false, track_exact::Bool=false, verbose::Bool=true) where {T,N}
     s = sketch_size                         # common embedding dimension (= 2·max_iters)
@@ -792,7 +795,9 @@ function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
 
     for j = 1:m
         # Inexact-Krylov relaxation: tighter early, looser as the residual shrinks.
-        ε_basis = clamp(tol / relres_prev, tol, ε_cap)
+        # relax_factor=1 is Bouras–Frayssé; relax_factor=1/max_iters is the safe
+        # van-den-Eshof/Simoncini-style tightening (a-priori, no tuning).
+        ε_basis = clamp(relax_factor * tol / relres_prev, tol, ε_cap)
 
         pv = prec(B_window[end])            # M⁻¹ v_j
         # Embedding of A·M⁻¹·v_j (drives the sketched GS and is the LS column D[j]).
