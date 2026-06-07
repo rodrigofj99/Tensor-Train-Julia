@@ -719,11 +719,15 @@ function _sg_embed(op, pv, s, orthogonal, seed, block_rks; timer::TimerOutput=Ti
     end
     return S
 end
-_sg_round(op::TToperator{T,N}, pv, h, window, ε, orthogonal, block_rks, seed; timer::TimerOutput=TimerOutput()) where {T,N} =
+# win_caches: per-window-vector CachedSketch (aligned with `window`), reused/extended across
+# iterations so a window vector is sketched once. Summands change every step (pv changes) → nothing
+# caches. Only the summand path supports it (the TToperator overload ignores win_caches).
+_sg_round(op::TToperator{T,N}, pv, h, window, ε, orthogonal, block_rks, seed; win_caches=nothing, timer::TimerOutput=TimerOutput()) where {T,N} =
     ttrand_rounding_adaptive(vcat(one(T), -h), op, vcat([pv], window), ε; orthogonal=orthogonal, block_rks=block_rks, seed=seed, timer=timer)
-function _sg_round(op, pv, h, window, ε, orthogonal, block_rks, seed; timer::TimerOutput=TimerOutput())
+function _sg_round(op, pv, h, window, ε, orthogonal, block_rks, seed; win_caches=nothing, timer::TimerOutput=TimerOutput())
     summ = op(pv); TT = eltype(summ[1])
-    ttrand_rounding_adaptive(vcat(ones(TT, length(summ)), -h), vcat(summ, window), ε; orthogonal=orthogonal, block_rks=block_rks, seed=seed, timer=timer)
+    caches = win_caches === nothing ? nothing : vcat(fill(nothing, length(summ)), win_caches)
+    ttrand_rounding_adaptive(vcat(ones(TT, length(summ)), -h), vcat(summ, window), ε; orthogonal=orthogonal, block_rks=block_rks, seed=seed, caches=caches, timer=timer)
 end
 _sg_apply(op::TToperator, x) = op * x
 _sg_apply(op, x) = reduce(+, op(x))
@@ -765,8 +769,14 @@ function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
                         ε_cap::Real=0.1, relax_factor::Real=1/max_iters, final_trim::Bool=true, orthogonal::Bool=true,
                         block_rks=8, seed::Int=1234, sample_res::Bool=true,
                         track_cond::Bool=false, track_exact::Bool=false, verbose::Bool=true,
+                        reuse_sketches::Bool=true,
                         timer::TimerOutput=TimerOutput(), show_timer::Bool=false) where {T,N}
     s = sketch_size                         # common embedding dimension (= 2·max_iters)
+    # Per-window-vector reusable sketch cache (Stage-5): each window vector is sketched once and
+    # reused/extended while it sits in the truncation window. init_rank must match the sum overload's
+    # ℓ_min+n_samples defaults (ℓ_min=4, n_samples=max(N÷2,4)) so the initial prefix lines up.
+    _cache_init_rank = 4 + max(N ÷ 2, 4)
+    _mk_cache(vec) = cached_sketch(T, vec, block_rks, block_rks, _cache_init_rank; seed=seed, orthogonal=orthogonal)
     # Initial residual r0 = b − A x0 (x0 typically the zero TT).
     x0_zero = all(c -> all(iszero, c), x0.ttv_vec)
     r0 = x0_zero ? tt_rounding(b; tol=tol, rmax=rmax) :
@@ -781,6 +791,7 @@ function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
 
     B_window        = TTvector{T,N}[v1]     # truncated GS window
     B_sketch_window = [sketch_r0 ./ β]      # S·v_i for window vectors
+    cache_window    = reuse_sketches ? Any[_mk_cache(v1)] : nothing   # parallel reusable sketch caches
     V = TTvector{T,N}[v1]                   # full basis (kept for the assembly)
     D = Vector{Vector{T}}()                 # full sketched images S·(H M⁻¹ v_j)
     history = NamedTuple[]
@@ -807,7 +818,7 @@ function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
         push!(D, S_Hv)
 
         # New Krylov vector = A·M⁻¹·v_j − ∑ hᵢ vᵢ, rounded adaptively (∑ never formed).
-        w = @timeit timer "round" _sg_round(op, pv, h, B_window, ε_basis, orthogonal, block_rks, seed; timer=timer)
+        w = @timeit timer "round" _sg_round(op, pv, h, B_window, ε_basis, orthogonal, block_rks, seed; win_caches=cache_window, timer=timer)
         final_trim && (w = @timeit timer "final_trim" tt_rounding(w; tol=ε_basis))
 
         S_w, = @timeit timer "sketch_w" tt_combined_sketch(T, w, s, s;
@@ -817,6 +828,9 @@ function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
         push!(V, w)
         push!(B_window, w);              length(B_window) > k_trunc && popfirst!(B_window)
         push!(B_sketch_window, S_w ./ βw); length(B_sketch_window) > k_trunc && popfirst!(B_sketch_window)
+        if reuse_sketches
+            push!(cache_window, _mk_cache(w)); length(cache_window) > k_trunc && popfirst!(cache_window)
+        end
 
         # ── Basis conditioning ────────────────────────────────────────────────
         push!(Vsk, S_w ./ βw)
