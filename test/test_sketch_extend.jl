@@ -1,5 +1,6 @@
 using TensorTrains, Test, LinearAlgebra
-using TensorTrains: SketchGroup, extend_recursive_sketch!, finalize_cols, tt_recursive_sketch
+using TensorTrains: SketchGroup, extend_recursive_sketch!, finalize_cols, tt_recursive_sketch,
+                    CachedSketch, cached_sketch, ensure_columns!, sketch_matrix
 
 BLAS.set_num_threads(1)   # determinism for the bit-identity checks
 
@@ -67,5 +68,24 @@ end
             acc += (norm(comb1)/ny)^2
         end
         @test isapprox(acc/nseed, 1.0; atol=0.05)   # unbiased E[‖Sy‖²/‖y‖²] ≈ 1
+    end
+
+    @testset "CachedSketch: grow-then-grow-more == from-scratch (bit-identical)" begin
+        for (brk, brk_inc) in ((4, 4), (7, 3))     # uniform and mixed block_rks
+            want1 = fill(20, N+1); want1[N+1] = 1
+            want2 = fill(40, N+1); want2[N+1] = 1
+            # incremental: build, grow to want1, then to want2
+            c1 = cached_sketch(Float64, A, brk, brk_inc, 12; seed=seed)
+            ensure_columns!(c1, A, want1; seed=seed)
+            ensure_columns!(c1, A, want2; seed=seed)
+            # from scratch: build, grow straight to want2
+            c2 = cached_sketch(Float64, A, brk, brk_inc, 12; seed=seed)
+            ensure_columns!(c2, A, want2; seed=seed)
+            for l in 1:N+1
+                @test sketch_matrix(c1, l, rks[l]) == sketch_matrix(c2, l, rks[l])
+            end
+            # and each bond actually has ≥ want2 columns
+            @test all(size(sketch_matrix(c1, l, rks[l]), 2) >= want2[l] for l in 1:N)
+        end
     end
 end

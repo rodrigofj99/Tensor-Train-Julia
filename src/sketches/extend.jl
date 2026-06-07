@@ -125,3 +125,70 @@ function finalize_cols(groups::AbstractVector{<:SketchGroup{T}}, l::Int, rks_l::
   end
   return reduce(hcat, blocks)
 end
+
+# ── Per-vector cache: one block-rks group (uniform) or two (mixed block_rks/block_rks_inc) ──────
+# The last group is the *active* (growable) one; earlier groups are frozen (the initial sketch).
+struct CachedSketch{T}
+  groups::Vector{SketchGroup{T}}
+end
+
+# Per-bond block counts for a uniform target rank `R` (the initial-sketch heuristic).
+function _heuristic_p(R::Int, brv::Vector{Int}, N::Int)
+  rks = fill(R, N+1); rks[N+1] = 1
+  return compute_sketch_blocks_heuristic(rks, brv, N; reverse=true)
+end
+
+"""
+    cached_sketch(T, A, block_rks, block_rks_inc, init_rank; seed, orthogonal, timer) -> CachedSketch
+
+Build a reusable sketch cache for `A`: an initial (frozen) group of block rank `block_rks` sized to
+the `init_rank` heuristic, plus — when `block_rks_inc != block_rks` — an empty extension group of
+block rank `block_rks_inc`. When `block_rks_inc == block_rks` the single group both seeds and extends.
+Grow it with `ensure_columns!`; read normalized columns with `sketch_matrix`.
+"""
+function cached_sketch(::Type{T}, A::TTvector{TA,N}, block_rks::Int, block_rks_inc::Int, init_rank::Int;
+                       seed::Int=1234, orthogonal::Bool=true, timer::TimerOutput=TimerOutput()) where {T<:Number,TA<:Number,N}
+  init = SketchGroup(T, A, block_rks, 0)
+  extend_recursive_sketch!(init, A, _heuristic_p(init_rank, init.brv, N); seed=seed, orthogonal=orthogonal, timer=timer)
+  TW = eltype(init.W[1])
+  groups = block_rks_inc == block_rks ? SketchGroup{TW}[init] :
+                                        SketchGroup{TW}[init, SketchGroup(T, A, block_rks_inc, 1)]
+  return CachedSketch{TW}(groups)
+end
+
+"""
+    ensure_columns!(cache, A, want; seed, orthogonal, timer) -> cache
+
+Grow the cache's active group so each bond `l` has at least `want[l]` *total* sketch columns
+(across all groups). The frozen groups are left untouched; only the missing samples of the active
+group are computed (reusing what's already cached).
+"""
+function ensure_columns!(cache::CachedSketch, A::TTvector{TA,N}, want::AbstractVector{Int};
+                         seed::Int=1234, orthogonal::Bool=true, timer::TimerOutput=TimerOutput()) where {TA,N}
+  active = cache.groups[end]
+  # columns already supplied by the frozen groups
+  frozen_cols = zeros(Int, N+1)
+  @inbounds for gi in 1:length(cache.groups)-1, l in 1:N+1
+    frozen_cols[l] += cache.groups[gi].counts[l] * cache.groups[gi].brv[l]
+  end
+  # active-group sample target covering the remaining columns, then the smallest non-decreasing
+  # target ≥ that (running max from the left) so the reverse recursion is satisfiable.
+  target = copy(active.counts)
+  @inbounds for l in 1:N
+    need = max(0, want[l] - frozen_cols[l])
+    target[l] = max(active.counts[l], cld(need, active.brv[l]))
+  end
+  @inbounds for l in 2:N
+    target[l] = max(target[l], target[l-1])
+  end
+  extend_recursive_sketch!(active, A, target; seed=seed, orthogonal=orthogonal, timer=timer)
+  return cache
+end
+
+"""
+    sketch_matrix(cache, l, rks_l; weighting=:equal) -> Matrix
+
+Normalized sketch columns at bond `l` (combines all groups via `finalize_cols`).
+"""
+sketch_matrix(cache::CachedSketch, l::Int, rks_l::Int; weighting::Symbol=:equal) =
+  finalize_cols(cache.groups, l, rks_l; weighting=weighting)
