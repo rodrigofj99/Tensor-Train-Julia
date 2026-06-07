@@ -709,21 +709,21 @@ end
 # recursive sketch) or a function `x ↦ [𝒦_k·x]` returning the Kronecker/MPO summands of
 # `A·x` (sum-of-Kronecker form). The summand path never forms a dense operator core and
 # reuses the plain linear-combination adaptive overload — by linearity `S·(A·x)=∑ₖ S·𝒦ₖx`.
-_sg_embed(op::TToperator{T,N}, pv, s, orthogonal, seed, block_rks) where {T,N} =
-    Base.vec(tt_combined_sketch(T, op, pv, s, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)[1])
-function _sg_embed(op, pv, s, orthogonal, seed, block_rks)
+_sg_embed(op::TToperator{T,N}, pv, s, orthogonal, seed, block_rks; timer::TimerOutput=TimerOutput()) where {T,N} =
+    Base.vec(tt_combined_sketch(T, op, pv, s, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)[1])
+function _sg_embed(op, pv, s, orthogonal, seed, block_rks; timer::TimerOutput=TimerOutput())
     summ = op(pv); TT = eltype(summ[1])
-    S = Base.vec(tt_combined_sketch(TT, summ[1], s, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)[1])
+    S = Base.vec(tt_combined_sketch(TT, summ[1], s, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)[1])
     for k = 2:length(summ)
-        S = S .+ Base.vec(tt_combined_sketch(TT, summ[k], s, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)[1])
+        S = S .+ Base.vec(tt_combined_sketch(TT, summ[k], s, s; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)[1])
     end
     return S
 end
-_sg_round(op::TToperator{T,N}, pv, h, window, ε, orthogonal, block_rks, seed) where {T,N} =
-    ttrand_rounding_adaptive(vcat(one(T), -h), op, vcat([pv], window), ε; orthogonal=orthogonal, block_rks=block_rks, seed=seed)
-function _sg_round(op, pv, h, window, ε, orthogonal, block_rks, seed)
+_sg_round(op::TToperator{T,N}, pv, h, window, ε, orthogonal, block_rks, seed; timer::TimerOutput=TimerOutput()) where {T,N} =
+    ttrand_rounding_adaptive(vcat(one(T), -h), op, vcat([pv], window), ε; orthogonal=orthogonal, block_rks=block_rks, seed=seed, timer=timer)
+function _sg_round(op, pv, h, window, ε, orthogonal, block_rks, seed; timer::TimerOutput=TimerOutput())
     summ = op(pv); TT = eltype(summ[1])
-    ttrand_rounding_adaptive(vcat(ones(TT, length(summ)), -h), vcat(summ, window), ε; orthogonal=orthogonal, block_rks=block_rks, seed=seed)
+    ttrand_rounding_adaptive(vcat(ones(TT, length(summ)), -h), vcat(summ, window), ε; orthogonal=orthogonal, block_rks=block_rks, seed=seed, timer=timer)
 end
 _sg_apply(op::TToperator, x) = op * x
 _sg_apply(op, x) = reduce(+, op(x))
@@ -764,7 +764,8 @@ function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
                         max_iters::Int=m, sketch_size::Int=2max_iters, k_trunc::Int=2,
                         ε_cap::Real=0.1, relax_factor::Real=1/max_iters, final_trim::Bool=true, orthogonal::Bool=true,
                         block_rks=8, seed::Int=1234, sample_res::Bool=true,
-                        track_cond::Bool=false, track_exact::Bool=false, verbose::Bool=true) where {T,N}
+                        track_cond::Bool=false, track_exact::Bool=false, verbose::Bool=true,
+                        timer::TimerOutput=TimerOutput(), show_timer::Bool=false) where {T,N}
     s = sketch_size                         # common embedding dimension (= 2·max_iters)
     # Initial residual r0 = b − A x0 (x0 typically the zero TT).
     x0_zero = all(c -> all(iszero, c), x0.ttv_vec)
@@ -801,16 +802,16 @@ function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
 
         pv = prec(B_window[end])            # M⁻¹ v_j
         # Embedding of A·M⁻¹·v_j (drives the sketched GS and is the LS column D[j]).
-        S_Hv = _sg_embed(op, pv, s, orthogonal, seed, block_rks)
+        S_Hv = @timeit timer "embed" _sg_embed(op, pv, s, orthogonal, seed, block_rks; timer=timer)
         h = reduce(hcat, B_sketch_window) \ S_Hv      # sketched GS against the window
         push!(D, S_Hv)
 
         # New Krylov vector = A·M⁻¹·v_j − ∑ hᵢ vᵢ, rounded adaptively (∑ never formed).
-        w = _sg_round(op, pv, h, B_window, ε_basis, orthogonal, block_rks, seed)
-        final_trim && (w = tt_rounding(w; tol=ε_basis))
+        w = @timeit timer "round" _sg_round(op, pv, h, B_window, ε_basis, orthogonal, block_rks, seed; timer=timer)
+        final_trim && (w = @timeit timer "final_trim" tt_rounding(w; tol=ε_basis))
 
-        S_w, = tt_combined_sketch(T, w, s, s;
-                                  orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks)
+        S_w, = @timeit timer "sketch_w" tt_combined_sketch(T, w, s, s;
+                                  orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
         βw = norm(S_w)
         w = w / βw
         push!(V, w)
@@ -819,7 +820,6 @@ function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
 
         # ── Basis conditioning ────────────────────────────────────────────────
         push!(Vsk, S_w ./ βw)
-        κ_C = cond(reduce(hcat, Vsk))       # sketched basis condition (what the GS sees)
         κ_V = T(NaN)
         if track_cond
             jj = length(V)                  # = j+1; w is V[jj]
@@ -829,8 +829,9 @@ function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
             κ_V = sqrt(cond(Symmetric(Gram[1:jj, 1:jj])))
         end
 
+        κ_C = @timeit timer "cond" cond(reduce(hcat, Vsk))  # sketched basis condition (moved here for timing)
         Dmat = reduce(hcat, D)              # s × j
-        y    = qr(Dmat, ColumnNorm()) \ rhs
+        y    = @timeit timer "lsq" qr(Dmat, ColumnNorm()) \ rhs
         res_sketch = norm(rhs - Dmat * y) / β
 
         # Exact residual of the current iterate xⱼ = M⁻¹(∑_{i≤j} yᵢ vᵢ): ‖H xⱼ − b‖/‖b‖.
@@ -853,24 +854,32 @@ function sketched_gmres(op, b::TTvector{T,N}, x0::TTvector{T,N};
     end
 
     # ── Assemble x = x0 + M⁻¹ (∑_i y_i v_i) ───────────────────────────────────
-    # Deterministic exact weighted sum + rounding (the randomized ttrand_rounding here was a
-    # fixed-seed perturbation, a candidate for the config-invariant residual floor).
-    u = y[1] * V[1]
-    for i = 2:k
-        u = u + y[i] * V[i]
-    end
-    u = tt_rounding(u; tol=tol, rmax=rmax)
+    # Round the weighted sum with the adaptive randomized linear-combination overload: a single
+    # sketched sweep that never forms ∑ᵢ yᵢ·Vᵢ. Forming it explicitly inflated the running TT to
+    # ∑ᵢ rank(Vᵢ) (~thousands of ranks, 15.6 GiB) and dominated the solve (~40% of wall). This is
+    # the same machinery the basis vectors are built with; accuracy is preserved (the achieved
+    # residual ~1e-6 sits well above tol). u is the *preconditioned* variable, so its rounding
+    # perturbs the residual by ≈‖H·M⁻¹‖·tol≈tol — harmless (see the no-round note below).
+    @timeit timer "assemble" begin
+    u = k == 1 ? y[1] * V[1] :
+        ttrand_rounding_adaptive(y[1:k], V[1:k], tol; orthogonal=orthogonal, block_rks=block_rks, seed=seed)
+    # Cheap deterministic trim: the randomized sweep leaves u at a modest rank (already ~rmax,
+    # not the ∑ᵢ rank(Vᵢ) of the raw sum), so this final SVD pass is inexpensive and recovers the
+    # minimal rank for the same tol (randomized rounding tends to retain a little extra rank).
+    k > 1 && (u = tt_rounding(u; tol=tol, rmax=rmax))
     x = x0_zero ? prec(u) : x0 + prec(u)
+    end
     # NOTE: do NOT round x here. Rounding the un-preconditioned solution at tolerance δ
     # perturbs the residual by ‖H·δ‖ ≈ ‖H‖·δ; for the stiff cookie operator (‖H‖~1e3–1e4)
     # a tol=1e-8 round inflates ‖Hx−b‖ to ~1e-5. The preconditioned variable u is already
     # rounded above (harmless, since ‖H·M⁻¹‖≈1). If a final trim is needed, use tol/‖H‖.
 
     if sample_res
-        res_final = _sg_resid(op, x, b)            # exact ‖A x − b‖/‖b‖
+        res_final = @timeit timer "sample_res" _sg_resid(op, x, b)   # exact ‖A x − b‖/‖b‖
         history[end] = merge(history[end], (res_sample=res_final,))
         verbose && println("  sGMRES true relres = $(round(res_final, sigdigits=4))")
     end
+    show_timer && (show(timer); println())
 
     return x, history
 end
