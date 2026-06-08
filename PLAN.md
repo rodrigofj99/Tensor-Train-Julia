@@ -112,13 +112,22 @@ binary directly: `/Users/cazeaux/.julia/juliaup/julia-1.12.6+0.aarch64.apple.dar
 **Verify (single-thread):** `reuse_sketches` true vs false bit-identical end-to-end; cookie sketched
 GMRES same iterations/accuracy, faster.
 
-## Stage 6 — Choose the block-averaging default empirically
-With the cache wired and mixed-`block_rks` exercised (single-TT overload), measure the **variance of
-the residual/norm estimate** under each `weighting` (`:equal`, `:column`, `:precision`) on the cookie
-and a Matérn problem (data in `memory/krp-paper-matlab-reference.md`), and set the production default.
-Expectation: `:equal` and `:column` coincide for uniform `block_rks`; they diverge only on the mixed
-path, where `:column`/`:precision` should tighten the estimate. **Verify:** lower estimator variance at
-equal cost, no accuracy/iteration regression.
+## Stage 6 — Choose the block-averaging default empirically  — DONE → `:column`
+Measured the boundary norm estimate `‖Sy‖/‖y‖` (the quantity that sets τ) and interior partial-norm
+spreads under each `weighting` on the mixed two-group path, over many seeds, on a synthetic mixed-rank
+TT and the Matérn rank-621 TT (`dev_tests/weighting_variance.jl`). Findings:
+- **`:column` is the production default.** Least biased (mean closest to ‖y‖) and lowest/near-lowest
+  variance; biggest win over `:equal` when the ext group is pure-KRP (`block_rks_inc=1`, ×equal≈0.6–0.9
+  std), shrinking to ≈1 as `block_rks_inc→block_rks` (where it provably reduces to `:equal`).
+- `:precision` (provisional empirical inverse-variance) is **biased low** (means 0.35–0.77 on Matérn):
+  data-dependent weights correlate with the noisy sample → systematic underestimate at small counts.
+  Kept for experimentation only; would need a debiased estimator to be usable. Documented in
+  `src/sketches/extend.jl::_group_weights`.
+- Cookie / sketched-GMRES paths (sum, operator) are single-group (uniform `block_rks`) ⇒ `:equal`≡
+  `:column` there; the mixed path Matérn represents is the only place the choice matters.
+Action taken: unified the default to `:column` across all overloads (was `:equal` on operator-residual
+and mixed-operator — a bit-identical no-op there since they are single-group, but correct/future-proof).
+No accuracy/iteration regression (full adaptive-rounding suite green).
 
 ## Stage 7 — Forward-sketch mirror  (`reverse=false`)
 Mirror the whole cache stack for the forward sweep: `SketchGroup`/`extend!` recursing **left→right**

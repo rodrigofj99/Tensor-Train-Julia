@@ -116,6 +116,12 @@ combination `Σ αⱼ yⱼ`, an operator residual `A·y − b`, and a Hadamard p
   ranks and runtime.
 - `block_rks` / `block_rks_inc`: sketch block ranks for the initial / extension
   sketches (TTStack vs pure-KRP behaviour).
+- `weighting`: how the init (`block_rks`) and ext (`block_rks_inc`) groups combine in
+  `finalize_cols`. Default **`:column`** (`w_g ∝ counts·brv`): Stage-6 measurement
+  (`dev_tests/weighting_variance.jl`) found it least-biased and lowest-variance on the mixed
+  path; reduces to `:equal` for uniform `block_rks` (so it only matters when
+  `block_rks_inc ≠ block_rks`). `:precision` (empirical inverse-variance) is **biased low** at
+  small sample counts — experimental, do not default to it.
 
 **Oblivious-embedding facts (do not re-derive these the hard way).** TTStack is an
 *oblivious* (data-independent) subspace embedding: its distortion depends on the

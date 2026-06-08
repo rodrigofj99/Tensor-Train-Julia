@@ -110,15 +110,20 @@ end
 
 # Per-group scalar weights w_g (Σ w_g = 1) at bond l from the per-group prefix sample counts `cnt`.
 # Combining unbiased per-block estimators of unequal variance ⇒ inverse-variance (precision)
-# weighting is the BLUE; :equal / :column are oblivious closed-form approximations (PLAN.md/Stage 6).
+# weighting is the BLUE in principle; :equal / :column are oblivious closed-form approximations.
+# Stage-6 measurement (dev_tests/weighting_variance.jl, on synthetic + Matérn): **:column is the
+# production default** — least biased (mean closest to ‖y‖) and lowest/near-lowest variance, and it
+# reduces to :equal for uniform block_rks. :precision as implemented is **empirically biased low**
+# (its data-dependent weights correlate with the noisy sample → systematic underestimate at small
+# sample counts); kept for experimentation only, not recommended as a default.
 function _group_weights(groups, l::Int, cnt::AbstractVector{Int}, weighting::Symbol)
   if weighting === :equal
     raw = Float64[cnt[gi] for gi in eachindex(groups)]                          # ∝ samples → 1/√Σcnt
   elseif weighting === :column
-    raw = Float64[cnt[gi]*groups[gi].brv[l] for gi in eachindex(groups)]        # ∝ columns
+    raw = Float64[cnt[gi]*groups[gi].brv[l] for gi in eachindex(groups)]        # ∝ columns (chosen default)
   elseif weighting === :precision
-    # Provisional empirical inverse-variance: per-group sample variance of the leading per-sample
-    # slab norms. Exact per-bond-residual form is finalized in Stage 6.
+    # Empirical inverse-variance (per-group sample variance of the leading per-sample slab norms).
+    # Stage-6: biased low at small sample counts — experimental, not a recommended default.
     raw = Float64[cnt[gi] == 0 ? 0.0 : cnt[gi] / max(_slab_var(groups[gi], l, cnt[gi]), eps()) for gi in eachindex(groups)]
   else
     error("unknown block-averaging weighting :$weighting (use :equal, :column, or :precision)")

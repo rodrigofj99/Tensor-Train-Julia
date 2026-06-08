@@ -554,7 +554,7 @@ function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{T
                                    block_rks::Int=N,
                                    seed::Int=1234,
                                    caches=nothing,
-                                   weighting::Symbol=:equal,
+                                   weighting::Symbol=:column,
                                    timer::TimerOutput=TimerOutput()) where {T,N}
   @assert n_samples >= ℓ_inc "n_samples ($n_samples) must be ≥ ℓ_inc ($ℓ_inc)"
   @timeit timer "ttrand_rounding_adaptive" begin
@@ -771,7 +771,7 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
                                    block_rks::Int=N,
                                    seed::Int=1234,
                                    caches=nothing,
-                                   weighting::Symbol=:equal,
+                                   weighting::Symbol=:column,
                                    timer::TimerOutput=TimerOutput()) where {T,N}
   @assert n_samples >= ℓ_inc "n_samples ($n_samples) must be ≥ ℓ_inc ($ℓ_inc)"
   @timeit timer "ttrand_rounding_adaptive" begin
