@@ -180,7 +180,7 @@ function run_matern_sweep(; ref_tol::Float64 = 1e-10,
     title = "Matérn kernel TT — block-rank study (N=$N, $(n_trials) trials, ℓ_inc=$ℓ_inc)"
     four_panel_sweep(adapt_results, det; variant_labels=variant_labels, N=N, n_trials=n_trials,
                      title=title, dir=dir, fname="matern_blockrks_ext_sweep.pdf")
-    speedup_compression_panel(adapt_results, det; variant_labels=variant_labels,
+    speedup_compression_panel(adapt_results, det; variant_labels=variant_labels, dims=y.ttv_dims,
                               title="Matérn — accuracy / speedup / compression vs tolerance (paper Fig 5)",
                               dir=dir, fname="matern_speedup_compression.pdf")
     return (adapt=adapt_results, det=det)

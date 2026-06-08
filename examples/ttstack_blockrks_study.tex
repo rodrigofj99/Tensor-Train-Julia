@@ -141,8 +141,11 @@ The same $r/\ell$ effect appears at scale on the Mat\'ern tensor (\S4 below) and
 \paragraph{Mat\'ern, tolerance sweep} (paper \S4.2 / Fig.~5). Adaptive rounding of the rank-621
 Mat\'ern tensor across tolerances. The four-panel figure reports achieved rank, achieved error, the
 per-bond rank profile, and wall time; the three-panel figure reports accuracy, speedup over the
-deterministic baseline, and rank compression. The Adap-R column shows that a final deterministic
-pass recovers the minimal rank while preserving accuracy.
+deterministic baseline, and \emph{compression} --- the achieved storage ratio $\sum_k r_{k-1} n_k r_k
+/ \prod_k n_k$ (TT core storage over the $100^8 = 10^{16}$ entries of the full tensor), which ranges
+from $\sim$$4\times10^{-11}$ at $\varepsilon=10^{-1}$ to $\sim$$5\times10^{-10}$ at $\varepsilon=10^{-7}$
+(a $\sim$$10^{10}$ reduction). The Adap-R column shows that a final deterministic pass recovers the
+minimal rank while preserving accuracy.
 \fig{../out/matern_blockrks_sweep/matern_blockrks_ext_sweep.pdf}{matern\_blockrks\_sweep.jl}
 \fig{../out/matern_blockrks_sweep/matern_speedup_compression.pdf}{matern\_blockrks\_sweep.jl}
 
@@ -160,11 +163,14 @@ deterministic 720), with strict-KRP the loosest (a symptom of its higher-varianc
 right panel compares wall time across the two solvers.
 \fig{../out/cookie_blockrks_study/cookie_blockrks_study.pdf}{cookie\_blockrks\_study.jl}
 
-\paragraph{Parameter-sample sweep} (paper Fig.~6/8). Varying the number of parameter samples $n$:
-the randomized solves are essentially $n$-independent in iteration count and solution rank (set by
-the cookie geometry, not $n$), so their cost grows only with the parameter-mode core size, while the
-deterministic baseline is infeasible beyond small $n$. The speedup panel uses the $n{=}8$
-deterministic wall as the fixed reference.
+\paragraph{Parameter-sample sweep} (paper Fig.~6/8). Varying the number of parameter samples
+$n \in \{8,16,32,64\}$, with all three solvers run at every $n$: deterministic Sum+Round (recomputed
+at each $n$, OOM-guarded), randomized Sum+Round (strict-KRP and TTStack-$N$), and sketched GMRES
+(TTStack-$N$). The randomized solves are essentially $n$-independent in iteration count and solution
+rank (set by the cookie geometry, not $n$); their cost grows only with the parameter-mode core size.
+Because the deterministic baseline is computed at \emph{each} $n$, the speedup panel is a genuine
+per-$n$ $t_\mathrm{det}(n)/t_\mathrm{method}(n)$ — both the Sum+Round and the sketched advantage hold
+(and grow) across the sweep, with sketched GMRES the fastest throughout.
 \fig{../out/cookie_nsweep/cookie_nsweep.pdf}{cookie\_nsweep.jl}
 
 \section{Discussion}

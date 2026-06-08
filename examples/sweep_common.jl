@@ -110,17 +110,21 @@ function four_panel_sweep(adapt::AbstractDict, det::AbstractDict; variant_labels
 end
 
 """
-    speedup_compression_panel(adapt, det; variant_labels, title, dir, fname)
+    speedup_compression_panel(adapt, det; variant_labels, dims, title, dir, fname)
 
-The paper Fig-5 layout: relative error, speedup (= t_det / t_rand), and compression ratio
-(= max-rank_det / max-rank_rand) vs tolerance ε. Speedup/compression are computed per ε against the
-deterministic baseline (`det[:time_med]`, `det[:rk]`), matched by ε.
+The paper Fig-5 layout: relative error, speedup (= t_det / t_rand), and **compression** vs tolerance
+ε. Speedup is per-ε against the deterministic baseline (`det[:time_med]`). Compression is the achieved
+*storage ratio* of each method's rounded TT — `Σₖ rₖ₋₁·nₖ·rₖ / Πₖ nₖ` (TT core storage divided by the
+number of entries of the full tensor) — computed from the per-bond rank profile (`:rk_profile`) and
+the mode dimensions `dims` (length N). Lower is better (more compressed).
 """
-function speedup_compression_panel(adapt::AbstractDict, det::AbstractDict; variant_labels,
+function speedup_compression_panel(adapt::AbstractDict, det::AbstractDict; variant_labels, dims,
                                    title::AbstractString, dir::AbstractString, fname::AbstractString)
     CairoMakie.activate!(type = "pdf"); mkpath(dir)
     det_time = Dict(det[:ε][i] => det[:time_med][i] for i in eachindex(det[:ε]))
-    det_rk   = Dict(det[:ε][i] => det[:rk][i]       for i in eachindex(det[:ε]))
+    full_entries = prod(Float64.(collect(dims)))
+    _storage(prof) = sum(prof[k]*dims[k]*prof[k+1] for k in 1:length(dims))   # Σ rₖ₋₁·nₖ·rₖ
+    _comp(profiles) = [_storage(p)/full_entries for p in profiles]
     fig = Figure(size = (1500, 460))
     Label(fig[0, 1:3], title; fontsize = 13, tellwidth = false)
 
@@ -144,14 +148,15 @@ function speedup_compression_panel(adapt::AbstractDict, det::AbstractDict; varia
     end
     axislegend(ax_s; position = :lt, framevisible = true, labelsize = 9)
 
-    ax_c = Axis(fig[1, 3], xlabel = L"\varepsilon", ylabel = "compression (r_det / r_rand)",
-                xscale = log10, xreversed = true, title = "rank compression vs deterministic", titlesize = 12)
-    hlines!(ax_c, [1.0]; color = :black, linestyle = :dash, linewidth = 1)
+    ax_c = Axis(fig[1, 3], xlabel = L"\varepsilon", ylabel = "TT storage / full-tensor entries",
+                xscale = log10, yscale = log10, xreversed = true,
+                title = "compression (storage fraction, lower = better)", titlesize = 12)
     for lbl in variant_labels
         d = adapt[lbl]; c, m = variant_style(lbl)
-        comp = [det_rk[ε] / r for (ε, r) in zip(d[:ε], d[:rk_med])]
-        scatterlines!(ax_c, d[:ε], comp; color = c, linewidth = 2, marker = m, markersize = 9, label = lbl)
+        scatterlines!(ax_c, d[:ε], _comp(d[:rk_profile]); color = c, linewidth = 2, marker = m, markersize = 9, label = lbl)
     end
+    cd, md = variant_style("det")
+    scatterlines!(ax_c, det[:ε], _comp(det[:rk_profile]); color = cd, linewidth = 2, marker = md, markersize = 10, label = "det @ tol")
     axislegend(ax_c; position = :lt, framevisible = true, labelsize = 9)
 
     f = joinpath(dir, fname); save(f, fig); println("→ saved $f"); return fig
