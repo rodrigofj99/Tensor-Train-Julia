@@ -5,6 +5,18 @@ using Printf
 # Reuse the operator/import/GMRES (cookie_gmres.jl) plus `make_sumround_krp` / `run_variant`
 # / `DET_REF` from the block-rank comparison. Neither include runs its own main on `include`.
 include(joinpath(@__DIR__, "cookie_blockrks_compare.jl"))
+include(joinpath(@__DIR__, "sweep_common.jl"))
+
+# Prefer the *computed* deterministic baseline (Study C's det_baseline.jls) over the hardcoded
+# DET_REF; falls back to DET_REF when the cache is absent so this script still runs standalone.
+function _load_det_baseline()
+    p = joinpath(@__DIR__, "..", "out", "cookie_blockrks_study", "det_baseline.jls")
+    if isfile(p)
+        r = deserialize(p)
+        return (label="det", iters=r.iters, time=r.time, relres=r.relres, peak=r.peak, final=r.final, rk=r.rk)
+    end
+    return DET_REF
+end
 
 """
 Parameter-sample sweep for the cookie TT-GMRES: vary n (= number of parameter samples per
@@ -18,15 +30,12 @@ with n (the paper reports out-of-memory at n=128/256).
 """
 
 const SWEEP_VARIANTS = [
-    (label = "KRP",            block_rks = 1, orthogonal = false),  # strict Khatri–Rao (faithful)
-    (label = "TTStack-N",      block_rks = 8, orthogonal = false),  # block_rks=N, Gaussian (winner)
-    (label = "orth-TTStack-N", block_rks = 8, orthogonal = true),   # confirm orth stays a wash
+    (label = "strict-KRP", block_rks = 1,  orthogonal = false),  # strict Khatri–Rao (faithful)
+    (label = "TTStack-N",  block_rks = 8,  orthogonal = true),   # block_rks=N orthogonalized (oblivious)
+    (label = "TTStack-2N", block_rks = 16, orthogonal = true),
 ]
 
 const NS = [8, 16, 32, 64, 128, 256]
-
-const _SW_COLORS = Dict("KRP" => :tomato, "TTStack-N" => :seagreen, "orth-TTStack-N" => :royalblue)
-const _SW_MARKERS = Dict("KRP" => :circle, "TTStack-N" => :rect, "orth-TTStack-N" => :utriangle)
 
 function run_cookie_nsweep(; ns = NS, dir = DATA_DIR, minD = 1.0, maxD = 5.0,
                            tol = 1e-8, maxit = 50, seed = 1234,
@@ -78,12 +87,13 @@ function run_cookie_nsweep(; ns = NS, dir = DATA_DIR, minD = 1.0, maxD = 5.0,
         end
     end
 
-    print_nsweep_table(results)
-    plot_cookie_nsweep(results; outdir = outdir)
+    det = _load_det_baseline()
+    print_nsweep_table(results, det)
+    plot_cookie_nsweep(results, det; outdir = outdir)
     return results
 end
 
-function print_nsweep_table(results)
+function print_nsweep_table(results, det = DET_REF)
     println("\n", repeat('=', 78))
     @printf("%-16s | %4s | %5s | %9s | %11s | %9s | %9s\n",
             "variant", "n", "iters", "wall (s)", "true relres", "peak rk", "final rk")
@@ -96,44 +106,52 @@ function print_nsweep_table(results)
         end
     end
     @printf("%-16s | %4d | %5d | %9.1f | %11.2e | %9d | %9d   (reference)\n",
-            DET_REF.label, 8, DET_REF.iters, DET_REF.time, DET_REF.relres, DET_REF.peak, DET_REF.final)
+            det.label, 8, det.iters, det.time, det.relres, det.peak, det.final)
     println(repeat('=', 78))
 end
 
-function plot_cookie_nsweep(results; outdir)
+function plot_cookie_nsweep(results, det = DET_REF; outdir)
     CairoMakie.activate!(type = "pdf")
-    fig = Figure(size = (1300, 540))
-    Label(fig[0, 1:2], "Cookie TT-GMRES — parameter-sample sweep (7 cookies, n1=1681)";
+    fig = Figure(size = (1800, 500))
+    Label(fig[0, 1:3], "Cookie TT-GMRES — parameter-sample sweep (7 cookies, n1=1681)";
           fontsize = 14, tellwidth = false)
 
     ax1 = Axis(fig[1, 1], xlabel = "parameter samples n (per mode)", ylabel = "wall time (s)",
                xscale = log10, yscale = log10, title = "wall & Sum+Round time vs n", titlesize = 12)
     for v in SWEEP_VARIANTS
         d = results[v.label]; isempty(d[:n]) && continue
-        c = _SW_COLORS[v.label]; m = _SW_MARKERS[v.label]
+        c, m = variant_style(v.label)
         scatterlines!(ax1, d[:n], d[:time]; color = c, marker = m, markersize = 9,
                       linewidth = 2, label = "$(v.label) wall")
         scatterlines!(ax1, d[:n], d[:t_sr]; color = c, marker = m, markersize = 7,
                       linewidth = 1, linestyle = :dash)
     end
-    scatter!(ax1, [8], [DET_REF.time]; color = :black, marker = :star5, markersize = 16,
-             label = "det (n=8 ref)")
+    scatter!(ax1, [8], [det.time]; color = :black, marker = :star5, markersize = 16, label = "det (n=8 ref)")
     axislegend(ax1; position = :lt, framevisible = true, labelsize = 9)
 
     ax2 = Axis(fig[1, 2], xlabel = "parameter samples n (per mode)", ylabel = "TT-rank",
                xscale = log10, title = "peak (solid) & final (dotted) TT-rank vs n", titlesize = 12)
     for v in SWEEP_VARIANTS
         d = results[v.label]; isempty(d[:n]) && continue
-        c = _SW_COLORS[v.label]; m = _SW_MARKERS[v.label]
-        scatterlines!(ax2, d[:n], d[:peak]; color = c, marker = m, markersize = 9,
-                      linewidth = 2, label = v.label)
-        scatterlines!(ax2, d[:n], d[:final]; color = c, marker = m, markersize = 7,
-                      linewidth = 1, linestyle = :dot)
+        c, m = variant_style(v.label)
+        scatterlines!(ax2, d[:n], d[:peak]; color = c, marker = m, markersize = 9, linewidth = 2, label = v.label)
+        scatterlines!(ax2, d[:n], d[:final]; color = c, marker = m, markersize = 7, linewidth = 1, linestyle = :dot)
     end
-    scatter!(ax2, [8], [DET_REF.peak]; color = :black, marker = :star5, markersize = 16,
-             label = "det peak (n=8)")
-    scatter!(ax2, [8], [DET_REF.final]; color = :gray, marker = :star4, markersize = 12)
+    scatter!(ax2, [8], [det.peak]; color = :black, marker = :star5, markersize = 16, label = "det peak (n=8)")
+    scatter!(ax2, [8], [det.final]; color = :gray, marker = :star4, markersize = 12)
     axislegend(ax2; position = :lt, framevisible = true, labelsize = 9)
+
+    # Panel 3: speedup vs the (n=8) deterministic baseline — det is infeasible at larger n (OOM), so
+    # the n=8 wall is the fixed reference; this shows the randomized advantage growing with n.
+    ax3 = Axis(fig[1, 3], xlabel = "parameter samples n (per mode)", ylabel = "speedup (t_det(n=8) / t_rand)",
+               xscale = log10, yscale = log10, title = "speedup vs deterministic (n=8 ref)", titlesize = 12)
+    hlines!(ax3, [1.0]; color = :black, linestyle = :dash, linewidth = 1)
+    for v in SWEEP_VARIANTS
+        d = results[v.label]; isempty(d[:n]) && continue
+        c, m = variant_style(v.label)
+        scatterlines!(ax3, d[:n], det.time ./ d[:time]; color = c, marker = m, markersize = 9, linewidth = 2, label = v.label)
+    end
+    axislegend(ax3; position = :lt, framevisible = true, labelsize = 9)
 
     fname = joinpath(outdir, "cookie_nsweep.pdf")
     save(fname, fig)
