@@ -87,3 +87,39 @@ end
         end
     end
 end
+
+@testset "operator forward sweep (reverse=false)" begin
+    dims = (4, 5, 3, 6, 4); N = 5; seed = 909
+    y = rand_tt(Float64, dims, 7; seed=11)
+    A = rand_tto(dims, 4)
+    a_rks = y.ttv_rks; op_rks = A.tto_rks
+    fbrv(b) = (v = ones(Int,N+1); v[2:N+1] .= b; for k=1:N; v[k+1] = min(v[k+1], dims[k]*v[k]); end; v)
+
+    @testset "single group == tt_recursive_sketch(A,y; reverse=false) (bit-identical)" begin
+        for orth in (true, false), b in (3, 6)
+            Wref, skref = tt_recursive_sketch(Float64, A, y, 12; seed=seed, block_rks=b, orthogonal=orth, reverse=false)
+            p = skref .÷ fbrv(b)
+            g = OperatorSketchGroup(Float64, A, y, b, 0; reverse=false)
+            extend_operator_sketch!(g, A, y, p; seed=seed, orthogonal=orth)
+            for l in 1:N+1
+                @test finalize_cols_operator([g], l, a_rks[l], op_rks[l]; weighting=:equal) == Wref[l]
+            end
+        end
+    end
+
+    @testset "OperatorCachedSketch reverse=false: grow-then-grow == from-scratch (bit-identical)" begin
+        for (brk, brk_inc) in ((4, 4), (6, 2))
+            want1 = fill(16, N+1); want1[1] = 1
+            want2 = fill(30, N+1); want2[1] = 1
+            c1 = cached_operator_sketch(Float64, A, y, brk, brk_inc, 10; reverse=false, seed=seed)
+            ensure_columns!(c1, A, y, want1; seed=seed)
+            ensure_columns!(c1, A, y, want2; seed=seed)
+            c2 = cached_operator_sketch(Float64, A, y, brk, brk_inc, 10; reverse=false, seed=seed)
+            ensure_columns!(c2, A, y, want2; seed=seed)
+            for l in 1:N+1
+                @test sketch_array(c1, l, a_rks[l], op_rks[l]) == sketch_array(c2, l, a_rks[l], op_rks[l])
+            end
+            @test all(size(sketch_array(c1, l, a_rks[l], op_rks[l]), 3) >= want2[l] for l in 2:N+1)
+        end
+    end
+end

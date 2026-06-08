@@ -12,91 +12,142 @@ a uniform `block_rks` sketch of `A·y` and of `b` draw the **same** blocks, so `
 sketch of the residual `A·y − b`. `1/√count` normalization is applied only in `finalize_cols_operator`.
 """
 mutable struct OperatorSketchGroup{T}
-  W::Vector{Array{T,4}}     # raw partials; W[l] :: (y.ttv_rks[l], A.tto_rks[l], brv[l], counts[l]); W[N+1]=ones(1,1,1,1)
-  counts::Vector{Int}       # per-bond sample count; counts[N+1] = 1 (tiled boundary)
+  W::Vector{Array{T,4}}     # raw partials; W[l] :: (y.ttv_rks[l], A.tto_rks[l], brv[l], counts[l]); boundary = ones(1,1,1,1)
+  counts::Vector{Int}       # per-bond sample count; boundary bond = 1 (tiled)
   brv::Vector{Int}          # block_rks_vec for this group's block_rks
   block_rks::Int
   group::Int                # seed namespace (disjoint draws across groups)
+  reverse::Bool             # sweep direction: true = right→left (boundary N+1), false = left→right (boundary 1)
 end
 
 """
-    OperatorSketchGroup(T, A, y, block_rks, group) -> empty OperatorSketchGroup
+    OperatorSketchGroup(T, A, y, block_rks, group; reverse=true) -> empty OperatorSketchGroup
 
 Build an empty operator group (no samples yet) for the sketch of `A·y`, with sketch element type
 derived from `T`, `eltype(A)`, and `eltype(y)`. `brv = block_rks_vec` is computed from `block_rks`
-and `y`'s dimensions (identical to the vector group's, so the blocks line up).
+and `y`'s dimensions (identical to the vector group's, so the blocks line up). `reverse` selects the
+sweep direction (right→left fills bonds 1..N reusing the right neighbour; left→right is the mirror).
 """
-function OperatorSketchGroup(::Type{T}, A::TToperator{TA,N}, y::TTvector{Ty,N}, block_rks::Int, group::Int) where {T<:Number,TA<:Number,Ty<:Number,N}
+function OperatorSketchGroup(::Type{T}, A::TToperator{TA,N}, y::TTvector{Ty,N}, block_rks::Int, group::Int; reverse::Bool=true) where {T<:Number,TA<:Number,Ty<:Number,N}
   TW = typeof(one(T)*one(TA)*one(Ty))
   dims = y.ttv_dims
-  brv = ones(Int, N+1); brv[1:N] .= block_rks
-  for k = N:-1:1
-    brv[k] = min(brv[k], dims[k]*brv[k+1])
+  brv = ones(Int, N+1)
+  if reverse
+    brv[1:N] .= block_rks
+    for k = N:-1:1
+      brv[k] = min(brv[k], dims[k]*brv[k+1])
+    end
+  else
+    brv[2:N+1] .= block_rks
+    for k = 1:N
+      brv[k+1] = min(brv[k+1], dims[k]*brv[k])
+    end
   end
   W = Vector{Array{TW,4}}(undef, N+1)
-  W[N+1] = ones(TW, 1, 1, 1, 1)
-  counts = zeros(Int, N+1); counts[N+1] = 1
-  return OperatorSketchGroup{TW}(W, counts, brv, block_rks, group)
+  counts = zeros(Int, N+1)
+  bidx = reverse ? N+1 : 1
+  W[bidx] = ones(TW, 1, 1, 1, 1); counts[bidx] = 1
+  return OperatorSketchGroup{TW}(W, counts, brv, block_rks, group, reverse)
+end
+
+# Geometric-growth append of the new slabs (positions off+1..target_l) of `Wnew` into g.W[l]'s
+# sample dimension (dim 4). Mirrors the vector group's _append_slabs! for 4-D operator partials.
+function _append_slabs_op!(g::OperatorSketchGroup{TW}, l::Int, off::Int, target_l::Int, Wnew::Array{TW,4}) where {TW}
+  if off == 0
+    g.W[l] = Wnew
+  else
+    Wl = g.W[l]
+    if size(Wl, 4) < target_l
+      newcap = max(2*size(Wl, 4), target_l)
+      buf = Array{TW,4}(undef, size(Wl, 1), size(Wl, 2), size(Wl, 3), newcap)
+      copyto!(view(buf, :, :, :, 1:off), view(Wl, :, :, :, 1:off))
+      Wl = buf; g.W[l] = buf
+    end
+    copyto!(view(Wl, :, :, :, off+1:target_l), Wnew)
+  end
 end
 
 """
     extend_operator_sketch!(g, A, y, target; seed, orthogonal, timer) -> g
 
 Grow operator group `g` so each bond `l` has at least `target[l]` samples, computing only the missing
-samples (deficient bonds, right-to-left, reusing the right neighbour's existing columns at the same
-global positions). `target` must be non-decreasing over `1:N`.
+samples. For a reverse group `target` is non-decreasing over `1..N` (reuses the right neighbour); for a
+forward group it is non-increasing over `2..N+1` (reuses the left neighbour).
 """
 function extend_operator_sketch!(g::OperatorSketchGroup{TW}, A::TToperator{TA,N}, y::TTvector{Ty,N},
                                   target::AbstractVector{Int}; seed::Int=1234, orthogonal::Bool=true,
                                   timer::TimerOutput=TimerOutput()) where {TW,TA,Ty,N}
   dims = y.ttv_dims
   @timeit timer "extend_operator_sketch" begin
-    # Size the per-call block / contraction buffers for the largest deficient bond, then reuse them
-    # across bonds under GC.@preserve (as tt_recursive_sketch does).
-    max_sketch = 0; cb1 = 0; cb2 = 0; cb3 = 0
-    @inbounds for k = N:-1:1
-      g.counts[k] >= target[k] && continue
-      add = target[k] - g.counts[k]
-      max_sketch = max(max_sketch, g.brv[k+1]*dims[k]*g.brv[k]*add)
-      b1, b2, b3 = contract_sketch_core_backwards_operator_buffers_size(
-                     dims[k], dims[k], y.ttv_rks[k], y.ttv_rks[k+1],
-                     A.tto_rks[k], A.tto_rks[k+1], g.brv[k], g.brv[k+1])
-      cb1 = max(cb1, b1); cb2 = max(cb2, b2); cb3 = max(cb3, b3)
-    end
-    max_sketch == 0 && return g                          # nothing deficient
-    sketch_buffer   = Vector{TW}(undef, max_sketch)
-    contract_buffer = (Vector{TW}(undef, cb1), Vector{TW}(undef, cb2), Vector{TW}(undef, cb3))
-    GC.@preserve sketch_buffer contract_buffer begin
+    if g.reverse
+      # Size the per-call block / contraction buffers for the largest deficient bond, then reuse them
+      # across bonds under GC.@preserve (as tt_recursive_sketch does).
+      max_sketch = 0; cb1 = 0; cb2 = 0; cb3 = 0
       @inbounds for k = N:-1:1
         g.counts[k] >= target[k] && continue
-        @assert k == N || target[k] <= g.counts[k+1] "non-decreasing counts required for the reverse recursion: bond $k target $(target[k]) exceeds right-neighbour count $(g.counts[k+1])"
-        off = g.counts[k]; add = target[k] - off
-        # Blocks at global sample indices off+1..off+add at bond k (group namespace g.group). The
-        # block shape (brv[k+1], dims[k], brv[k]) already matches the kernel's S=(γ,ζ,c) — no permute.
-        B = generate_sketch_blocks(seed, k, off, TW, g.brv[k+1], dims[k], g.brv[k], add, orthogonal;
-                                   reverse=true, group=g.group, buffer=sketch_buffer, timer=timer)
-        Wk_new = zeros(TW, y.ttv_rks[k], A.tto_rks[k], g.brv[k], add)
-        # Recurse per sample against the right neighbour's EXISTING column at the same global
-        # position (tiled ones boundary for k = N). Un-normalized throughout (matches reference).
-        for s in 1:add
-          Vs = k < N ? view(g.W[k+1], :, :, :, off+s) : view(g.W[N+1], :, :, :, 1)
-          contract_sketch_core_backwards!(view(Wk_new, :, :, :, s), y.ttv_vec[k], A.tto_vec[k],
-                                          view(B, :, :, :, s), Vs; buffer=contract_buffer)
-        end
-        # Geometric-growth append into a capacity buffer (dim 4 = samples).
-        if off == 0
-          g.W[k] = Wk_new
-        else
-          Wk = g.W[k]
-          if size(Wk, 4) < target[k]
-            newcap = max(2*size(Wk, 4), target[k])
-            buf = Array{TW,4}(undef, size(Wk, 1), size(Wk, 2), size(Wk, 3), newcap)
-            copyto!(view(buf, :, :, :, 1:off), view(Wk, :, :, :, 1:off))
-            Wk = buf; g.W[k] = buf
+        add = target[k] - g.counts[k]
+        max_sketch = max(max_sketch, g.brv[k+1]*dims[k]*g.brv[k]*add)
+        b1, b2, b3 = contract_sketch_core_backwards_operator_buffers_size(
+                       dims[k], dims[k], y.ttv_rks[k], y.ttv_rks[k+1],
+                       A.tto_rks[k], A.tto_rks[k+1], g.brv[k], g.brv[k+1])
+        cb1 = max(cb1, b1); cb2 = max(cb2, b2); cb3 = max(cb3, b3)
+      end
+      max_sketch == 0 && return g                          # nothing deficient
+      sketch_buffer   = Vector{TW}(undef, max_sketch)
+      contract_buffer = (Vector{TW}(undef, cb1), Vector{TW}(undef, cb2), Vector{TW}(undef, cb3))
+      GC.@preserve sketch_buffer contract_buffer begin
+        @inbounds for k = N:-1:1
+          g.counts[k] >= target[k] && continue
+          @assert k == N || target[k] <= g.counts[k+1] "non-decreasing counts required for the reverse recursion: bond $k target $(target[k]) exceeds right-neighbour count $(g.counts[k+1])"
+          off = g.counts[k]; add = target[k] - off
+          # Block shape (brv[k+1], dims[k], brv[k]) matches the kernel's S=(γ,ζ,c) — no permute.
+          B = generate_sketch_blocks(seed, k, off, TW, g.brv[k+1], dims[k], g.brv[k], add, orthogonal;
+                                     reverse=true, group=g.group, buffer=sketch_buffer, timer=timer)
+          Wk_new = zeros(TW, y.ttv_rks[k], A.tto_rks[k], g.brv[k], add)
+          # Recurse per sample against the right neighbour's existing column (tiled boundary for k=N).
+          for s in 1:add
+            Vs = k < N ? view(g.W[k+1], :, :, :, off+s) : view(g.W[N+1], :, :, :, 1)
+            contract_sketch_core_backwards!(view(Wk_new, :, :, :, s), y.ttv_vec[k], A.tto_vec[k],
+                                            view(B, :, :, :, s), Vs; buffer=contract_buffer)
           end
-          copyto!(view(Wk, :, :, :, off+1:target[k]), Wk_new)
+          _append_slabs_op!(g, k, off, target[k], Wk_new)
+          g.counts[k] = target[k]
         end
-        g.counts[k] = target[k]
+      end
+    else
+      # Forward mirror: fill bonds l=k+1 (k=1..N) reusing the LEFT neighbour W[k]; boundary at bond 1.
+      max_sketch = 0; cb1 = 0; cb2 = 0; cb3 = 0
+      @inbounds for k = 1:N
+        l = k + 1
+        g.counts[l] >= target[l] && continue
+        add = target[l] - g.counts[l]
+        max_sketch = max(max_sketch, g.brv[k]*dims[k]*g.brv[k+1]*add)
+        b1, b2, b3 = contract_sketch_core_forwards_operator_buffers_size(
+                       dims[k], dims[k], y.ttv_rks[k], y.ttv_rks[k+1],
+                       A.tto_rks[k], A.tto_rks[k+1], g.brv[k], g.brv[k+1])
+        cb1 = max(cb1, b1); cb2 = max(cb2, b2); cb3 = max(cb3, b3)
+      end
+      max_sketch == 0 && return g
+      sketch_buffer   = Vector{TW}(undef, max_sketch)
+      contract_buffer = (Vector{TW}(undef, cb1), Vector{TW}(undef, cb2), Vector{TW}(undef, cb3))
+      GC.@preserve sketch_buffer contract_buffer begin
+        @inbounds for k = 1:N
+          l = k + 1
+          g.counts[l] >= target[l] && continue
+          @assert k == 1 || target[l] <= g.counts[k] "non-increasing counts required for the forward recursion: bond $l target $(target[l]) exceeds left-neighbour count $(g.counts[k])"
+          off = g.counts[l]; add = target[l] - off
+          # Block shape (brv[k], dims[k], brv[k+1]) matches the forward kernel's S=(γ,z,c) — no permute.
+          B = generate_sketch_blocks(seed, k, off, TW, g.brv[k], dims[k], g.brv[k+1], add, orthogonal;
+                                     reverse=false, group=g.group, buffer=sketch_buffer, timer=timer)
+          Wl_new = zeros(TW, y.ttv_rks[l], A.tto_rks[l], g.brv[l], add)
+          for s in 1:add
+            Vs = k > 1 ? view(g.W[k], :, :, :, off+s) : view(g.W[1], :, :, :, 1)
+            contract_sketch_core_forwards!(view(Wl_new, :, :, :, s), y.ttv_vec[k], A.tto_vec[k],
+                                           view(B, :, :, :, s), Vs; buffer=contract_buffer)
+          end
+          _append_slabs_op!(g, l, off, target[l], Wl_new)
+          g.counts[l] = target[l]
+        end
       end
     end
   end
@@ -146,20 +197,21 @@ struct OperatorCachedSketch{T}
 end
 
 """
-    cached_operator_sketch(T, A, y, block_rks, block_rks_inc, init_rank; seed, orthogonal, timer) -> OperatorCachedSketch
+    cached_operator_sketch(T, A, y, block_rks, block_rks_inc, init_rank; reverse=true, seed, orthogonal, timer) -> OperatorCachedSketch
 
 Build a reusable operator sketch cache for `A·y`: an initial (frozen) group of block rank `block_rks`
 sized to the `init_rank` heuristic, plus — when `block_rks_inc != block_rks` — an empty extension
-group of block rank `block_rks_inc`. Grow it with `ensure_columns!`; read with `sketch_array`.
+group of block rank `block_rks_inc`. `reverse` selects the sweep direction (all groups share it).
+Grow it with `ensure_columns!`; read with `sketch_array`.
 """
 function cached_operator_sketch(::Type{T}, A::TToperator{TA,N}, y::TTvector{Ty,N},
                                 block_rks::Int, block_rks_inc::Int, init_rank::Int;
-                                seed::Int=1234, orthogonal::Bool=true, timer::TimerOutput=TimerOutput()) where {T<:Number,TA<:Number,Ty<:Number,N}
-  init = OperatorSketchGroup(T, A, y, block_rks, 0)
-  extend_operator_sketch!(init, A, y, _heuristic_p(init_rank, init.brv, N); seed=seed, orthogonal=orthogonal, timer=timer)
-  TW = eltype(init.W[N+1])
+                                reverse::Bool=true, seed::Int=1234, orthogonal::Bool=true, timer::TimerOutput=TimerOutput()) where {T<:Number,TA<:Number,Ty<:Number,N}
+  init = OperatorSketchGroup(T, A, y, block_rks, 0; reverse=reverse)
+  extend_operator_sketch!(init, A, y, _heuristic_p(init_rank, init.brv, N; reverse=reverse); seed=seed, orthogonal=orthogonal, timer=timer)
+  TW = eltype(init.W[reverse ? N+1 : 1])
   groups = block_rks_inc == block_rks ? OperatorSketchGroup{TW}[init] :
-                                        OperatorSketchGroup{TW}[init, OperatorSketchGroup(T, A, y, block_rks_inc, 1)]
+                                        OperatorSketchGroup{TW}[init, OperatorSketchGroup(T, A, y, block_rks_inc, 1; reverse=reverse)]
   return OperatorCachedSketch{TW}(groups)
 end
 
@@ -179,12 +231,19 @@ function ensure_columns!(cache::OperatorCachedSketch, A::TToperator{TA,N}, y::TT
     frozen_cols[l] += cache.groups[gi].counts[l] * cache.groups[gi].brv[l]
   end
   target = copy(active.counts)
-  @inbounds for l in 1:N
+  bonds = active.reverse ? (1:N) : (2:N+1)
+  @inbounds for l in bonds
     need = max(0, want[l] - frozen_cols[l])
     target[l] = max(active.counts[l], cld(need, active.brv[l]))
   end
-  @inbounds for l in 2:N
-    target[l] = max(target[l], target[l-1])
+  if active.reverse
+    @inbounds for l in 2:N
+      target[l] = max(target[l], target[l-1])
+    end
+  else
+    @inbounds for l in N:-1:2
+      target[l] = max(target[l], target[l+1])
+    end
   end
   extend_operator_sketch!(active, A, y, target; seed=seed, orthogonal=orthogonal, timer=timer)
   return cache

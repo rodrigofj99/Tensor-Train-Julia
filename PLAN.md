@@ -129,20 +129,22 @@ Action taken: unified the default to `:column` across all overloads (was `:equal
 and mixed-operator — a bit-identical no-op there since they are single-group, but correct/future-proof).
 No accuracy/iteration regression (full adaptive-rounding suite green).
 
-## Stage 7 — Forward-sketch mirror  (`reverse=false`)  — DONE (vector group)
-Added a `reverse::Bool` field to `SketchGroup`; the constructor builds `brv` and the boundary on the
-correct side, and `extend_recursive_sketch!` / `_heuristic_p` / `cached_sketch` / `ensure_columns!`
-branch on it. Forward sweep: fills bonds `l=k+1` left→right reusing the LEFT neighbour `W[k]`,
-`contract_sketch_core_forwards!` (batched), boundary at bond 1, blocks need no permute (the generated
-`(brv[k],dims[k],brv[k+1],add)` already matches the forward kernel's `S`); count-monotonicity flips to
-**non-increasing** over bonds `2..N+1` (`ensure_columns!` running-max from the right). The geometric-grow
-append is shared via `_append_slabs!`. Validated (`test/test_sketch_extend.jl`): forward single group ==
-`tt_recursive_sketch(reverse=false)` bit-identical (orth∈{T,F}, b∈{3,7}); one-shot == two-shot; cache
-grow == from-scratch (uniform + mixed `block_rks`). Reverse path unchanged (refactor only). Full suite green.
+## Stage 7 — Forward-sketch mirror  (`reverse=false`)  — DONE (all three group types)
+Added a `reverse::Bool` field to `SketchGroup`, `OperatorSketchGroup`, and `KroneckerSketchGroup`; each
+constructor builds `brv` and the boundary on the correct side, and the corresponding `extend_*!` /
+`cached_*` / `ensure_columns!` (+ the shared `_heuristic_p`) branch on it. Forward sweep: fills bonds
+`l=k+1` left→right reusing the LEFT neighbour `W[k]` via the `contract_sketch_core_forwards!` kernels
+(vector batched; operator/Kronecker per-sample), boundary at bond 1, blocks need no permute (the
+generated `(brv[k],dims[k],brv[k+1],add)` already matches the forward kernels' `S`); count-monotonicity
+flips to **non-increasing** over bonds `2..N+1` (`ensure_columns!` running-max from the right). The
+geometric-grow append is shared per group via `_append_slabs!` / `_append_slabs_op!` / `_append_slabs_kron!`.
+Validated (`test/test_sketch_extend{,_operator,_kronecker}.jl`): forward single group ==
+`tt_recursive_sketch(reverse=false)` bit-identical (vector orth∈{T,F} b∈{3,7}; operator orth∈{T,F} b∈{3,6};
+Kronecker M=2,3 b∈{3,6}); one-shot == two-shot (vector); cache grow == from-scratch (uniform + mixed
+`block_rks`). Reverse paths unchanged (refactor only). Full suite green.
 
-No current overload consumes a *forward cached* sketch (only fixed-size `tt_combined_sketch`/`stta` use
-`reverse=false`), so this is the foundational primitive. Operator/Kronecker forward groups + a forward
-consumer are a trivial future extension (mirror the same field/branch in their structs) if needed.
+No overload consumes a *forward cached* sketch yet (only fixed-size `tt_combined_sketch`/`stta` use
+`reverse=false`), so this is the foundational primitive — now complete for all sketch kinds.
 
 ## Risks / notes
 - Broadest-blast change (sketch core used by `ttrand_rounding`, `stta`, all adaptive overloads,

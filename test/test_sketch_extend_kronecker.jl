@@ -92,4 +92,35 @@ end
             @test all(size(sketch_matrix(c1, l, prks3(l)), 2) >= want2[l] for l in 1:N)
         end
     end
+
+    @testset "forward sweep (reverse=false)" begin
+        fbrv(b) = (v = ones(Int,N+1); v[2:N+1] .= b; for k=1:N; v[k+1] = min(v[k+1], dims[k]*v[k]); end; v)
+        @testset "single group == tt_recursive_sketch(tuple; reverse=false) (bit-identical)" begin
+            for (A, prks) in (((ya, yb), prks2), ((ya, yb, yc), prks3)), b in (3, 6)
+                Wref, skref = tt_recursive_sketch(Float64, A, 12; seed=seed, block_rks=b, orthogonal=true, reverse=false)
+                p = skref .÷ fbrv(b)
+                g = KroneckerSketchGroup(Float64, A, b, 0; reverse=false)
+                extend_kronecker_sketch!(g, A, p; seed=seed, orthogonal=true)
+                for l in 1:N+1
+                    @test finalize_cols_kronecker([g], l, prks(l)) == reshape(Wref[l], prks(l), :)
+                end
+            end
+        end
+        @testset "cache reverse=false: grow-then-grow == from-scratch (bit-identical)" begin
+            A = (ya, yb, yc)
+            for (brk, brk_inc) in ((4, 4), (6, 2))
+                want1 = fill(16, N+1); want1[1] = 1
+                want2 = fill(28, N+1); want2[1] = 1
+                c1 = cached_kronecker_sketch(Float64, A, brk, brk_inc, 10; reverse=false, seed=seed)
+                ensure_columns!(c1, A, want1; seed=seed)
+                ensure_columns!(c1, A, want2; seed=seed)
+                c2 = cached_kronecker_sketch(Float64, A, brk, brk_inc, 10; reverse=false, seed=seed)
+                ensure_columns!(c2, A, want2; seed=seed)
+                for l in 1:N+1
+                    @test sketch_matrix(c1, l, prks3(l)) == sketch_matrix(c2, l, prks3(l))
+                end
+                @test all(size(sketch_matrix(c1, l, prks3(l)), 2) >= want2[l] for l in 2:N+1)
+            end
+        end
+    end
 end
