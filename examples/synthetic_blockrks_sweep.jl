@@ -32,14 +32,14 @@ function synthetic_tt(; N=10, d=100, r1=50, r2=50, pert=1e-5, seed=1)
     return (1/norm(a)) * a + (pert/norm(b)) * b
 end
 
-function run_synthetic_sweep(; rmaxs = 35:5:80, n_trials = 10, seed = 1234, smoke = false,
-                              dir = OUTDIR)
-    smoke && (rmaxs = (40, 60); n_trials = 2)
+function run_synthetic_sweep(; r1 = 50, r2 = 50, pert = 1e-5, rmaxs = 35:5:80, tag = "signal$(r1)",
+                              n_trials = 10, seed = 1234, smoke = false, dir = OUTDIR)
+    smoke && (rmaxs = (8, 32); n_trials = 2)
     mkpath(dir)
-    X = synthetic_tt()
+    X = synthetic_tt(r1=r1, r2=r2, pert=pert)
     N = X.N; nX = norm(X)
-    @printf("Study S: synthetic TT  N=%d  dims=%d  ranks=%s  ‖X‖=%.4g\n",
-            N, X.ttv_dims[1], string(X.ttv_rks), nX)
+    @printf("Study S [%s]: synthetic TT  N=%d  dims=%d  TT-ranks=%s  (signal r=%d, perturbation r=%d @ %.0e)  ‖X‖=%.4g\n",
+            tag, N, X.ttv_dims[1], string(X.ttv_rks), r1, r2, pert, nX)
 
     variants = [(label="strict-KRP", blk=1,   orth=false),
                 (label="orth-KRP",   blk=1,   orth=true),
@@ -55,7 +55,7 @@ function run_synthetic_sweep(; rmaxs = 35:5:80, n_trials = 10, seed = 1234, smok
         push!(det[:rmax], r); push!(det[:err], norm(X - x̂)/nX); push!(det[:time_med], median(ts))
         @printf("  rmax=%2d  err=%.3e  t=%.3fs\n", r, norm(X - x̂)/nX, median(ts)); flush(stdout)
     end
-    dump_incremental(dir, "S_det.jls", det)
+    dump_incremental(dir, "S_det_$(tag).jls", det)
 
     adapt = Dict{String,Dict{Symbol,Vector{Float64}}}()
     for v in variants
@@ -78,17 +78,18 @@ function run_synthetic_sweep(; rmaxs = 35:5:80, n_trials = 10, seed = 1234, smok
             @printf("  rmax=%2d  err=%.3e  t=%.3fs  speedup=%.2f\n", r, es.med, tss.med, det[:time_med][ri]/tss.med); flush(stdout)
         end
         adapt[v.label] = d
-        dump_incremental(dir, "S_adapt_$(v.label).jls", d)
+        dump_incremental(dir, "S_adapt_$(tag)_$(v.label).jls", d)
     end
-    dump_incremental(dir, "S_all.jls", (adapt=adapt, det=det))
-    plot_synthetic_sweep(adapt, det, [v.label for v in variants]; dir=dir, n_trials=n_trials)
+    dump_incremental(dir, "S_all_$(tag).jls", (adapt=adapt, det=det))
+    plot_synthetic_sweep(adapt, det, [v.label for v in variants]; dir=dir, n_trials=n_trials, tag=tag,
+                         subtitle="signal r=$r1, perturbation r=$r2 @ $(pert), TT-rank≈$(r1+r2)")
     return adapt, det
 end
 
-function plot_synthetic_sweep(adapt, det, labels; dir, n_trials)
+function plot_synthetic_sweep(adapt, det, labels; dir, n_trials, tag="", subtitle="")
     CairoMakie.activate!(type="pdf"); mkpath(dir)
     fig = Figure(size=(1100, 460))
-    Label(fig[0, 1:2], "Study S — synthetic rank-50+1e-5 TT, fixed-rank rounding ($(n_trials) trials)";
+    Label(fig[0, 1:2], "Study S — synthetic fixed-rank rounding ($(n_trials) trials)  [$subtitle]";
           fontsize=13, tellwidth=false)
     ax_e = Axis(fig[1, 1], xlabel="max target rank", ylabel="rel. error ‖X−X̂‖/‖X‖",
                 yscale=log10, title="accuracy vs target rank", titlesize=12)
@@ -109,9 +110,23 @@ function plot_synthetic_sweep(adapt, det, labels; dir, n_trials)
         scatterlines!(ax_s, d[:rmax], d[:speedup]; color=c, linewidth=2, marker=m, markersize=9, label=lbl)
     end
     axislegend(ax_s; position=:rt, framevisible=true, labelsize=10)
-    f = joinpath(dir, "synthetic_blockrks_sweep.pdf"); save(f, fig); println("\n→ saved $f"); return fig
+    f = joinpath(dir, "synthetic_blockrks_sweep_$(tag).pdf"); save(f, fig); println("\n→ saved $f"); return fig
+end
+
+function run_all_synthetic(; smoke=false)
+    if smoke
+        run_synthetic_sweep(r1=4, r2=100, pert=1e-6, rmaxs=(8, 32), tag="rankgap", n_trials=2, smoke=true)
+        return
+    end
+    # (a) Paper §4.1 accuracy parity: comparable signal & perturbation ranks (effective rank ≈ TT rank).
+    run_synthetic_sweep(r1=50, r2=50, pert=1e-5, rmaxs=35:5:80, tag="signal50")
+    # (b) Rank-gap regime where the QR sweep is the bottleneck: small effective rank (rank-4 signal)
+    # inside a high TT rank (rank-100 perturbation). Here the sketch/target rank ℓ ≪ r_TT, so the
+    # randomized O(d·r²·ℓ) cost beats the deterministic O(d·r³) QR sweep — speedup > 1, growing as
+    # ℓ shrinks. It is also KRP's worst accuracy case (low-rank signal), so TTStack wins on both axes.
+    run_synthetic_sweep(r1=4, r2=100, pert=1e-6, rmaxs=[4, 8, 16, 32, 64, 96], tag="rankgap")
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    run_synthetic_sweep(smoke = ("smoke" in ARGS))
+    run_all_synthetic(smoke = ("smoke" in ARGS))
 end

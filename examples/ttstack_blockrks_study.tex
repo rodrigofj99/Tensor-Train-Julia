@@ -99,16 +99,40 @@ oblivious-embedding guarantee made visible.
 \section{Single-TT rounding (synthetic and Mat\'ern)}
 
 \paragraph{Synthetic, fixed target rank} (paper \S4.1). Fixed-rank randomized rounding of a
-rank-50 + $10^{-5}$ tensor, sweeping the maximum target rank. The error collapses once the target
-rank reaches the signal rank; the randomized methods track the deterministic baseline's accuracy,
-with TTStack matching KRP and no accuracy penalty for the larger block rank.
-\fig{../out/synthetic_blockrks_sweep/synthetic_blockrks_sweep.pdf}{synthetic\_blockrks\_sweep.jl}
-On this small single tensor the measured speedup is below~$1$: the deterministic thin SVD is already
-sub-second, so the sketch-construction overhead dominates. Randomized rounding is a \emph{large-scale}
-win --- it pays off when the deterministic SVD ($O(r^3)$ per bond) is the bottleneck or when many
-summands are combined. The synthetic panel therefore demonstrates \emph{accuracy parity} (and, with
-Study~E, variance control); the speedups appear on the Mat\'ern tensor (large rank, \S4 below) and on
-the cookie solves (large deterministic baseline, \S5).
+rank-50 + $10^{-5}$ tensor (effective rank $\approx$ TT rank), sweeping the maximum target rank. The
+error collapses once the target rank reaches the signal rank; the randomized methods track the
+deterministic baseline's accuracy, with TTStack matching KRP and no accuracy penalty for the larger
+block rank. Here the measured speedup is below~$1$ --- the effective rank is close to the TT rank, so
+the sketch must process essentially the full cores and its construction overhead dominates the
+already sub-second deterministic SVD.
+\fig{../out/synthetic_blockrks_sweep/synthetic_blockrks_sweep_signal50.pdf}{synthetic\_blockrks\_sweep.jl}
+
+\paragraph{The rank-gap regime: where randomized rounding wins.} Randomized rounding beats
+deterministic precisely when the \emph{QR/SVD sweep} is the bottleneck, which requires the sketch
+(target) rank $\ell$ to be much smaller than the TT rank $r$: the deterministic sweep costs
+$O(d\,r^3)$ per bond \emph{regardless of the target}, while the sketch costs only $O(d\,r^2\,\ell)$,
+a ratio $\ell/r$. We construct this regime with a low-effective-rank tensor inside a high TT rank: a
+rank-4 signal plus a rank-100, amplitude-$10^{-6}$ perturbation (TT rank $\approx 104$). Rounding at
+the natural target $\mathrm{rmax}=4$ then gives a large speedup, and it is simultaneously KRP's worst
+accuracy case (a low-rank signal):
+\begin{center}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+method (at rmax $=4$, TT rank $\approx 104$) & speedup vs.\ det & relative error \\
+\midrule
+deterministic & $1\times$ & $1.0\times10^{-6}$ \\
+strict-KRP    & $6.7\times$ & $1.9\times10^{-5}$ \\
+TTStack-$N$   & $\mathbf{9.2\times}$ & $\mathbf{3.2\times10^{-6}}$ \\
+TTStack-$2N$  & $7.5\times$ & $2.6\times10^{-6}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+TTStack is both $\sim$9$\times$ faster than deterministic and $\sim$6$\times$ more accurate than KRP.
+As $\mathrm{rmax}$ grows past the effective rank one over-resolves (the sketch rank approaches the TT
+rank and captures only perturbation noise), so the advantage fades --- the figure shows this crossover.
+\fig{../out/synthetic_blockrks_sweep/synthetic_blockrks_sweep_rankgap.pdf}{synthetic\_blockrks\_sweep.jl}
+The speedup grows with the rank gap $r/\ell$; the large-rank Mat\'ern tensor (\S4 below) and the cookie
+solves (\S5, large deterministic baseline) are the same effect at scale.
 
 \paragraph{Mat\'ern, tolerance sweep} (paper \S4.2 / Fig.~5). Adaptive rounding of the rank-621
 Mat\'ern tensor across tolerances. The four-panel figure reports achieved rank, achieved error, the
