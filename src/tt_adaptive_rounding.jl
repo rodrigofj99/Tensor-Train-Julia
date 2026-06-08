@@ -529,7 +529,7 @@ end
     ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, ε::Real;
                               ℓ_min=4, ℓ_inc=4, n_samples=…, ℓ_max=…,
                               orthogonal=true, block_rks=N, seed=1234,
-                              WAy_init=nothing, sketch_rks_init=nothing,
+                              caches=nothing, weighting=:equal,
                               timer=TimerOutput()) -> TTvector{T,N}
 
 Adaptive randomized rounding of the mixed combination `α[1]·(A·y[1]) + ∑_{j≥2} α[j]·y[j]` to a
@@ -541,9 +541,9 @@ the boundary sketch `α[1]·W_{Ay}[1] + ∑ α[j]·W[j][1]` is an unbiased estim
 then a single adaptive left-to-right sweep grows each bond's basis until the sketched residual
 falls below the per-bond budget `τ = ε·‖target‖_F/√(N−1)`.
 
-`WAy_init`/`sketch_rks_init` (optional) reuse a pre-built reverse operator sketch of `A·y[1]`
-(built with the same `seed` at width `ℓ_min+n_samples`), so a caller that already sketched `A·y[1]`
-need not recompute it; the cheaper vector sketches `y[2..m]` are always built internally.
+`caches` (optional) is a length-`m` vector of reusable per-term caches reused/extended in place across
+calls: `caches[1]` an `OperatorCachedSketch` for `A·y[1]`, `caches[j≥2]` a `CachedSketch` for `y[j]`;
+a `nothing` entry (or `caches=nothing`) builds a throwaway for that term. All must share `seed`/`block_rks`.
 """
 function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, ε::Real;
                                    ℓ_min::Int=4,
@@ -553,8 +553,8 @@ function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{T
                                    orthogonal::Bool=true,
                                    block_rks::Int=N,
                                    seed::Int=1234,
-                                   WAy_init=nothing,
-                                   sketch_rks_init=nothing,
+                                   caches=nothing,
+                                   weighting::Symbol=:equal,
                                    timer::TimerOutput=TimerOutput()) where {T,N}
   @assert n_samples >= ℓ_inc "n_samples ($n_samples) must be ≥ ℓ_inc ($ℓ_inc)"
   @timeit timer "ttrand_rounding_adaptive" begin
@@ -564,37 +564,41 @@ function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{T
     @assert all(y[j].ttv_dims == dims for j=2:m)
 
     vec = Vector{Array{T,3}}(undef, N)
-    # Term 1 → operator sketch of A·y[1] (3D per bond); terms j≥2 → vector sketches (2D per bond).
-    # Same seed across all terms for linearity.
-    local WAy, sketch_rks
-    W = Vector{Vector{Matrix{T}}}(undef, m)
-    @timeit timer "reverse_sketch" begin
-      if WAy_init === nothing
-        WAy, sketch_rks = tt_recursive_sketch(T, A, y[1], ℓ_min+n_samples; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-      else
-        WAy = WAy_init
-        sketch_rks = sketch_rks_init
-      end
-      for j = 2:m
-        Wⱼ, skⱼ = tt_recursive_sketch(T, y[j], ℓ_min+n_samples; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-        W[j] = Wⱼ
-        @assert skⱼ == sketch_rks
-      end
-      seed = seed + 1
+    # Term 1 → operator cache of A·y[1] (3-D columns); terms j≥2 → vector caches (2-D columns).
+    # Uniform block_rks (single group each), shared seed → blocks coincide so the combination is
+    # linear in α and per-bond column counts stay aligned. Caller caches reused, else throwaways.
+    _fresh_op()    = cached_operator_sketch(T, A, y[1], block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
+    _fresh_vec(j)  = cached_sketch(T, y[j], block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
+    op_cache = (caches === nothing || caches[1] === nothing) ? _fresh_op() : caches[1]
+    vcaches  = Vector{Any}(undef, m)
+    for j = 2:m
+      vcaches[j] = (caches === nothing || caches[j] === nothing) ? _fresh_vec(j) : caches[j]
     end
     out_rks = ones(Int, N+1)
     ot = zeros(Int, N)
+    _scols(l) = sum(g.brv[l]*g.counts[l] for g in op_cache.groups)
+    sketch_rks = [_scols(l) for l=1:N+1]
+    # Only the active bond's right-neighbour per term is materialized at a time (re-derived from the
+    # caches each bond and after each growth, into reused buffers); the boundary once for the norm.
+    WAy = Vector{Array{T,3}}(undef, N+1)
+    W = Vector{Vector{Matrix{T}}}(undef, m)
+    for j = 2:m
+      W[j] = Vector{Matrix{T}}(undef, N+1)
+    end
+    @timeit timer "reverse_sketch" begin
+      WAy[1] = sketch_array(op_cache, 1, y[1].ttv_rks[1], A.tto_rks[1]; weighting=weighting)
+      for j = 2:m
+        W[j][1] = sketch_matrix(vcaches[j], 1, y[j].ttv_rks[1]; weighting=weighting)
+      end
+    end
 
-    # Boundary sketch of the whole combination (linearity via shared seed)
+    # Boundary sketch of the whole combination (linearity via shared blocks)
     bnd = α[1] .* Base.vec(WAy[1])
     for j = 2:m
       bnd = bnd .+ α[j] .* Base.vec(W[j][1])
     end
     y_norm = norm(bnd)
     τ = ε * y_norm / sqrt(N - 1)
-    rks_inc = ones(Int, N+1)
-    rks_inc[1] = 0
-    rks_inc[2:N] .= n_samples
 
     @timeit timer "orthogonalization" begin
       # Term 1 partial product: Ayₖ layout (L=1, I, R_y, R_A), scaled by α[1].
@@ -613,6 +617,14 @@ function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{T
 
       @inbounds for k in 1:N-1
         max_basis = bond_rank_cap(dims, k, ℓ_max)
+        # Materialize the active bond's right-neighbour per term from the caches (may have grown).
+        @timeit timer "reverse_sketch" begin
+          remat_into_operator!(WAy, k+1, op_cache, y[1].ttv_rks[k+1], A.tto_rks[k+1]; weighting=weighting)
+          for j = 2:m
+            remat_into!(W[j], k+1, vcaches[j], y[j].ttv_rks[k+1]; weighting=weighting)
+          end
+          sketch_rks[k+1] = _scols(k+1)
+        end
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
             Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
@@ -672,26 +684,20 @@ function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{T
               @timeit timer "Recursive sketch" begin
                 if sketch_rks[k+1] < ℓ+n_samples
                   s_prev_kp1 = sketch_rks[k+1]
-                  WAy_extra, sk_extra = tt_recursive_sketch(T, A, y[1], rks_inc; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-                  W_extra = Vector{Vector{Matrix{T}}}(undef, m)
-                  for j = 2:m
-                    Wⱼ_extra, skⱼ_extra = tt_recursive_sketch(T, y[j], rks_inc; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-                    W_extra[j] = Wⱼ_extra
-                    @assert skⱼ_extra == sk_extra
-                  end
-                  seed = seed + 1
+                  # Grow every term's cache so bonds k+1:N reach ≥ ℓ+n_samples total columns; same seed
+                  # and brv keep their blocks identical (linearity) and column counts aligned.
+                  want = copy(sketch_rks)
                   for l = k+1:N
-                    s_prev = sketch_rks[l]
-                    new_total = s_prev + sk_extra[l]
-                    WAy[l] = cat(WAy[l], WAy_extra[l], dims=3)
-                    WAy[l][:, :, 1:s_prev] .*= sqrt(s_prev / new_total)
-                    WAy[l][:, :, (s_prev+1):end] .*= sqrt(sk_extra[l] / new_total)
-                    for j = 2:m
-                      W[j][l] = cat(W[j][l], W_extra[j][l], dims=2)
-                      W[j][l][:, 1:s_prev] .*= sqrt(s_prev / new_total)
-                      W[j][l][:, (s_prev+1):end] .*= sqrt(sk_extra[l] / new_total)
-                    end
-                    sketch_rks[l] = new_total
+                    want[l] = max(want[l], ℓ+n_samples)
+                  end
+                  ensure_columns!(op_cache, A, y[1], want; seed=seed, orthogonal=orthogonal, timer=timer)
+                  remat_into_operator!(WAy, k+1, op_cache, y[1].ttv_rks[k+1], A.tto_rks[k+1]; weighting=weighting)
+                  for j = 2:m
+                    ensure_columns!(vcaches[j], y[j], want; seed=seed, orthogonal=orthogonal, timer=timer)
+                    remat_into!(W[j], k+1, vcaches[j], y[j].ttv_rks[k+1]; weighting=weighting)
+                  end
+                  for l = k+1:N
+                    sketch_rks[l] = _scols(l)
                   end
                   S_full[:, 1:n_samples-ℓ_inc_eff] .*= sqrt(s_prev_kp1 / sketch_rks[k+1])
                 end
@@ -733,7 +739,6 @@ function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{T
           end
           Yₖ = Yₖ₊₁
         end
-        rks_inc[k+1] = 0
       end
       # Last core: operator term + vector terms.
       vec[N] = reshape(Ayₖ, out_rks[N], dims[N], out_rks[N+1])

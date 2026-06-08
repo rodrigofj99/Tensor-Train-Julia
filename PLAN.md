@@ -78,27 +78,25 @@ the mixed path the old scheme never handled addressably).
 **Verify:** both overloads rel-err-vs-exact at machine precision and reproducible; with vs without
 `caches` bit-identical (single-thread BLAS).
 
-### Stage 4 status / remaining
+### Stage 4 status — COMPLETE (all five reverse-sweep overloads on the cache primitive)
 DONE: sum overload (`a7037a6`,`7fc7fef`), single-TT two-group mixed-`block_rks` (`f05882b`), buffer
 optimization (`e36a426`,`6983e04`). All cache-on==cache-off bit-identical.
-
-REMAINING — each needs a new `SketchGroup`/`extend!` variant (the seeding, counts, geometric
-buffers, finalize/normalization, and `CachedSketch`/`ensure_columns!` plumbing generalize; the W
-*shape* and *contract kernel* differ). The blocks themselves (`generate_sketch_blocks`) are shared.
-- **Operator group** (sketch of `A·y`): DONE (`src/sketches/extend_operator.jl`,
-  `test/test_sketch_extend_operator.jl`). `OperatorSketchGroup` W[l]::(y.ttv_rks[l], A.tto_rks[l],
+- **Operator group** (sketch of `A·y`): `src/sketches/extend_operator.jl` (`373858b`),
+  `test/test_sketch_extend_operator.jl`. `OperatorSketchGroup` W[l]::(y.ttv_rks[l], A.tto_rks[l],
   brv[l], samples) (4-D), per-sample 5-arg kernel (blocks already match `S=(γ,ζ,c)`, no permute),
-  boundary `ones(1,1,1,1)`, 3-D `finalize_cols_operator`. **operator-residual** `(Atto, y, b, ε)`
-  rewired (commit `5544c55`): op cache for `A·y` + vector cache for `b`, shared seed/block_rks, cache
-  on/off bit-identical, machine-precision rounding. STILL TODO: **mixed-operator** `(α, A, y, ε)`
-  (op group for `A·y[1]` + vector groups for `y[j]`).
-- **Kronecker/Hadamard group** (sketch of `y₁⊙…⊙y_M`): `W[l]` is (M+2)-D over the M factors
-  `(y[1].ttv_rks[l],…,y[M].ttv_rks[l], brv[l], samples)`, per-sample
-  `contract_sketch_core_kronecker_backwards!` (blocks match `S=(brv[k+1],dims[k],brv[k])`, no permute),
-  boundary `ones(1×(M+2))`. **Finalize is 2-D** `(∏ᵢ y[i].ttv_rks[l], total_cols)` — the flattened
-  form the overload already consumes. Two-group (init `block_rks` + ext `block_rks_inc`), mirroring the
-  vector single-TT cache. Then wire the `NTuple{M}` overload.
-- Each: optional `cache(s)` kwarg; verify machine-precision rounding, reproducible, cache-on==off.
+  boundary `ones(1,1,1,1)`, 3-D `finalize_cols_operator`.
+  - **operator-residual** `(Atto, y, b, ε)` rewired (`5544c55`): op cache for `A·y` + vector cache for
+    `b`, shared seed/block_rks. Machine-precision rounding, cache on/off bit-identical.
+  - **mixed-operator** `(α, A, y, ε)` rewired (`<this commit>`): op cache for `A·y[1]` + vector caches
+    for `y[j≥2]`. Replaced dead `WAy_init/sketch_rks_init` with `caches`/`weighting`. Machine-precision,
+    cache on/off bit-identical, `sketched_gmres` operator path converges end-to-end.
+- **Kronecker/Hadamard group** (sketch of `y₁⊙…⊙y_M`): `src/sketches/extend_kronecker.jl` (`4ae52a9`),
+  `test/test_sketch_extend_kronecker.jl`. `W[l]` is (M+2)-D `(rks₁[l],…,rks_M[l], brv[l], samples)`,
+  per-sample `contract_sketch_core_kronecker_backwards!` (blocks match S, no permute), boundary
+  `ones(1×(M+2))`. **Finalize is 2-D** `(∏ᵢ y[i].ttv_rks[l], total_cols)` — the flattened form the
+  overload consumes. **Hadamard `NTuple{M}` overload** rewired (`2026e78`): two-group
+  (init `block_rks` + ext `block_rks_inc`), `weighting=:column` matches legacy renorm. Machine-precision
+  (M=2,3), cache on/off bit-identical.
 
 NOTE: in this sandbox `julialauncher` intermittently hangs without spawning a worker; invoke the real
 binary directly: `/Users/cazeaux/.julia/juliaup/julia-1.12.6+0.aarch64.apple.darwin14/Julia-1.12.app/Contents/Resources/julia/bin/julia`.

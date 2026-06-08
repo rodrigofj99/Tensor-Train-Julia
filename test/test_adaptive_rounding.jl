@@ -101,6 +101,34 @@ end
   @test norm(r2 - r0) / norm(r0) < 1e-12
 end
 
+@testset "ttrand_rounding_adaptive — mixed operator combination" begin
+  Random.seed!(21)
+  N = 5
+  dims = ntuple(i -> 3, N)
+  A  = rand_tto(dims, 2)
+  y1 = rand_tt(Float64, dims, [1,2,3,3,2,1]; orthogonal=true)
+  y2 = rand_tt(Float64, dims, [1,2,2,2,2,1]; orthogonal=true)
+  y3 = rand_tt(Float64, dims, [1,2,2,3,2,1]; orthogonal=true)
+  α = [1.5, -2.0, 0.7]; y = [y1, y2, y3]
+  ref = α[1]*(A*y1) + α[2]*y2 + α[3]*y3
+  ref_norm = norm(ref)
+  for ε in (1e-2, 1e-6, 1e-10)
+    ŷ = ttrand_rounding_adaptive(α, A, y, ε; seed=2024)
+    @test norm(ref - ŷ) / ref_norm <= max(10 * ε, 1e-12)
+  end
+
+  # Reusable caches (op cache for A·y[1] + vector caches for y[2..]) reproduce the throwaway result.
+  brk = N; sd = 2024; init = 4 + max(N÷2, 4)
+  r0  = ttrand_rounding_adaptive(α, A, y, 1e-4; seed=sd, block_rks=brk)
+  ch  = Any[cached_operator_sketch(Float64, A, y1, brk, brk, init; seed=sd),
+            cached_sketch(Float64, y2, brk, brk, init; seed=sd),
+            cached_sketch(Float64, y3, brk, brk, init; seed=sd)]
+  r1  = ttrand_rounding_adaptive(α, A, y, 1e-4; seed=sd, block_rks=brk, caches=ch)
+  r2  = ttrand_rounding_adaptive(α, A, y, 1e-4; seed=sd, block_rks=brk, caches=ch)  # reuse grown
+  @test norm(r1 - r0) / norm(r0) < 1e-12
+  @test norm(r2 - r0) / norm(r0) < 1e-12
+end
+
 @testset "ttrand_rounding_adaptive — Hadamard product" begin
   Random.seed!(13)
   N = 5
