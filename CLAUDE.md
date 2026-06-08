@@ -68,8 +68,9 @@ The codebase is organized into focused modules in `src/`:
 - **tt_tools.jl**: Core TT data structures, constructors, conversions (TTvector, TToperator, zeros_tt, rand_tt, ones_tt, json I/O)
 - **tt_operations.jl**: Arithmetic operations (+, -, *, /, dot, outer_product)
 - **tt_rounding.jl**: Compression and orthogonalization (tt_rounding, orthogonalize, tt_svdvals, norm)
-- **tt_randtools.jl**: Randomized algorithms (ttrand_rounding, stta, tt_hmt for sketching)
+- **tt_randtools.jl**: Randomized algorithms (`ttrand_rounding` — now a fixed-rank wrapper over the adaptive routine —, stta, tt_hmt for sketching)
 - **tt_adaptive_rounding.jl**: Adaptive randomized TT rounding to a target Frobenius tolerance (`ttrand_rounding_adaptive`); recursive-sketch helpers live in `src/sketches/`
+- **src/sketches/**: the recursive (TTStack) sketch and its reusable, extensible cache. `recursive.jl`/`blocks.jl`/`core_*.jl` build a fixed sketch; `extend.jl`, `extend_operator.jl`, `extend_kronecker.jl` add an incremental, content-addressable cache (`SketchGroup`/`extend_recursive_sketch!`/`CachedSketch` for a vector, plus operator-`A·y` and Kronecker-`⊙` variants) that grows a vector's sketch and reuses it across calls. Each supports both sweep directions via a `reverse::Bool` field (reverse = right→left, the default; forward = left→right). Group combination is controlled by `weighting` (see below)
 - **als.jl**: Alternating Linear Scheme (one-site DMRG) for linear systems and eigenvalue problems
 - **mals.jl**: Modified ALS (two-site DMRG)
 - **dmrg.jl**: DMRG with scheduling (DMRGScheduler, sweep schedules, adaptive rank control)
@@ -97,7 +98,15 @@ DMRG uses a scheduler system (`DMRGScheduler`) with:
 - Critical for numerical stability in DMRG
 
 **Randomized Methods**: `tt_randtools.jl` implements sketching-based compression:
-- `ttrand_rounding`: Randomized TT rounding (fixed target ranks)
+- `ttrand_rounding`: Randomized TT rounding to **fixed target ranks**. As of the
+  `refactor-core-layout` work this is a **thin wrapper** over `ttrand_rounding_adaptive`
+  (not an independent implementation): it calls the adaptive routine with the per-bond
+  basis pinned to `rks` (`ℓ_min = ℓ_max = rks`) and adaptation disabled (a scale-invariant
+  huge tolerance `_FIXED_RANK_ε`). Every overload (single-TT, sum `Σ αⱼ yⱼ`, operator
+  residual `A·y − b`, mixed-operator `α·A·y`, Hadamard `⊙`) is a wrapper. **Do not
+  reintroduce a separate fixed-rank sweep** — a single sweep implementation is what keeps
+  the two paths from drifting (a duplicated, unmaintained fixed-rank left-update once
+  carried an O(d²r) intermediate-blowup bug the adaptive path had already fixed).
 - `stta`: Sketched TT approximation
 - `tt_hmt`: TT-HMT for randomized compression
 
@@ -105,8 +114,10 @@ DMRG uses a scheduler system (`DMRGScheduler`) with:
 arXiv:2511.03598): a single left-to-right sweep that grows each bond's basis from a
 recursive (TTStack) sketch until a sketch-based residual estimate falls below the
 per-bond budget `τ = ε·‖y‖_F/√(N-1)`. Overloads cover a single TT, a linear
-combination `Σ αⱼ yⱼ`, an operator residual `A·y − b`, and a Hadamard product
-`y₁ ⊙ … ⊙ y_M` — each sketching the target implicitly (never forming it). Key knobs:
+combination `Σ αⱼ yⱼ`, an operator residual `A·y − b`, a mixed operator combination
+`α·A·y`, and a Hadamard product `y₁ ⊙ … ⊙ y_M` — each sketching the target implicitly
+(never forming it). `ℓ_min`/`ℓ_max` accept a scalar (uniform) **or a per-bond length-(N+1)
+vector** (the fixed-rank wrappers pass vectors). Key knobs:
 - `init_f`: per-bond *initial* basis width as a fraction of the bond's rank cap
   (localizes the `ℓ_min` floor).
 - `ℓ_inc`: small absolute floor on the per-iteration increment; the increment is
@@ -162,6 +173,15 @@ Tests are organized by module functionality:
 - **Indexing**: Julia uses 1-based indexing
 - **Ranks**: TT ranks are stored as `(r₀, r₁, ..., r_d)` with `r₀ = r_d = 1`
 - **Tensor contractions**: Use `@tensor` and `@tensoropt` macros from TensorOperations.jl
+- **Rounding left-update gotcha**: in the rounding sweeps, the per-bond left-update of a *vector*
+  partial product `Yₖ₊₁ = Yₖ · vec[k] · ttv_vec[k+1]` must be written as **two explicit gemms**
+  (`T1 = vec[k]ᵀ·Yₖ`, then `T1·ttv_vec[k+1]`), **not** as a single 3-factor `@tensoropt`. The naive
+  `@tensoropt` ordering materialises a `(ρₖ, iₖ, iₖ₊₁, αₖ₊₂)` intermediate (~hundreds of MB at wide
+  bonds / large mode size) and dominated the sweep — this was the cause of an "unreasonable slowdown
+  as soon as the target rank exceeded ~10" on high-TT-rank / low-effective-rank inputs. The
+  sketch contractions (`Zₖ`/`S_full`/`tail` = core × the width-`ℓ` sketch) stay `@tensoropt` (small,
+  bounded intermediate); the genuinely 4-way *operator*-core updates (`…·ttv_vec·tto_vec`) stay
+  `@tensoropt` (rank-bounded). Only the 3-factor vector left-update needs the explicit gemms.
 - **Orthogonality tracking**: Always update `ttv_ot` or `tto_ot` when modifying cores
 - **Type parameters**: TTvector and TToperator are parameterized by element type `T` and number of dimensions `M`
 - **Rounding a solution vs the residual it produces**: rounding a TT solution `x` at tolerance
