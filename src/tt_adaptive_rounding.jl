@@ -765,27 +765,41 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
                                    orthogonal::Bool=true,
                                    block_rks::Int=N,
                                    seed::Int=1234,
+                                   caches=nothing,
+                                   weighting::Symbol=:equal,
                                    timer::TimerOutput=TimerOutput()) where {T,N}
   @assert n_samples >= ℓ_inc "n_samples ($n_samples) must be ≥ ℓ_inc ($ℓ_inc)"
   @timeit timer "ttrand_rounding_adaptive" begin
     dims = y.ttv_dims
     vec = Vector{Array{T,3}}(undef, N)
 
-    @timeit timer "reverse_sketch" begin
-      WAy, sketch_rks = tt_recursive_sketch(T, Atto, y, ℓ_min+n_samples; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-      Wb,  sk_b       = tt_recursive_sketch(T,       b, ℓ_min+n_samples; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-      @assert sk_b == sketch_rks
-      seed = seed + 1
+    # Two reusable caches sharing seed/block_rks so their blocks coincide and S(A·y) − S(b) is the
+    # sketch of the residual A·y − b: an operator cache for A·y (3-D columns) and a vector cache for
+    # b (2-D columns). Uniform block_rks here (single group each); `caches=(op_cache, b_cache)` reuses
+    # caller caches, else throwaways are built. Columns stay aligned because both grow to the same
+    # per-bond counts (identical brv).
+    if caches === nothing
+      op_cache = cached_operator_sketch(T, Atto, y, block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
+      b_cache  = cached_sketch(T, b, block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
+    else
+      op_cache, b_cache = caches
     end
     out_rks = ones(Int, N+1)
     ot = zeros(Int, N)
+    _scols(l) = sum(g.brv[l]*g.counts[l] for g in op_cache.groups)
+    sketch_rks = [_scols(l) for l=1:N+1]
+    # Only the active bond's right-neighbour is materialized at a time (re-derived from the caches
+    # each bond and after each growth, into reused buffers); the boundary once for the norm.
+    WAy = Vector{Array{T,3}}(undef, N+1)
+    Wb  = Vector{Matrix{T}}(undef, N+1)
+    @timeit timer "reverse_sketch" begin
+      WAy[1] = sketch_array(op_cache, 1, y.ttv_rks[1], Atto.tto_rks[1]; weighting=weighting)
+      Wb[1]  = sketch_matrix(b_cache, 1, b.ttv_rks[1]; weighting=weighting)
+    end
 
-    # Boundary sketches share seed → linearity holds for the difference
+    # Boundary sketches share blocks → linearity holds for the difference
     y_norm = norm(Base.vec(WAy[1]) .- Base.vec(Wb[1]))
     τ = ε * y_norm / sqrt(N - 1)
-    rks_inc = ones(Int, N+1)
-    rks_inc[1] = 0
-    rks_inc[2:N] .= n_samples
 
     @timeit timer "orthogonalization" begin
       # Boundary partial-product Ayₖ has layout (L=1, I, R_y, R_A).
@@ -799,6 +813,12 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
 
       @inbounds for k in 1:N-1
         max_basis = bond_rank_cap(dims, k, ℓ_max)
+        # Materialize the active bond's right-neighbour from the caches (they may have grown earlier).
+        @timeit timer "reverse_sketch" begin
+          remat_into_operator!(WAy, k+1, op_cache, y.ttv_rks[k+1], Atto.tto_rks[k+1]; weighting=weighting)
+          remat_into!(Wb, k+1, b_cache, b.ttv_rks[k+1]; weighting=weighting)
+          sketch_rks[k+1] = _scols(k+1)
+        end
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
             Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
@@ -866,21 +886,21 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
               @timeit timer "Recursive sketch" begin
                 if sketch_rks[k+1] < ℓ+n_samples
                   s_prev_kp1 = sketch_rks[k+1]
-                  WAy_extra, sk_extra   = tt_recursive_sketch(T, Atto, y, rks_inc; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-                  Wb_extra,  sk_extra_b = tt_recursive_sketch(T,       b, rks_inc; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-                  @assert sk_extra_b == sk_extra
-                  seed = seed + 1
+                  # Grow both caches so bonds k+1:N reach ≥ ℓ+n_samples total columns; same seed and
+                  # brv keep their blocks identical (so S(Ay)−S(b) stays a sketch of the residual) and
+                  # their per-bond column counts aligned. Re-materialize the active bond.
+                  want = copy(sketch_rks)
                   for l = k+1:N
-                    s_prev = sketch_rks[l]
-                    new_total = s_prev + sk_extra[l]
-                    WAy[l] = cat(WAy[l], WAy_extra[l], dims=3)
-                    Wb[l]  = cat(Wb[l],  Wb_extra[l],  dims=2)
-                    WAy[l][:, :, 1:s_prev] .*= sqrt(s_prev / new_total)
-                    WAy[l][:, :, (s_prev+1):end] .*= sqrt(sk_extra[l] / new_total)
-                    Wb[l][:, 1:s_prev] .*= sqrt(s_prev / new_total)
-                    Wb[l][:, (s_prev+1):end] .*= sqrt(sk_extra[l] / new_total)
-                    sketch_rks[l] = new_total
+                    want[l] = max(want[l], ℓ+n_samples)
                   end
+                  ensure_columns!(op_cache, Atto, y, want; seed=seed, orthogonal=orthogonal, timer=timer)
+                  ensure_columns!(b_cache, b, want; seed=seed, orthogonal=orthogonal, timer=timer)
+                  remat_into_operator!(WAy, k+1, op_cache, y.ttv_rks[k+1], Atto.tto_rks[k+1]; weighting=weighting)
+                  remat_into!(Wb, k+1, b_cache, b.ttv_rks[k+1]; weighting=weighting)
+                  for l = k+1:N
+                    sketch_rks[l] = _scols(l)
+                  end
+                  # Renormalise the kept S_full cols (still in the OLD normalization).
                   S_full[:, 1:n_samples-ℓ_inc_eff] .*= sqrt(s_prev_kp1 / sketch_rks[k+1])
                 end
               end
@@ -913,7 +933,6 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
           Ayₖ = Ayₖ₊₁
           bₖ  = bₖ₊₁
         end
-        rks_inc[k+1] = 0
       end
       vec[N] = reshape(Ayₖ, out_rks[N], dims[N], out_rks[N+1]) .- reshape(bₖ, out_rks[N], dims[N], out_rks[N+1])
     end
