@@ -100,7 +100,7 @@ function plot_synthetic_sweep(adapt, det, labels; dir, n_trials, tag="", subtitl
     end
     c, m = variant_style("det")
     scatterlines!(ax_e, det[:rmax], max.(det[:err],1e-18); color=c, linewidth=2, marker=m, markersize=10, label="det @ rmax")
-    axislegend(ax_e; position=:lb, framevisible=true, labelsize=10)
+    axislegend(ax_e; position=:rt, framevisible=true, labelsize=10)   # top-right is empty (error spikes only at small rank)
 
     ax_s = Axis(fig[1, 2], xlabel="max target rank", ylabel="speedup (t_det / t_rand)",
                 title="speedup vs deterministic", titlesize=12)

@@ -62,7 +62,6 @@ function four_panel_sweep(adapt::AbstractDict, det::AbstractDict; variant_labels
     end
     c, m = variant_style("det")
     scatterlines!(ax_rk, det[:ε], det[:rk]; color = c, linewidth = 2, marker = m, markersize = 10, label = "det @ tol")
-    axislegend(ax_rk; position = :lt, framevisible = true, labelsize = 10)
 
     ax_err = Axis(fig[1, 2], xlabel = L"\varepsilon",
                   ylabel = L"\Vert \hat{x} - x_\mathrm{ref}\Vert/\Vert x_\mathrm{ref}\Vert",
@@ -77,7 +76,6 @@ function four_panel_sweep(adapt::AbstractDict, det::AbstractDict; variant_labels
     end
     c, m = variant_style("det")
     scatterlines!(ax_err, det[:ε], max.(det[:err], 1e-18); color = c, linewidth = 2, marker = m, markersize = 10, label = "det @ tol")
-    axislegend(ax_err; position = :lt, framevisible = true, labelsize = 10)
 
     pr = findfirst(ε -> isapprox(ε, ε_profile; rtol = 1e-12), adapt[first(variant_labels)][:ε])
     ax_pr = Axis(fig[2, 1], xlabel = "bond index k", ylabel = "TT rank at bond k", yscale = log10,
@@ -91,7 +89,6 @@ function four_panel_sweep(adapt::AbstractDict, det::AbstractDict; variant_labels
         end
         dp = det[:rk_profile][pr]
         lines!(ax_pr, 1:length(dp), max.(dp, 1); color = :black, linewidth = 2, linestyle = :dash, label = "det @ tol")
-        axislegend(ax_pr; position = :rt, framevisible = true, labelsize = 10)
     end
 
     ax_t = Axis(fig[2, 2], xlabel = L"\Vert \hat{x} - x_\mathrm{ref}\Vert/\Vert x_\mathrm{ref}\Vert",
@@ -104,27 +101,32 @@ function four_panel_sweep(adapt::AbstractDict, det::AbstractDict; variant_labels
     end
     c, m = variant_style("det")
     scatterlines!(ax_t, max.(det[:err], 1e-18), max.(det[:time_med], 1e-4); color = c, linewidth = 2, marker = m, markersize = 10, label = "det @ tol")
-    axislegend(ax_t; position = :lt, framevisible = true, labelsize = 10)
+
+    # One shared legend below all four panels (they repeat the same labels). Built from the rank
+    # axis (5 methods + det @ tol).
+    Legend(fig[3, 1:2], ax_rk; orientation = :horizontal, framevisible = true, labelsize = 11, nbanks = 1)
 
     f = joinpath(dir, fname); save(f, fig); println("→ saved $f"); return fig
 end
 
 """
-    speedup_compression_panel(adapt, det; variant_labels, dims, title, dir, fname)
+    speedup_compression_panel(adapt, det; variant_labels, dims, orig_rks, title, dir, fname)
 
 The paper Fig-5 layout: relative error, speedup (= t_det / t_rand), and **compression** vs tolerance
-ε. Speedup is per-ε against the deterministic baseline (`det[:time_med]`). Compression is the achieved
-*storage ratio* of each method's rounded TT — `Σₖ rₖ₋₁·nₖ·rₖ / Πₖ nₖ` (TT core storage divided by the
-number of entries of the full tensor) — computed from the per-bond rank profile (`:rk_profile`) and
-the mode dimensions `dims` (length N). Lower is better (more compressed).
+ε. Speedup is per-ε against the deterministic baseline (`det[:time_med]`). Compression is the storage
+reduction of the *rounding* — params(original TT) / params(rounded TT), where params = `Σₖ rₖ₋₁·nₖ·rₖ`
+(number of TT core entries) — computed from the per-bond rank profile (`:rk_profile`), the input TT
+ranks `orig_rks`, and the mode dimensions `dims` (both length N+1 / N). Higher is better (the original
+rank-`max(orig_rks)` TT is compressed by this factor). This is the paper's definition (ratio of
+original to compressed parameter counts), not a ratio against the full dense tensor.
 """
-function speedup_compression_panel(adapt::AbstractDict, det::AbstractDict; variant_labels, dims,
+function speedup_compression_panel(adapt::AbstractDict, det::AbstractDict; variant_labels, dims, orig_rks,
                                    title::AbstractString, dir::AbstractString, fname::AbstractString)
     CairoMakie.activate!(type = "pdf"); mkpath(dir)
     det_time = Dict(det[:ε][i] => det[:time_med][i] for i in eachindex(det[:ε]))
-    full_entries = prod(Float64.(collect(dims)))
     _storage(prof) = sum(prof[k]*dims[k]*prof[k+1] for k in 1:length(dims))   # Σ rₖ₋₁·nₖ·rₖ
-    _comp(profiles) = [_storage(p)/full_entries for p in profiles]
+    orig_storage = _storage(orig_rks)
+    _comp(profiles) = [orig_storage/_storage(p) for p in profiles]            # input / rounded params
     fig = Figure(size = (1500, 460))
     Label(fig[0, 1:3], title; fontsize = 13, tellwidth = false)
 
@@ -136,7 +138,6 @@ function speedup_compression_panel(adapt::AbstractDict, det::AbstractDict; varia
         d = adapt[lbl]; c, m = variant_style(lbl)
         scatterlines!(ax_e, d[:ε], max.(d[:err_med], 1e-18); color = c, linewidth = 2, marker = m, markersize = 9, label = lbl)
     end
-    axislegend(ax_e; position = :lt, framevisible = true, labelsize = 9)
 
     ax_s = Axis(fig[1, 2], xlabel = L"\varepsilon", ylabel = "speedup (t_det / t_rand)",
                 xscale = log10, xreversed = true, title = "speedup vs deterministic", titlesize = 12)
@@ -146,18 +147,20 @@ function speedup_compression_panel(adapt::AbstractDict, det::AbstractDict; varia
         sp = [det_time[ε] / t for (ε, t) in zip(d[:ε], d[:time_med])]
         scatterlines!(ax_s, d[:ε], sp; color = c, linewidth = 2, marker = m, markersize = 9, label = lbl)
     end
-    axislegend(ax_s; position = :lt, framevisible = true, labelsize = 9)
 
-    ax_c = Axis(fig[1, 3], xlabel = L"\varepsilon", ylabel = "TT storage / full-tensor entries",
+    ax_c = Axis(fig[1, 3], xlabel = L"\varepsilon", ylabel = "compression (input params / rounded params)",
                 xscale = log10, yscale = log10, xreversed = true,
-                title = "compression (storage fraction, lower = better)", titlesize = 12)
+                title = "compression vs input TT (higher = better)", titlesize = 12)
     for lbl in variant_labels
         d = adapt[lbl]; c, m = variant_style(lbl)
         scatterlines!(ax_c, d[:ε], _comp(d[:rk_profile]); color = c, linewidth = 2, marker = m, markersize = 9, label = lbl)
     end
     cd, md = variant_style("det")
     scatterlines!(ax_c, det[:ε], _comp(det[:rk_profile]); color = cd, linewidth = 2, marker = md, markersize = 10, label = "det @ tol")
-    axislegend(ax_c; position = :lt, framevisible = true, labelsize = 9)
+
+    # One shared legend below all three panels (they repeat the same labels). Built from the
+    # compression axis, which carries every series (5 methods + det @ tol).
+    Legend(fig[2, 1:3], ax_c; orientation = :horizontal, framevisible = true, labelsize = 11, nbanks = 1)
 
     f = joinpath(dir, fname); save(f, fig); println("→ saved $f"); return fig
 end

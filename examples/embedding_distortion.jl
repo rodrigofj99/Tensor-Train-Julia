@@ -133,14 +133,14 @@ function plot_E1(name, res, order; dir=OUTDIR)
         band!(ax1, d[:cols], d[:lo], d[:hi]; color=(c, 0.18))
         scatterlines!(ax1, d[:cols], d[:mean]; color=c, linewidth=2, markersize=7, label=lbl)
     end
-    axislegend(ax1; position=:rt, labelsize=9)
     ax2 = Axis(fig[1, 2], xlabel="sketch columns (embedding dim)", ylabel="CoV of estimate",
                yscale=log10, title="distortion (coefficient of variation)", titlesize=11)
     for (i, lbl) in enumerate(order)
         d = res[lbl]; c = _E_COLORS[mod1(i, length(_E_COLORS))]
         scatterlines!(ax2, d[:cols], max.(d[:cov], 1e-6); color=c, linewidth=2, markersize=7, label=lbl)
     end
-    axislegend(ax2; position=:rt, labelsize=9)
+    # Shared legend below (the left panel's bands fill the axis, so an in-panel legend would overlap).
+    Legend(fig[2, 1:2], ax2; orientation=:horizontal, framevisible=true, labelsize=10)
     f = joinpath(dir, "E1_$(name).pdf"); save(f, fig); println("→ saved $f"); return fig
 end
 
