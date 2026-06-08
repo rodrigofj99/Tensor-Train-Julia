@@ -991,6 +991,8 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
                                    block_rks::Int=N,
                                    block_rks_inc::Int=max(1, N÷4),
                                    seed::Int=1234,
+                                   cache=nothing,
+                                   weighting::Symbol=:column,
                                    timer::TimerOutput=TimerOutput()) where {T,N,M}
   if M == 1
     return ttrand_rounding_adaptive(y[1], ε; ℓ_min=ℓ_min, ℓ_inc=ℓ_inc, n_samples=n_samples, ℓ_max=ℓ_max, init_f=init_f, orthogonal=orthogonal, block_rks=block_rks, seed=seed, timer=timer)
@@ -1012,25 +1014,27 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
     end
     ℓ_min_global = init_f > 0 ? maximum(initb_k(k) for k in 1:N-1) : ℓ_min
 
-    @timeit timer "reverse_sketch" begin
-      W, sketch_rks = tt_recursive_sketch(T, y, ℓ_min_global+n_samples; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-      seed = seed + 1
-    end
+    # Two-group reusable Kronecker cache (frozen init group block_rks + growable ext group
+    # block_rks_inc); throwaway when `cache===nothing`. Groups combine by `weighting` (:column matches
+    # the legacy per-column renormalization). Sized to the worst bond's Init_b_k plus n_samples.
+    cache === nothing && (cache = cached_kronecker_sketch(T, y, block_rks, block_rks_inc, ℓ_min_global+n_samples; seed=seed, orthogonal=orthogonal, timer=timer))
     out_rks = ones(Int, N+1)
     ot = zeros(Int, N)
+    _scols(l) = sum(g.brv[l]*g.counts[l] for g in cache.groups)
+    sketch_rks = [_scols(l) for l=1:N+1]
+    # Only the active bond's right-neighbour is materialized at a time (2-D (∏ᵢ rks_i, cols), into a
+    # reused buffer); the boundary once for the norm.
+    W = Vector{Matrix{T}}(undef, N+1)
+    @timeit timer "reverse_sketch" begin
+      W[1] = sketch_matrix(cache, 1, rks_prod[1]; weighting=weighting)
+    end
 
     # Sketch-based ‖y‖ from the boundary contraction of the recursive sketch
-    # (Al Daas et al., 2025, Remark 3.1 / eqn 3.7: ‖X‖ ≈ ‖V(X_1)·W_2‖_F / √r).
-    # The 1/√r factor is already absorbed by the W[k] ./= sqrt(p[k]) normalisation
-    # in tt_recursive_sketch. The estimator is unbiased but has variance scaling
-    # poorly with the number of modes — see Theorem 3.4 in the same paper. Larger
-    # n_samples (controlled via the default `0.1 * ℓ_max`, matching f_init=0.1
-    # from the paper's §4.2 experiments) keeps this variance manageable.
+    # (Al Daas et al., 2025, Remark 3.1 / eqn 3.7: ‖X‖ ≈ ‖V(X_1)·W_2‖_F / √r). The estimator is
+    # unbiased but has variance scaling poorly with the number of modes — see Theorem 3.4. Larger
+    # n_samples (default `0.1·ℓ_max`, matching f_init=0.1 from §4.2) keeps this variance manageable.
     y_norm = norm(W[1])
     τ = ε * y_norm / sqrt(N - 1)
-    rks_inc = ones(Int, N+1)
-    rks_inc[1] = 0
-    rks_inc[2:N] .= n_samples
 
     @timeit timer "orthogonalization sweep" begin
       yₖ = broadcast(*, (reshape(y[i].ttv_vec[1],
@@ -1042,11 +1046,13 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
         max_basis = bond_rank_cap(dims, k, ℓ_max)
         # Per-bond Init_b_k for the Hadamard case (MATLAB-style).
         ℓ_min_k = init_f > 0 ? max(ℓ_min, ceil(Int, init_f * min(out_rks[k]*dims[k], rks_prod[k+1]))) : ℓ_min
+        # Materialize the active bond's right-neighbour from the cache (it may have grown earlier).
+        @timeit timer "reverse_sketch" remat_into!(W, k+1, cache, rks_prod[k+1]; weighting=weighting)
+        sketch_rks[k+1] = _scols(k+1)
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
             Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min_k)
-            W_full = reshape(W[k+1], prod(y[i].ttv_rks[k+1] for i=1:M), sketch_rks[k+1])
-            Wₖ₊₁ = W_full[:, 1:ℓ_min_k]
+            Wₖ₊₁ = W[k+1][:, 1:ℓ_min_k]
             @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[ρₖ,iₖ,ρₖ₊₁] = yₖ[ρₖ,iₖ,αₖ₊₁]*Wₖ₊₁[αₖ₊₁,ρₖ₊₁]
             Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min_k)
           end
@@ -1071,8 +1077,7 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
           @timeit timer "Initial residual sketch" begin
             S_full = zeros(T, out_rks[k]*dims[k], n_samples)
             let S_full_3d = reshape(S_full, out_rks[k], dims[k], n_samples),
-                W_full   = reshape(W[k+1], prod(y[i].ttv_rks[k+1] for i=1:M), sketch_rks[k+1]),
-                W_view   = view(W_full, :, ℓ_min_k+1:ℓ_min_k+n_samples)
+                W_view   = view(W[k+1], :, ℓ_min_k+1:ℓ_min_k+n_samples)
               @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[ρₖ,iₖ,ρₖ₊₁] = yₖ[ρₖ,iₖ,αₖ₊₁]*W_view[αₖ₊₁,ρₖ₊₁]
             end
           end
@@ -1109,24 +1114,24 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
               @timeit timer "Recursive sketch" begin
                 if sketch_rks[k+1] < ℓ+n_samples
                   s_prev_kp1 = sketch_rks[k+1]
-                  W_extra, sketch_rks_extra = tt_recursive_sketch(T, y, rks_inc; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks_inc, timer=timer)
-                  seed = seed + 1
+                  # Grow the extension group (block_rks_inc) so bonds k+1:N reach ≥ ℓ+n_samples total
+                  # columns; the frozen init group is untouched. Re-materialize the active bond.
+                  want = copy(sketch_rks)
                   for l = k+1:N
-                    s_prev = sketch_rks[l]
-                    new_total = s_prev + sketch_rks_extra[l]
-                    W[l] = cat(W[l], W_extra[l], dims=M+1)  # sketch dim is the last one
-                    W2 = reshape(W[l], :, new_total)        # view; in-place rescale below
-                    W2[:, 1:s_prev] .*= sqrt(s_prev / new_total)
-                    W2[:, (s_prev+1):end] .*= sqrt(sketch_rks_extra[l] / new_total)
-                    sketch_rks[l] = new_total
+                    want[l] = max(want[l], ℓ+n_samples)
                   end
+                  ensure_columns!(cache, y, want; seed=seed, orthogonal=orthogonal, timer=timer)
+                  remat_into!(W, k+1, cache, rks_prod[k+1]; weighting=weighting)
+                  for l = k+1:N
+                    sketch_rks[l] = _scols(l)
+                  end
+                  # Renormalise the kept S_full cols (still in the OLD normalization).
                   S_full[:, 1:n_samples-ℓ_inc_eff] .*= sqrt(s_prev_kp1 / sketch_rks[k+1])
                 end
               end
               @timeit timer "S_full tail contraction" begin
                 tail_buf = zeros(T, out_rks[k], dims[k], ℓ_inc_eff)
-                W_full = reshape(W[k+1], prod(y[i].ttv_rks[k+1] for i=1:M), sketch_rks[k+1])
-                W_tail = view(W_full, :, ℓ+n_samples-ℓ_inc_eff+1:ℓ+n_samples)
+                W_tail = view(W[k+1], :, ℓ+n_samples-ℓ_inc_eff+1:ℓ+n_samples)
                 @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) tail_buf[ρₖ,iₖ,ρₖ₊₁] = yₖ[ρₖ,iₖ,αₖ₊₁]*W_tail[αₖ₊₁,ρₖ₊₁]
                 copyto!(view(S_full, :, n_samples-ℓ_inc_eff+1:n_samples),
                         reshape(tail_buf, out_rks[k]*dims[k], ℓ_inc_eff))
@@ -1222,7 +1227,6 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
           # Layout (L, I, R) for yₖ: bring out_rks first, dims second, then w-product last.
           yₖ = reshape(permutedims(Qy, [M+1;M+2;1:M]), out_rks[k+1], dims[k+1], prod(w))
         end
-        rks_inc[k+1] = 0
       end
       vec[N] = reshape(yₖ, out_rks[N], dims[N], out_rks[N+1])
     end

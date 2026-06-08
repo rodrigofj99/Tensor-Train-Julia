@@ -1,6 +1,6 @@
 using Test
 using TensorTrains
-using TensorTrains: cached_operator_sketch, cached_sketch
+using TensorTrains: cached_operator_sketch, cached_sketch, cached_kronecker_sketch
 using LinearAlgebra
 using Random
 
@@ -119,6 +119,17 @@ end
   ŷ1 = ttrand_rounding_adaptive((ya,), 1e-8; seed=2024)
   err1 = norm(ya - ŷ1) / norm(ya)
   @test err1 <= 1e-7
+
+  # Reusable two-group Kronecker cache reproduces the throwaway-cache result and survives reuse.
+  brk = N; brk_inc = max(1, N÷4); sd = 2024
+  ℓmax = prod(maximum(ya.ttv_rks) for _ in 1:1) * maximum(yb.ttv_rks)
+  nsamp = max(N÷2, 4, ceil(Int, 0.1*ℓmax))
+  r0 = ttrand_rounding_adaptive((ya, yb), 1e-4; seed=sd)
+  c  = cached_kronecker_sketch(Float64, (ya, yb), brk, brk_inc, 4+nsamp; seed=sd)
+  r1 = ttrand_rounding_adaptive((ya, yb), 1e-4; seed=sd, cache=c)
+  r2 = ttrand_rounding_adaptive((ya, yb), 1e-4; seed=sd, cache=c)   # reuse grown
+  @test norm(r1 - r0) / norm(r0) < 1e-12
+  @test norm(r2 - r0) / norm(r0) < 1e-12
 end
 
 @testset "ttrand_rounding_adaptive — ε monotonicity" begin
