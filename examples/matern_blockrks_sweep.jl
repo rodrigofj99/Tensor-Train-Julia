@@ -6,6 +6,8 @@ using Printf
 using CairoMakie
 using Serialization
 
+include(joinpath(@__DIR__, "sweep_common.jl"))
+
 """
 Block-rank-extension sweep on the Matérn kernel TT tensor from §4.2 of
 Al Daas et al., arXiv:2511.03598 (paper-companion repo
@@ -66,13 +68,15 @@ function run_matern_sweep(; ref_tol::Float64 = 1e-10,
     #   `false` matches MATLAB's KRP (raw Gaussian, no normalisation) — Khatri-Rao
     #     in the strict sense of the original paper.
     #   `true` is our TTStack-style orthogonalised sketch (within-block QR).
+    # Named-method grid (shared vocabulary). Sweeps block_rks (init group: 1=KRP … 2N) AND
+    # block_rks_inc (ext group), plus the orthogonal=false strict-KRP contrast and the Adap-R column
+    # (TTStack-N followed by a final deterministic tt_rounding(;tol=ε) pass — paper Remark 3.2).
     variants = (
-      (label="KRP/Gauss", blk=1, inc=1, orth=false),
-      (label="KRP",       blk=1, inc=1, orth=true),
-      (label="N/ext=1",   blk=N, inc=1, orth=true),
-      (label="N/ext=8",   blk=N, inc=8, orth=true),
-      (label="N/ext=16",  blk=N, inc=16, orth=true),
-      (label="N/ext=32",  blk=N, inc=32, orth=true),
+      (label="strict-KRP", blk=1,  inc=1, orth=false, adap_r=false),
+      (label="orth-KRP",   blk=1,  inc=1, orth=true,  adap_r=false),
+      (label="TTStack-N",  blk=N,  inc=4, orth=true,  adap_r=false),
+      (label="TTStack-2N", blk=2N, inc=8, orth=true,  adap_r=false),
+      (label="Adap-R",     blk=N,  inc=4, orth=true,  adap_r=true),
     )
 
     println("\n--- Warmup ---")
@@ -100,13 +104,18 @@ function run_matern_sweep(; ref_tol::Float64 = 1e-10,
             errs = Float64[]; rks = Float64[]; times = Float64[]; rk_profiles = Vector{Int}[]
             for t = 1:n_trials
                 local ŷ
-                tm = @elapsed ŷ = ttrand_rounding_adaptive(y, ε;
-                                                           ℓ_min=1, init_f=init_f, ℓ_inc=ℓ_inc,
-                                                           n_samples=n_samples,
-                                                           orthogonal=v.orth,
-                                                           block_rks=v.blk,
-                                                           block_rks_inc=v.inc,
-                                                           seed=seed + 1000*t)
+                tm = @elapsed begin
+                    ŷ = ttrand_rounding_adaptive(y, ε;
+                                                 ℓ_min=1, init_f=init_f, ℓ_inc=ℓ_inc,
+                                                 n_samples=n_samples,
+                                                 orthogonal=v.orth,
+                                                 block_rks=v.blk,
+                                                 block_rks_inc=v.inc,
+                                                 seed=seed + 1000*t)
+                    # Adap-R (Remark 3.2): a final deterministic rounding pass to shed excess rank;
+                    # its cost is included in the timing so the speedup/compression are fair.
+                    v.adap_r && (ŷ = tt_rounding(ŷ; tol=ε))
+                end
                 push!(errs, norm(reference - ŷ) / ref_norm)
                 push!(rks, Float64(maximum(ŷ.ttv_rks)))
                 push!(times, tm)
@@ -168,116 +177,15 @@ function run_matern_sweep(; ref_tol::Float64 = 1e-10,
     serialize(joinpath(dir, "det.jls"), det)
 
     variant_labels = [v.label for v in variants]
-    plot_matern_sweep(adapt_results, det; N=N, variant_labels=variant_labels,
-                      n_trials=n_trials, ℓ_inc=ℓ_inc, dir=dir)
+    title = "Matérn kernel TT — block-rank study (N=$N, $(n_trials) trials, ℓ_inc=$ℓ_inc)"
+    four_panel_sweep(adapt_results, det; variant_labels=variant_labels, N=N, n_trials=n_trials,
+                     title=title, dir=dir, fname="matern_blockrks_ext_sweep.pdf")
+    speedup_compression_panel(adapt_results, det; variant_labels=variant_labels,
+                              title="Matérn — accuracy / speedup / compression vs tolerance (paper Fig 5)",
+                              dir=dir, fname="matern_speedup_compression.pdf")
     return (adapt=adapt_results, det=det)
 end
 
-const _VARIANT_COLOURS = Dict("KRP/Gauss" => :purple,
-                              "KRP"      => :tomato,
-                              "N/ext=1"  => :gold,
-                              "N/ext=8"  => :darkorange,
-                              "N/ext=16" => :firebrick,
-                              "N/ext=32" => :darkred)
-const _VARIANT_MARKERS = Dict("KRP/Gauss" => :xcross,
-                              "KRP"      => :circle,
-                              "N/ext=1"  => :star5,
-                              "N/ext=8"  => :diamond,
-                              "N/ext=16" => :utriangle,
-                              "N/ext=32" => :rect)
-
-function plot_matern_sweep(adapt, det; N, variant_labels, n_trials, ℓ_inc, dir)
-    CairoMakie.activate!(type="pdf")
-    title_str = "Matérn kernel TT — block-rank-extension sweep (N=$N, $(n_trials) trials, ℓ_inc=$ℓ_inc)"
-
-    fig = Figure(size=(1400, 900))
-    Label(fig[0, 1:2], title_str; fontsize=13, tellwidth=false)
-
-    ax_rk = Axis(fig[1, 1],
-                 xlabel = L"\varepsilon \;(\text{tolerance})",
-                 ylabel = "max output rank",
-                 xscale = log10, xreversed = true,
-                 title = "max output rank vs tolerance",
-                 titlesize = 12)
-    for lbl in variant_labels
-        d = adapt[lbl]; c = _VARIANT_COLOURS[lbl]; m = _VARIANT_MARKERS[lbl]
-        band!(ax_rk, d[:ε], d[:rk_q25], d[:rk_q75]; color=(c, 0.25))
-        scatterlines!(ax_rk, d[:ε], d[:rk_med]; color=c, linewidth=2,
-                      marker=m, markersize=9, label="adapt $lbl")
-    end
-    scatterlines!(ax_rk, det[:ε], det[:rk]; color=:black, linewidth=2,
-                  marker=:hexagon, markersize=10, label="det @ tol")
-    axislegend(ax_rk; position=:lt, framevisible=true, labelsize=10)
-
-    ax_err = Axis(fig[1, 2],
-                  xlabel = L"\varepsilon \;(\text{tolerance})",
-                  ylabel = L"\Vert \hat{x} - x_\mathrm{ref} \Vert / \Vert x_\mathrm{ref} \Vert",
-                  xscale = log10, yscale = log10, xreversed = true,
-                  title = "achieved error vs tolerance",
-                  titlesize = 12)
-    εs_sorted = sort(collect(adapt[first(variant_labels)][:ε]))
-    lines!(ax_err, εs_sorted, εs_sorted; color=:gray, linewidth=1,
-           linestyle=:dot, label=L"\text{err}=\varepsilon")
-    for lbl in variant_labels
-        d = adapt[lbl]; c = _VARIANT_COLOURS[lbl]; m = _VARIANT_MARKERS[lbl]
-        band!(ax_err, d[:ε], max.(d[:err_q25], 1e-18), max.(d[:err_q75], 1e-18);
-              color=(c, 0.25))
-        scatterlines!(ax_err, d[:ε], max.(d[:err_med], 1e-18); color=c, linewidth=2,
-                      marker=m, markersize=9, label="adapt $lbl")
-    end
-    scatterlines!(ax_err, det[:ε], max.(det[:err], 1e-18); color=:black, linewidth=2,
-                  marker=:hexagon, markersize=10, label="det @ tol")
-    axislegend(ax_err; position=:lt, framevisible=true, labelsize=10)
-
-    ε_target = 1e-6
-    pr_idx = findfirst(ε -> isapprox(ε, ε_target; rtol=1e-12), adapt[first(variant_labels)][:ε])
-    ax_pr = Axis(fig[2, 1],
-                 xlabel = "bond index k",
-                 ylabel = "TT rank at bond k",
-                 yscale = log10,
-                 title = @sprintf("per-bond rank profile at ε=%.0e", ε_target),
-                 titlesize = 12)
-    for lbl in variant_labels
-        d = adapt[lbl]; c = _VARIANT_COLOURS[lbl]
-        prof = d[:rk_profile][pr_idx]
-        q25  = d[:rk_profile_q25][pr_idx]
-        q75  = d[:rk_profile_q75][pr_idx]
-        band!(ax_pr, 1:length(prof), max.(q25, 1), max.(q75, 1); color=(c, 0.25))
-        lines!(ax_pr, 1:length(prof), max.(prof, 1);
-               color=c, linewidth=2, label="adapt $lbl")
-    end
-    det_prof = det[:rk_profile][pr_idx]
-    lines!(ax_pr, 1:length(det_prof), max.(det_prof, 1);
-           color=:black, linewidth=2, linestyle=:dash, label="det @ tol")
-    axislegend(ax_pr; position=:rt, framevisible=true, labelsize=10)
-
-    ax_t = Axis(fig[2, 2],
-                xlabel = L"\Vert \hat{x} - x_\mathrm{ref} \Vert / \Vert x_\mathrm{ref} \Vert",
-                ylabel = "wall time (s)",
-                xscale = log10, yscale = log10, xreversed = true,
-                title = "wall time vs achieved error",
-                titlesize = 12)
-    for lbl in variant_labels
-        d = adapt[lbl]; c = _VARIANT_COLOURS[lbl]; m = _VARIANT_MARKERS[lbl]
-        band!(ax_t, max.(d[:err_med], 1e-18),
-              max.(d[:time_q25], 1e-4), max.(d[:time_q75], 1e-4);
-              color=(c, 0.25))
-        scatterlines!(ax_t, max.(d[:err_med], 1e-18), max.(d[:time_med], 1e-4);
-                      color=c, linewidth=2, marker=m, markersize=9, label="adapt $lbl")
-    end
-    band!(ax_t, max.(det[:err], 1e-18),
-          max.(det[:time_q25], 1e-4), max.(det[:time_q75], 1e-4);
-          color=(:black, 0.20))
-    scatterlines!(ax_t, max.(det[:err], 1e-18), max.(det[:time_med], 1e-4);
-                  color=:black, linewidth=2, marker=:hexagon, markersize=10,
-                  label="det @ tol")
-    axislegend(ax_t; position=:lt, framevisible=true, labelsize=10)
-
-    fname = "$(dir)/matern_blockrks_ext_sweep.pdf"
-    save(fname, fig)
-    println("\n→ saved $fname")
-    return fig
-end
 
 if abspath(PROGRAM_FILE) == @__FILE__
     run_matern_sweep(n_trials=5)
