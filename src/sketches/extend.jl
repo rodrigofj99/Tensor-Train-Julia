@@ -55,37 +55,54 @@ function extend_recursive_sketch!(g::SketchGroup{TW}, A::TTvector{TA,N}, target:
                                    timer::TimerOutput=TimerOutput()) where {TW,TA,N}
   dims = A.ttv_dims
   @timeit timer "extend_recursive_sketch" begin
+    # Size the per-call block / contraction buffers for the largest deficient bond, then reuse them
+    # across bonds under GC.@preserve (as tt_recursive_sketch does) — avoids per-bond reallocation of
+    # the block tensor and the contraction's gemm scratch.
+    max_sketch = 0; max_contract = 0
     @inbounds for k = N:-1:1
       g.counts[k] >= target[k] && continue
-      # k<N recurses against the right neighbour's columns (needs them present); k=N recurses
-      # against the tiled ones boundary, so target[N] is unconstrained.
-      @assert k == N || target[k] <= g.counts[k+1] "non-decreasing counts required for the reverse recursion: bond $k target $(target[k]) exceeds right-neighbour count $(g.counts[k+1])"
-      off = g.counts[k]; add = target[k] - off
-      # Blocks at global sample indices off+1..off+add at bond k (group namespace g.group).
-      Bβzbp = generate_sketch_blocks(seed, k, off, TW, g.brv[k+1], dims[k], g.brv[k], add, orthogonal;
-                                     reverse=true, group=g.group, timer=timer)
-      S = permutedims(Bβzbp, (2,1,3,4))           # (z, β, b, add) layout the kernel wants
-      Wk_new = zeros(TW, A.ttv_rks[k], g.brv[k], add)
-      # Recurse against the right neighbour's EXISTING columns at the same global positions
-      # (or the tiled ones boundary for k = N) — this is what makes a sample globally addressable.
-      V = k < N ? Array(view(g.W[k+1], :, :, off+1:target[k])) : repeat(g.W[N+1], 1, 1, add)
-      contract_sketch_core_backwards!(Wk_new, A.ttv_vec[k], S, V)
-      # Geometric-growth append into a capacity buffer (amortized O(final width), avoids the
-      # O(width²) cat blow-up). finalize_cols / _slab_var index only the used 1:counts[k] slabs;
-      # spare capacity is never read.
-      if off == 0
-        g.W[k] = Wk_new
-      else
-        Wk = g.W[k]
-        if size(Wk, 3) < target[k]
-          newcap = max(2*size(Wk, 3), target[k])
-          buf = Array{TW,3}(undef, size(Wk, 1), size(Wk, 2), newcap)
-          copyto!(view(buf, :, :, 1:off), view(Wk, :, :, 1:off))
-          Wk = buf; g.W[k] = buf
+      add = target[k] - g.counts[k]
+      max_sketch = max(max_sketch, g.brv[k+1]*dims[k]*g.brv[k]*add)
+      cb, = contract_sketch_core_backwards_batched_buffers_size(dims[k], A.ttv_rks[k], A.ttv_rks[k+1], g.brv[k+1], g.brv[k], add)
+      max_contract = max(max_contract, cb)
+    end
+    max_sketch == 0 && return g                          # nothing deficient
+    sketch_buffer   = Vector{TW}(undef, max_sketch)
+    contract_buffer = (Vector{TW}(undef, max_contract),)
+    GC.@preserve sketch_buffer contract_buffer begin
+      @inbounds for k = N:-1:1
+        g.counts[k] >= target[k] && continue
+        # k<N recurses against the right neighbour's columns (needs them present); k=N recurses
+        # against the tiled ones boundary, so target[N] is unconstrained.
+        @assert k == N || target[k] <= g.counts[k+1] "non-decreasing counts required for the reverse recursion: bond $k target $(target[k]) exceeds right-neighbour count $(g.counts[k+1])"
+        off = g.counts[k]; add = target[k] - off
+        # Blocks at global sample indices off+1..off+add at bond k (group namespace g.group).
+        Bβzbp = generate_sketch_blocks(seed, k, off, TW, g.brv[k+1], dims[k], g.brv[k], add, orthogonal;
+                                       reverse=true, group=g.group, buffer=sketch_buffer, timer=timer)
+        S = permutedims(Bβzbp, (2,1,3,4))           # (z, β, b, add) layout the kernel wants
+        Wk_new = zeros(TW, A.ttv_rks[k], g.brv[k], add)
+        # Recurse against the right neighbour's EXISTING columns at the same global positions (a
+        # contiguous slab view — no copy; the tiled ones boundary for k = N). This is what makes a
+        # sample globally addressable.
+        V = k < N ? view(g.W[k+1], :, :, off+1:target[k]) : repeat(g.W[N+1], 1, 1, add)
+        contract_sketch_core_backwards!(Wk_new, A.ttv_vec[k], S, V; buffer=contract_buffer)
+        # Geometric-growth append into a capacity buffer (amortized O(final width), avoids the
+        # O(width²) cat blow-up). finalize_cols / _slab_var index only the used 1:counts[k] slabs;
+        # spare capacity is never read.
+        if off == 0
+          g.W[k] = Wk_new
+        else
+          Wk = g.W[k]
+          if size(Wk, 3) < target[k]
+            newcap = max(2*size(Wk, 3), target[k])
+            buf = Array{TW,3}(undef, size(Wk, 1), size(Wk, 2), newcap)
+            copyto!(view(buf, :, :, 1:off), view(Wk, :, :, 1:off))
+            Wk = buf; g.W[k] = buf
+          end
+          copyto!(view(Wk, :, :, off+1:target[k]), Wk_new)
         end
-        copyto!(view(Wk, :, :, off+1:target[k]), Wk_new)
+        g.counts[k] = target[k]
       end
-      g.counts[k] = target[k]
     end
   end
   return g
