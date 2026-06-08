@@ -101,3 +101,61 @@ end
         @test norm(r0 - y) / norm(y) < 1e-10       # rank captures y here
     end
 end
+
+# Forward-sweep mirror (reverse=false): left→right recursion reusing the left neighbour, boundary at
+# bond 1, blocks need no permute. Same validations as the reverse group.
+@testset "extend_recursive_sketch! forward (reverse=false)" begin
+    dims = (8,7,9,6,8); N = 5; seed = 4242
+    A = rand_tt(Float64, dims, 9; seed=77)
+    rks = A.ttv_rks
+    fbrv(b) = (v = ones(Int,N+1); v[2:N+1] .= b; for k=1:N; v[k+1] = min(v[k+1], dims[k]*v[k]); end; v)
+
+    @testset "single group == tt_recursive_sketch(reverse=false) (bit-identical)" begin
+        for orth in (true, false), b in (3, 7)
+            Wref, skref = tt_recursive_sketch(Float64, A, 14; seed=seed, block_rks=b, orthogonal=orth, reverse=false)
+            p = skref .÷ fbrv(b)
+            g = SketchGroup(Float64, A, b, 0; reverse=false)
+            extend_recursive_sketch!(g, A, p; seed=seed, orthogonal=orth)
+            for l in 1:N+1
+                @test finalize_cols([g], l, rks[l]; weighting=:equal) == Wref[l]
+            end
+        end
+    end
+
+    @testset "one-shot vs two-shot extension (bit-identical, history-independent)" begin
+        b = 4
+        _, skref = tt_recursive_sketch(Float64, A, 18; seed=seed, block_rks=b, orthogonal=true, reverse=false)
+        p = skref .÷ fbrv(b)
+        g1 = SketchGroup(Float64, A, b, 0; reverse=false)
+        extend_recursive_sketch!(g1, A, p; seed=seed, orthogonal=true)
+        # smaller non-increasing partial first (reduce each bond by up to 2 but keep ≥ the RIGHT
+        # neighbour so 2:N+1 stays non-increasing; leave the bond-1 boundary at 1), then full.
+        half = copy(p)
+        for l = N+1:-1:2
+            lo = l == N+1 ? 1 : half[l+1]      # must stay ≥ right neighbour
+            half[l] = max(lo, p[l]-2)
+        end
+        g2 = SketchGroup(Float64, A, b, 0; reverse=false)
+        extend_recursive_sketch!(g2, A, half; seed=seed, orthogonal=true)
+        extend_recursive_sketch!(g2, A, p;    seed=seed, orthogonal=true)
+        for l in 1:N+1
+            @test finalize_cols([g1], l, rks[l]) == finalize_cols([g2], l, rks[l])
+        end
+    end
+
+    @testset "CachedSketch reverse=false: grow-then-grow-more == from-scratch (bit-identical)" begin
+        for (brk, brk_inc) in ((4, 4), (7, 3))
+            want1 = fill(20, N+1); want1[1] = 1
+            want2 = fill(40, N+1); want2[1] = 1
+            c1 = cached_sketch(Float64, A, brk, brk_inc, 12; reverse=false, seed=seed)
+            ensure_columns!(c1, A, want1; seed=seed)
+            ensure_columns!(c1, A, want2; seed=seed)
+            c2 = cached_sketch(Float64, A, brk, brk_inc, 12; reverse=false, seed=seed)
+            ensure_columns!(c2, A, want2; seed=seed)
+            for l in 1:N+1
+                @test sketch_matrix(c1, l, rks[l]) == sketch_matrix(c2, l, rks[l])
+            end
+            @test all(size(sketch_matrix(c1, l, rks[l]), 2) >= want2[l] for l in 2:N+1)
+        end
+    end
+end

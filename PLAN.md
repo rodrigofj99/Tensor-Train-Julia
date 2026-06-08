@@ -129,13 +129,20 @@ Action taken: unified the default to `:column` across all overloads (was `:equal
 and mixed-operator — a bit-identical no-op there since they are single-group, but correct/future-proof).
 No accuracy/iteration regression (full adaptive-rounding suite green).
 
-## Stage 7 — Forward-sketch mirror  (`reverse=false`)
-Mirror the whole cache stack for the forward sweep: `SketchGroup`/`extend!` recursing **left→right**
-(reuse the *left* neighbour's columns), `contract_sketch_core_forwards!` kernels, boundary at bond 1.
-A `reverse::Bool` field on `SketchGroup` (and the constructor / `_heuristic_p` / `ensure_columns!`
-direction) selects the sweep. Then any overload that uses forward sketches picks it up. Same
-validation: forward single group == `tt_recursive_sketch(reverse=false)` bit-identical; one-shot ==
-multi-shot; cache-on == off.
+## Stage 7 — Forward-sketch mirror  (`reverse=false`)  — DONE (vector group)
+Added a `reverse::Bool` field to `SketchGroup`; the constructor builds `brv` and the boundary on the
+correct side, and `extend_recursive_sketch!` / `_heuristic_p` / `cached_sketch` / `ensure_columns!`
+branch on it. Forward sweep: fills bonds `l=k+1` left→right reusing the LEFT neighbour `W[k]`,
+`contract_sketch_core_forwards!` (batched), boundary at bond 1, blocks need no permute (the generated
+`(brv[k],dims[k],brv[k+1],add)` already matches the forward kernel's `S`); count-monotonicity flips to
+**non-increasing** over bonds `2..N+1` (`ensure_columns!` running-max from the right). The geometric-grow
+append is shared via `_append_slabs!`. Validated (`test/test_sketch_extend.jl`): forward single group ==
+`tt_recursive_sketch(reverse=false)` bit-identical (orth∈{T,F}, b∈{3,7}); one-shot == two-shot; cache
+grow == from-scratch (uniform + mixed `block_rks`). Reverse path unchanged (refactor only). Full suite green.
+
+No current overload consumes a *forward cached* sketch (only fixed-size `tt_combined_sketch`/`stta` use
+`reverse=false`), so this is the foundational primitive. Operator/Kronecker forward groups + a forward
+consumer are a trivial future extension (mirror the same field/branch in their structs) if needed.
 
 ## Risks / notes
 - Broadest-blast change (sketch core used by `ttrand_rounding`, `stta`, all adaptive overloads,
