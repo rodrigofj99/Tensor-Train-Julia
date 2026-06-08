@@ -109,59 +109,18 @@ y_avg = ttrand_rounding([0.5, 0.5], [y1, y2], 10)
 y_rounded = ttrand_rounding(y, 10; block_rks=4)
 ```
 """
+# Fixed-rank randomized rounding is the adaptive routine with the per-bond basis pinned to `rks` and
+# adaptation disabled (a huge tolerance ⇒ τ ≫ any residual, so the basis never grows past `rks`).
+# A single implementation means the adaptive sweep's optimizations (e.g. the gemm-ordered left-update)
+# and the recursive-sketch primitive are shared — there is no separate fixed-rank code path to drift.
+# `_FIXED_RANK_ε` is scale-invariant: the stopping test compares ‖Sₖ‖ against ε·‖y‖/√(N-1), and
+# ‖Sₖ‖ = O(‖y‖), so any ε ≫ 1 disables growth regardless of ‖y‖.
+const _FIXED_RANK_ε = 1e10
 function ttrand_rounding(y::TTvector{T,N}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
-  @timeit timer "ttrand_rounding" begin
-    dims = y.ttv_dims
-    vec = Vector{Array{T,3}}(undef, N)
-    @timeit timer "reverse_sketch" begin
-      W, sketch_rks = tt_recursive_sketch(T, y, rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-    end
-    out_rks = ones(Int, N+1)
-    ot = zeros(Int, N)
-
-    # Randomized sketching and orthogonalization. Local tensors use layout (L, I, R).
-    @timeit timer "orthogonalization" begin
-      yₖ = reshape(y.ttv_vec[1], 1, dims[1], y.ttv_rks[2])
-      @inbounds for k in 1:N-1
-      @timeit timer "Randomized QR decomposition" begin
-      @timeit timer "Sketch" begin
-        target_width = min(rks[k+1], sketch_rks[k+1], dims[k]*out_rks[k],
-                           bond_rank_cap(dims, k, sketch_rks[k+1]))
-        Zₖ = zeros(T, out_rks[k], dims[k], target_width)
-        W_sub = view(W[k+1], :, 1:target_width)
-        # Zₖ[ρₖ*iₖ, ρₖ₊₁] = yₖ[ρₖ*iₖ, αₖ₊₁] × W_sub. One gemm.
-        mul!(reshape(Zₖ, out_rks[k]*dims[k], target_width),
-             reshape(yₖ, out_rks[k]*dims[k], :),
-             W_sub)
-        Zₖ = reshape(Zₖ, out_rks[k]*dims[k], target_width)
-      end
-      @timeit timer "QR" begin
-        Q, _ = qr!(Zₖ)
-        Q = Matrix(Q)
-      end
-      @timeit timer "Update core" begin
-        out_rks[k+1] = size(Q,2)
-        vec[k] = reshape(Q, out_rks[k], dims[k], out_rks[k+1])
-        ot[k] = 1
-      end
-      end
-      @timeit timer "Update yₖ" begin
-        # Explicit ordering: contract (vec[k], yₖ) → T1 first, then T1 × ttv_vec[k+1]. The naive
-        # @tensoropt ordering materialises a (ρₖ, iₖ, iₖ₊₁, αₖ₊₂) intermediate (~200 MB/bond at the
-        # widest bonds here), which dominated the sweep; the order below keeps the intermediate at
-        # (ρₖ₊₁, αₖ₊₁) — a few tens of KB. Mirrors the fix in ttrand_rounding_adaptive.
-        # T1[ρₖ₊₁, αₖ₊₁] = Σ_{ρₖ, iₖ} vec[k][ρₖ, iₖ, ρₖ₊₁] * yₖ[ρₖ, iₖ, αₖ₊₁]
-        T1 = reshape(vec[k], out_rks[k]*dims[k], out_rks[k+1])' *
-             reshape(yₖ, out_rks[k]*dims[k], y.ttv_rks[k+1])
-        # yₖ₊₁[ρₖ₊₁, iₖ₊₁, αₖ₊₂] = Σ_{αₖ₊₁} T1[ρₖ₊₁, αₖ₊₁] * ttv_vec[k+1][αₖ₊₁, iₖ₊₁, αₖ₊₂]
-        yₖ₊₁_mat = T1 * reshape(y.ttv_vec[k+1], y.ttv_rks[k+1], dims[k+1]*y.ttv_rks[k+2])
-        yₖ = reshape(yₖ₊₁_mat, out_rks[k+1], dims[k+1], y.ttv_rks[k+2])
-      end
-      end
-      vec[N] = reshape(yₖ, out_rks[N], dims[N], out_rks[N+1])
-    end
-    return TTvector{T,N}(N,vec,dims,out_rks,ot)
-  end
+  rksv = collect(Int, rks)
+  return ttrand_rounding_adaptive(y, _FIXED_RANK_ε; ℓ_min=rksv, ℓ_max=rksv, init_f=0.0, ℓ_inc=1,
+                                  n_samples=1, block_rks=block_rks, block_rks_inc=block_rks,
+                                  orthogonal=orthogonal, seed=seed, timer=timer)
 end
 
 """
@@ -177,130 +136,25 @@ function ttrand_rounding(y::TTvector{T,N}, rmax::Int; orthogonal::Bool=true, see
     return ttrand_rounding(y, rks; orthogonal=orthogonal, seed=seed, block_rks=block_rks, timer=timer)
 end
 
+# Fixed-rank rounding of the operator residual A·y − b = the adaptive operator-residual overload with
+# the basis pinned to `rks` and adaptation disabled (see the single-TT wrapper for the rationale).
 function ttrand_rounding(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TTvector{T,N}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
-  @timeit timer "ttrand_rounding" begin
-    dims = y.ttv_dims
-    vec = Vector{Array{T,3}}(undef, N)
-    @timeit timer "reverse_sketch" begin
-      WAy, sketch_rks = tt_recursive_sketch(T, Atto, y, rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-      Wb,  sketch_rks = tt_recursive_sketch(T,       b, rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-    end
-    out_rks = ones(Int, N+1)
-    ot = zeros(Int, N)
-
-# Randomized sketching and orthogonalization. State tensors carry (L, I, R) layout.
-    @timeit timer "orthogonalization" begin
-      @timeit timer "left_sweep" begin
-        # At k=1 the partial product has boundary left rank ρₖ = L_y = L_A = 1.
-        # Ayₖ_3d[iₖ, αₖ₊₁, βₖ₊₁] = sum_j A[iₖ, jₖ, βₖ₊₁] * y[jₖ, αₖ₊₁].
-        # Same shape contortion as tt_solvers.jl Ay₁_tmp — keep the macro.
-        y₁_view = reshape(y.ttv_vec[1], dims[1], y.ttv_rks[2])
-        A₁_view = reshape(Atto.tto_vec[1], dims[1], dims[1], Atto.tto_rks[2])
-        Ayₖ_3d = zeros(T, dims[1], y.ttv_rks[2], Atto.tto_rks[2])
-        @tensor Ayₖ_3d[iₖ, αₖ₊₁, βₖ₊₁] = y₁_view[jₖ, αₖ₊₁] * A₁_view[iₖ, jₖ, βₖ₊₁]
-        Ayₖ = reshape(Ayₖ_3d, 1, dims[1], y.ttv_rks[2], Atto.tto_rks[2])
-        bₖ = reshape(b.ttv_vec[1], 1, dims[1], b.ttv_rks[2])
-        @inbounds begin
-          for k in 1:N-1
-            target_width = min(rks[k+1], sketch_rks[k+1], dims[k]*out_rks[k],
-                               bond_rank_cap(dims, k, sketch_rks[k+1]))
-            Zₖ = zeros(T, out_rks[k], dims[k], target_width)
-            WAy_sub = view(WAy[k+1], :, :, 1:target_width)
-            Wb_sub  = view(Wb[k+1],  :,    1:target_width)
-            @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[ρₖ,iₖ,ρₖ₊₁] := Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*WAy_sub[αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[ρₖ,iₖ,αₖ₊₁]*Wb_sub[αₖ₊₁,ρₖ₊₁]
-            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], target_width)
-            Q, _ = qr!(Zₖ)
-            Q = Matrix(Q)
-            out_rks[k+1] = size(Q,2)
-            vec[k] = reshape(Q, out_rks[k], dims[k], out_rks[k+1])
-            ot[k] = 1
-
-            #update left parts
-            Ayₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], y.ttv_rks[k+2], Atto.tto_rks[k+2])
-             bₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], b.ttv_rks[k+2])
-            @tensoropt (αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂,ρₖ₊₁) Ayₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂,βₖ₊₂] = Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y.ttv_vec[k+1][αₖ₊₁,jₖ₊₁,αₖ₊₂]*Atto.tto_vec[k+1][βₖ₊₁,iₖ₊₁,jₖ₊₁,βₖ₊₂]
-            @tensoropt (αₖ₊₁,     αₖ₊₂,    ρₖ₊₁)  bₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂     ] =  bₖ[ρₖ,iₖ,αₖ₊₁    ]*vec[k][ρₖ,iₖ,ρₖ₊₁]*b.ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
-            Ayₖ = Ayₖ₊₁
-            bₖ  = bₖ₊₁
-          end
-          rks[N+1] = 1
-          vec[N] = reshape(Ayₖ, out_rks[N], dims[N], out_rks[N+1]) - reshape(bₖ, out_rks[N], dims[N], out_rks[N+1])
-        end
-      end
-    end
-
-    return TTvector{T,N}(N,vec,dims,out_rks,ot)
-  end
+  rksv = collect(Int, rks)
+  return ttrand_rounding_adaptive(Atto, y, b, _FIXED_RANK_ε; ℓ_min=rksv, ℓ_max=rksv, ℓ_inc=1, n_samples=1,
+                                  block_rks=block_rks, orthogonal=orthogonal, seed=seed, timer=timer)
 end
 
-function ttrand_rounding(Atto::TToperator{T,N}, y::Vector{TTvector{T,N}}, b::TTvector{T,N}, rmax::Int; orthogonal::Bool=true, seed::Int=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
-    # Generate uniform ranks with rmax
-    rks = ones(Int, N+1)
-    rks[2:N] .= rmax
+function ttrand_rounding(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TTvector{T,N}, rmax::Int; orthogonal::Bool=true, seed::Int=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
+    rks = ones(Int, N+1); rks[2:N] .= rmax
     return ttrand_rounding(Atto, y, b, rks; orthogonal=orthogonal, seed=seed, block_rks=block_rks, timer=timer)
 end
 
+# Fixed-rank rounding of a linear combination = the adaptive sum overload with the basis pinned to
+# `rks` and adaptation disabled (see the single-TT wrapper for the rationale).
 function ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
-  @timeit timer "ttrand_rounding" begin
-    m = length(α)
-    dims = y[1].ttv_dims
-    @assert length(y) == m && all(y[j].ttv_dims == dims for j=2:m)
-
-    W = Vector{Vector{Array{T,2}}}(undef, m)
-    sketch_rks = Vector{Vector{Int64}}(undef, m)
-
-    @timeit timer "reverse_sketch" begin
-      for j=1:m
-        W[j], sketch_rks[j] = tt_recursive_sketch(T, y[j], rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-        @assert sketch_rks[j] == sketch_rks[1]
-      end
-      sketch_rks = sketch_rks[1]
-    end
-
-    vec = Vector{Array{T,3}}(undef, N)
-    out_rks = ones(Int, N+1)
-    ot = zeros(Int, N)
-
-    # Randomized sketching and orthogonalization. State tensors use (L, I, R) layout.
-    @timeit timer "orthogonalization" begin
-      Yₖ = [α[j].*reshape(y[j].ttv_vec[1], 1, dims[1], y[j].ttv_rks[2]) for j=1:m]
-      @inbounds for k in 1:N-1
-      @timeit timer "Randomized QR decomposition" begin
-        target_width = min(rks[k+1], sketch_rks[k+1], dims[k]*out_rks[k],
-                           bond_rank_cap(dims, k, sketch_rks[k+1]))
-        Zₖ = zeros(T, out_rks[k], dims[k], target_width)
-        Zₖ_flat = reshape(Zₖ, out_rks[k]*dims[k], target_width)
-        for j=1:m
-          Wj_sub = view(W[j][k+1], :, 1:target_width)
-          # Accumulating gemm: Zₖ_flat += Yₖ[j]_flat × Wj_sub.
-          mul!(Zₖ_flat, reshape(Yₖ[j], out_rks[k]*dims[k], :), Wj_sub, true, true)
-        end
-        Zₖ = Zₖ_flat
-        Q, _ = qr!(Zₖ)
-        Q = Matrix(Q)
-        out_rks[k+1] = size(Q,2)
-        vec[k] = reshape(Q, out_rks[k], dims[k], out_rks[k+1])
-        ot[k] = 1
-      end
-      @timeit timer "Update left contraction" begin
-        # Explicit (vec[k]·Yₖ[j]) → T1, then T1·ttv_vec[k+1] ordering — avoids the large
-        # (ρₖ,iₖ,iₖ₊₁,αₖ₊₂) intermediate the naive @tensoropt materialises (see the single-TT path).
-        Yₖ₊₁ = Vector{Array{T,3}}(undef, m)
-        Vk = reshape(vec[k], out_rks[k]*dims[k], out_rks[k+1])
-        for j=1:m
-          T1 = Vk' * reshape(Yₖ[j], out_rks[k]*dims[k], y[j].ttv_rks[k+1])
-          Yⱼ = T1 * reshape(y[j].ttv_vec[k+1], y[j].ttv_rks[k+1], dims[k+1]*y[j].ttv_rks[k+2])
-          Yₖ₊₁[j] = reshape(Yⱼ, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2])
-        end
-        Yₖ = Yₖ₊₁
-      end
-      end
-      out_rks[N+1] = 1
-      vec[N] = sum(Yₖ[j] for j=1:m)
-    end
-
-    return TTvector{T,N}(N,vec,dims,out_rks,ot)
-  end
+  rksv = collect(Int, rks)
+  return ttrand_rounding_adaptive(α, y, _FIXED_RANK_ε; ℓ_min=rksv, ℓ_max=rksv, ℓ_inc=1, n_samples=1,
+                                  block_rks=block_rks, orthogonal=orthogonal, seed=seed, timer=timer)
 end
 
 function ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rmax::Int; orthogonal::Bool=true, seed::Int=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
@@ -310,82 +164,12 @@ function ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rmax::Int; ort
     return ttrand_rounding(α, y, rks; orthogonal=orthogonal, seed=seed, block_rks=block_rks, timer=timer)
 end
 
+# Fixed-rank rounding of α[1]·A·y[1] + Σ_{j≥2} α[j]·y[j] = the adaptive mixed-operator overload with
+# the basis pinned to `rks` and adaptation disabled (see the single-TT wrapper for the rationale).
 function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
-  @timeit timer "ttrand_rounding" begin
-    m = length(α)
-    dims = y[1].ttv_dims
-    @assert length(y) == m && all(y[j].ttv_dims == dims for j=2:m)
-
-    W = Vector{Vector{Array{T,2}}}(undef, m)
-
-    @timeit timer "reverse_sketch" begin
-      W₁, sketch_rks = tt_recursive_sketch(T, A, y[1], rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-      W[1] = [reshape(W₁[k], y[1].ttv_rks[k]*A.tto_rks[k], sketch_rks[k]) for k=1:N+1]
-      for j=2:m
-        Wⱼ, sketchj_rks = tt_recursive_sketch(T, y[j], rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-        W[j] = Wⱼ
-        @assert sketchj_rks == sketch_rks
-      end
-    end
-
-    vec = Vector{Array{T,3}}(undef, N)
-    out_rks = ones(Int, N+1)
-    ot = zeros(Int, N)
-
-    # Randomized sketching and orthogonalization. State tensors use (L, I, R) layout.
-    @timeit timer "orthogonalization" begin
-      @timeit timer "left_sweep" begin
-        Yₖ = Vector{Array{T,3}}(undef, m)
-
-        # Ay₁ layout (L_y=1, L_A=1, I, R_y, R_A).
-        Ay₁ = zeros(T, 1, 1, dims[1], y[1].ttv_rks[2], A.tto_rks[2])
-        @tensoropt (α₂,β₂) Ay₁[α₁,β₁,i₁,α₂,β₂] = y[1].ttv_vec[1][α₁,j₁,α₂]*A.tto_vec[1][β₁,i₁,j₁,β₂]
-        Ay₁ .*= α[1]
-        Yₖ[1] = reshape(Ay₁, 1, dims[1], y[1].ttv_rks[2]*A.tto_rks[2])
-        for j=2:m
-          Yₖ[j] = α[j].*reshape(y[j].ttv_vec[1], 1, dims[1], y[j].ttv_rks[2])
-        end
-        @inbounds begin
-          for k in 1:N-1
-            target_width = min(rks[k+1], sketch_rks[k+1], dims[k]*out_rks[k],
-                               bond_rank_cap(dims, k, sketch_rks[k+1]))
-            Zₖ = zeros(T, out_rks[k], dims[k], target_width)
-            for j=1:m
-              Wj_sub = view(W[j][k+1], :, 1:target_width)
-              @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[αₖ,iₖ,βₖ₊₁] += Yₖ[j][αₖ,iₖ,αₖ₊₁]*Wj_sub[αₖ₊₁,βₖ₊₁]
-            end
-            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], target_width)
-            Q, _ = qr!(Zₖ)
-            Q = Matrix(Q)
-            out_rks[k+1] = size(Q,2)
-            vec[k] = reshape(Q, out_rks[k], dims[k], out_rks[k+1])
-            ot[k] = 1
-
-            #update left parts
-            Yₖ₊₁ = Vector{Array{T,3}}(undef, m)
-
-            # y₁ₖ unmerges (R_y, R_A) from Yₖ[1]'s last dim.
-            y₁ₖ = reshape(Yₖ[1], out_rks[k], dims[k], y[1].ttv_rks[k+1], A.tto_rks[k+1])
-            Ay₁ₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], y[1].ttv_rks[k+2], A.tto_rks[k+2])
-            @tensoropt (ρₖ,ρₖ₊₁,αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂) Ay₁ₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂,βₖ₊₂] = y₁ₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y[1].ttv_vec[k+1][αₖ₊₁,jₖ₊₁,αₖ₊₂]*A.tto_vec[k+1][βₖ₊₁,iₖ₊₁,jₖ₊₁,βₖ₊₂]
-            Yₖ₊₁[1] = reshape(Ay₁ₖ₊₁, out_rks[k+1], dims[k+1], y[1].ttv_rks[k+2]*A.tto_rks[k+2])
-            Vk = reshape(vec[k], out_rks[k]*dims[k], out_rks[k+1])
-            for j=2:m
-              # Explicit (vec[k]·Yₖ[j])→T1, then T1·ttv_vec[k+1] ordering (see the single-TT path).
-              T1 = Vk' * reshape(Yₖ[j], out_rks[k]*dims[k], y[j].ttv_rks[k+1])
-              Yⱼ = T1 * reshape(y[j].ttv_vec[k+1], y[j].ttv_rks[k+1], dims[k+1]*y[j].ttv_rks[k+2])
-              Yₖ₊₁[j] = reshape(Yⱼ, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2])
-            end
-            Yₖ = Yₖ₊₁
-          end
-          out_rks[N+1] = 1
-          vec[N] = sum(Yₖ[j] for j=1:m)
-        end
-      end
-    end
-
-    return TTvector{T,N}(N,vec,dims,out_rks,ot)
-  end
+  rksv = collect(Int, rks)
+  return ttrand_rounding_adaptive(α, A, y, _FIXED_RANK_ε; ℓ_min=rksv, ℓ_max=rksv, ℓ_inc=1, n_samples=1,
+                                  block_rks=block_rks, orthogonal=orthogonal, seed=seed, timer=timer)
 end
 
 function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, rmax::Int; orthogonal::Bool=true, seed::Int=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N}
@@ -396,136 +180,12 @@ function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T
 end
 
 
+# Fixed-rank rounding of the Hadamard product y[1]⊙…⊙y[M] = the adaptive Hadamard overload with the
+# basis pinned to `rks` and adaptation disabled (see the single-TT wrapper for the rationale).
 function ttrand_rounding(y::NTuple{M,TTvector{T,N}}, rks=default_rank_heuristic(y); orthogonal=true, seed=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,N,M}
-  if M==1
-    return ttrand_rounding(y[1], rks; orthogonal=orthogonal, seed=seed, block_rks=block_rks, timer=timer)
-  end
-
-  @timeit timer "ttrand_rounding" begin
-    dims = y[1].ttv_dims
-    vec = Vector{Array{T,3}}(undef, N)
-    @timeit timer "reverse_sketch" begin
-      W, sketch_rks = tt_recursive_sketch(T, y, rks; orthogonal=orthogonal, reverse=true, seed=seed, block_rks=block_rks, timer=timer)
-    end
-    out_rks = ones(Int, N+1)
-    ot = zeros(Int, N)
-
-    # Randomized sketching and orthogonalization. State tensors carry (L, I, R) layout.
-    @timeit timer "orthogonalization sweep" begin
-      yₖ = broadcast(*, (reshape(y[i].ttv_vec[1],
-                              1, dims[1], ntuple(j->( j==i ? y[i].ttv_rks[2] : 1), M)...)
-                        for i=1:M)...
-                    )
-      yₖ = reshape(yₖ, 1, dims[1], prod(y[i].ttv_rks[2] for i=1:M))
-      @inbounds for k in 1:N-1
-        @timeit timer "Randomized QR decomposition" begin
-          target_width = min(rks[k+1], sketch_rks[k+1], dims[k]*out_rks[k],
-                             bond_rank_cap(dims, k, sketch_rks[k+1]))
-          Zₖ = zeros(T, out_rks[k], dims[k], target_width)
-          W_reshaped = reshape(W[k+1], prod(y[i].ttv_rks[k+1] for i=1:M), sketch_rks[k+1])
-          W_sub = view(W_reshaped, :, 1:target_width)
-          @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁)  Zₖ[ρₖ,iₖ,ρₖ₊₁] = yₖ[ρₖ,iₖ,αₖ₊₁]*W_sub[αₖ₊₁,ρₖ₊₁]
-          Zₖ = reshape(Zₖ, out_rks[k]*dims[k], target_width)
-          Q, _ = qr!(Zₖ)
-          Q = Matrix(Q)
-
-          out_rks[k+1] = size(Q,2)
-          vec[k] = reshape(Q, out_rks[k], dims[k], out_rks[k+1])
-          ot[k] = 1
-        end
-        @timeit timer "Update Qy" begin
-          #update left parts
-          v = ntuple(i->y[i].ttv_rks[k+1], M)
-          w = ntuple(i->y[i].ttv_rks[k+2], M)
-          A = ntuple(i->y[i].ttv_vec[k+1], M)
-          # Qy[αₖ₊₁, ρₖ₊₁] = sum_{ρₖ, iₖ} yₖ[ρₖ, iₖ, αₖ₊₁] * vec[k][ρₖ, iₖ, ρₖ₊₁].
-          # Flatten (ρₖ, iₖ): transpose(yₖ_flat) × vec_flat. One gemm.
-          Qy = transpose(reshape(yₖ, out_rks[k]*dims[k], :)) *
-               reshape(vec[k], out_rks[k]*dims[k], :)
-
-          # Per-site Hadamard contraction tmp_i[L, …, R] = transpose(Ai) × Qy_i × Bi.
-          # Each `@tensor tmp_i[..., L, …, R] = Ai[l,L] * Qy[l, …, r] * Bi[r,R]` is
-          # exactly two gemms: an Ai-contract over l, then a Bi-contract over r.
-          if M==2
-            Qy = reshape(Qy, v[1], v[2], out_rks[k+1])
-            Qy = permutedims(Qy, (1,3,2))
-            tmp = zeros(T, w[1], out_rks[k+1], w[2], dims[k+1])
-            for i=1:dims[k+1]
-              tmp_i = view(tmp,:,:,:,i)
-              Ai = A[1][:,i,:]
-              Bi = A[2][:,i,:]
-              # Step 1: tmp1[L, ρ*r] = transpose(Ai) × reshape(Qy, l, ρ*r).
-              tmp1 = transpose(Ai) * reshape(Qy, v[1], out_rks[k+1]*v[2])
-              # Step 2: tmp_i[L*ρ, R] = reshape(tmp1, L*ρ, r) × Bi.
-              mul!(reshape(tmp_i, w[1]*out_rks[k+1], w[2]),
-                   reshape(tmp1, w[1]*out_rks[k+1], v[2]),
-                   Bi)
-            end
-            Qy = permutedims(tmp, (1,3,2,4))
-          else
-            # First pair, M>2 — same algebra, with αρ = prod(v[3:end])*out_rks[k+1] folded
-            # as an extra "passthrough" dimension between L and R.
-            αρ1 = prod(v[3:end])*out_rks[k+1]
-            Qy = reshape(Qy, v[1], v[2], αρ1)
-            Qy = permutedims(Qy, (1,3,2))
-            tmp = zeros(T, w[1], αρ1, w[2], dims[k+1])
-            for i=1:dims[k+1]
-              tmp_i = view(tmp,:,:,:,i)
-              Ai = A[1][:,i,:]
-              Bi = A[2][:,i,:]
-              tmp1 = transpose(Ai) * reshape(Qy, v[1], αρ1*v[2])
-              mul!(reshape(tmp_i, w[1]*αρ1, w[2]),
-                   reshape(tmp1, w[1]*αρ1, v[2]),
-                   Bi)
-            end
-            Qy = permutedims(tmp, (1,3,2,4))
-
-            # Next pairs
-            for m=3:2:M-1
-              αρm = prod(v[m+2:end])*out_rks[k+1]
-              Qy = reshape(Qy, prod(w[1:m-1]), v[m], v[m+1], αρm, dims[k+1])
-              Qy = permutedims(Qy, (2,1,4,3,5))
-              tmp = zeros(T, w[m], prod(w[1:m-1]), αρm, w[m+1], dims[k+1])
-              for i=1:dims[k+1]
-                tmp_i = view(tmp,:,:,:,:,i)
-                Qy_i = view(Qy,:,:,:,:,i)
-                Ai = A[m][:,i,:]
-                Bi = A[m+1][:,i,:]
-                # Index legend: l=v[m], a=prod(w[1:m-1]), αρ=αρm, r=v[m+1], L=w[m], R=w[m+1].
-                # tmp_i[L, a, αρ, R] = sum_{l,r} Ai[l,L] × Qy_i[l, a, αρ, r] × Bi[r,R].
-                tmp1 = transpose(Ai) * reshape(Qy_i, v[m], prod(w[1:m-1])*αρm*v[m+1])
-                mul!(reshape(tmp_i, w[m]*prod(w[1:m-1])*αρm, w[m+1]),
-                     reshape(tmp1, w[m]*prod(w[1:m-1])*αρm, v[m+1]),
-                     Bi)
-              end
-              Qy = permutedims(tmp, (2,1,4,3,5))
-            end
-
-            if isodd(M) # Last core: single Ai contraction (no Bi).
-              Qy = reshape(Qy, prod(w[1:M-1]), v[M], out_rks[k+1], dims[k+1])
-              Qy = permutedims(Qy, (2,1,3,4))
-              tmp = zeros(T, w[M], prod(w[1:M-1]), out_rks[k+1], dims[k+1])
-              for i=1:dims[k+1]
-                tmp_i = view(tmp,:,:,:,i)
-                Qy_i = view(Qy,:,:,:,i)
-                Ai = A[M][:,i,:]
-                # tmp_i[L, a, ρ] = sum_l Ai[l,L] × Qy_i[l, a, ρ]. One gemm.
-                mul!(reshape(tmp_i, w[M], prod(w[1:M-1])*out_rks[k+1]),
-                     transpose(Ai),
-                     reshape(Qy_i, v[M], prod(w[1:M-1])*out_rks[k+1]))
-              end
-              Qy = permutedims(tmp, (2,1,3,4))
-            end
-          end
-          Qy = reshape(Qy, w..., out_rks[k+1], dims[k+1])
-          # Layout (L, I, R) for yₖ: bring out_rks first, dims second, then w-product last.
-          yₖ = reshape(permutedims(Qy, [M+1;M+2;1:M]), out_rks[k+1], dims[k+1], prod(w))
-        end
-      end
-      vec[N] = reshape(yₖ, out_rks[N], dims[N], out_rks[N+1])
-    end
-    return TTvector{T,N}(N,vec,dims,out_rks,ot)
-  end
+  rksv = collect(Int, rks)
+  return ttrand_rounding_adaptive(y, _FIXED_RANK_ε; ℓ_min=rksv, ℓ_max=rksv, ℓ_inc=1, n_samples=1,
+                                  block_rks=block_rks, block_rks_inc=block_rks, orthogonal=orthogonal, seed=seed, timer=timer)
 end
 
 function ttrand_rounding(y::NTuple{M,TTvector{T,N}}, rmax::Int; orthogonal::Bool=true, seed::Int=1234, block_rks::Int=N, timer::TimerOutput = TimerOutput()) where {T,M,N}

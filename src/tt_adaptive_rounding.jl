@@ -3,6 +3,14 @@ using LinearAlgebra
 using Random
 using TimerOutputs
 
+# Per-bond budget knobs (`ℓ_min`, `ℓ_max`) accept either a scalar (uniform across bonds) or a
+# length-(N+1) vector (per-bond targets, used by the fixed-rank `ttrand_rounding` wrappers). These
+# helpers normalize them: `_bond_vec` to a length-(N+1) vector (scalar ⇒ fill, so the scalar path is
+# unchanged), `_scalar_max` to a scalar for the (variance-driven) `n_samples` default.
+_bond_vec(x::AbstractVector{<:Integer}, N::Int) = x
+_bond_vec(x::Integer, N::Int) = fill(Int(x), N+1)
+_scalar_max(x::AbstractVector{<:Integer}) = maximum(x)
+_scalar_max(x::Integer) = x
 
 # Append new orthonormal directions to Q from the residual sketch Sₖ and return
 # how many were added. Two plain-QR orthogonalization sweeps:
@@ -125,11 +133,11 @@ Al Daas, Ballard, Grigori, Martínez Aguilar, Saibaba & Verma (2025),
 (arXiv:2511.03598), Algorithms 2 and 6.
 """
 function ttrand_rounding_adaptive(y::TTvector{T,N}, ε::Real;
-                                   ℓ_min::Int=4,
+                                   ℓ_min::Union{Int,AbstractVector{Int}}=4,
                                    ℓ_inc::Int=4,
-                                   ℓ_max::Int=maximum(y.ttv_rks),
+                                   ℓ_max::Union{Int,AbstractVector{Int}}=maximum(y.ttv_rks),
                                    init_f::Real=0.0,
-                                   n_samples::Int=max(N÷2, ℓ_inc, ceil(Int, 0.1 * ℓ_max)),
+                                   n_samples::Int=max(N÷2, ℓ_inc, ceil(Int, 0.1 * _scalar_max(ℓ_max))),
                                    orthogonal::Bool=true,
                                    block_rks::Int=N,
                                    block_rks_inc::Int=max(1, N÷4),
@@ -138,6 +146,9 @@ function ttrand_rounding_adaptive(y::TTvector{T,N}, ε::Real;
                                    weighting::Symbol=:column,
                                    timer::TimerOutput=TimerOutput()) where {T,N}
   @assert n_samples >= ℓ_inc "n_samples ($n_samples) must be ≥ ℓ_inc ($ℓ_inc)"
+  # ℓ_min / ℓ_max may be scalars (uniform) or per-bond length-(N+1) vectors (e.g. a fixed-rank target);
+  # normalize to vectors so the loop indexes [k+1] uniformly. Scalars ⇒ fill ⇒ behavior unchanged.
+  ℓ_min_vec = _bond_vec(ℓ_min, N); ℓ_max_vec = _bond_vec(ℓ_max, N)
   # MATLAB-style per-bond initial sketch width: Init_b_k = ceil(init_f · min(out_rks[k]·dims[k], y.ttv_rks[k+1])).
   # When init_f > 0, this overrides ℓ_min on a per-bond basis (still respecting ℓ_min as a floor),
   # so the algorithm starts the adaptive loop with a small basis at narrow bonds and converges to
@@ -152,9 +163,9 @@ function ttrand_rounding_adaptive(y::TTvector{T,N}, ε::Real;
     # rank y.ttv_rks[k] as a proxy (matches the deterministic rounding cap).
     function initb_k(k::Int)
         max_cols_k = min(y.ttv_rks[k] * dims[k], y.ttv_rks[k+1])
-        init_f > 0 ? max(ℓ_min, ceil(Int, init_f * max_cols_k)) : ℓ_min
+        init_f > 0 ? max(ℓ_min_vec[k+1], ceil(Int, init_f * max_cols_k)) : ℓ_min_vec[k+1]
     end
-    ℓ_min_global = init_f > 0 ? maximum(initb_k(k) for k in 1:N-1) : ℓ_min
+    ℓ_min_global = init_f > 0 ? maximum(initb_k(k) for k in 1:N-1) : maximum(ℓ_min_vec)
     # Two-group reusable cache: a frozen initial group (block_rks) sized to ℓ_min_global+n_samples,
     # plus a growable extension group (block_rks_inc). When the caller passes `cache`, it is reused
     # and extended in place across calls; otherwise a throwaway is built. Groups are combined by
@@ -180,9 +191,9 @@ function ttrand_rounding_adaptive(y::TTvector{T,N}, ε::Real;
     @timeit timer "orthogonalization" begin
       yₖ = reshape(y.ttv_vec[1], 1, dims[1], y.ttv_rks[2])
       @inbounds for k in 1:N-1
-        max_basis = bond_rank_cap(dims, k, ℓ_max)
+        max_basis = bond_rank_cap(dims, k, ℓ_max_vec[k+1])
         # Per-bond initial sketch width (MATLAB-style); ℓ_min remains as floor.
-        ℓ_min_k = init_f > 0 ? max(ℓ_min, ceil(Int, init_f * min(out_rks[k]*dims[k], y.ttv_rks[k+1]))) : ℓ_min
+        ℓ_min_k = init_f > 0 ? max(ℓ_min_vec[k+1], ceil(Int, init_f * min(out_rks[k]*dims[k], y.ttv_rks[k+1]))) : ℓ_min_vec[k+1]
         # Materialize the active bond's right-neighbour from the cache (it may have grown earlier).
         @timeit timer "reverse_sketch" remat_into!(W, k+1, cache, y.ttv_rks[k+1]; weighting=weighting)
         sketch_rks[k+1] = _scols(k+1)
@@ -335,10 +346,10 @@ boundary sketch then directly estimates `‖∑ α[j]·y[j]‖` via `‖∑ α[j
 adaptive extension also reuses the current `seed` across all `j` before incrementing it.
 """
 function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::Real;
-                                   ℓ_min::Int=4,
+                                   ℓ_min::Union{Int,AbstractVector{Int}}=4,
                                    ℓ_inc::Int=4,
                                    n_samples::Int=max(N÷2, ℓ_inc),
-                                   ℓ_max::Int=sum(maximum(yⱼ.ttv_rks) for yⱼ in y),
+                                   ℓ_max::Union{Int,AbstractVector{Int}}=sum(maximum(yⱼ.ttv_rks) for yⱼ in y),
                                    orthogonal::Bool=true,
                                    block_rks::Int=N,
                                    seed::Int=1234,
@@ -350,6 +361,8 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
     @assert length(y) == m
     dims = y[1].ttv_dims
     @assert all(y[j].ttv_dims == dims for j=2:m)
+    # Per-bond ℓ_min/ℓ_max (scalar ⇒ uniform, unchanged); the fixed-rank wrapper passes vectors.
+    ℓ_min_vec = _bond_vec(ℓ_min, N); ℓ_max_vec = _bond_vec(ℓ_max, N); ℓ_min_max = maximum(ℓ_min_vec)
 
     vec = Vector{Array{T,3}}(undef, N)
     # Per-term reusable sketch caches (uniform block_rks ⇒ one group each). `caches` may be nothing
@@ -358,7 +371,7 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
     # every call, e.g. an operator summand — build a throwaway). The criterion below is
     # total-independent (the sketch_rks factor cancels the 1/√count column normalization), so the
     # grow pattern is free.
-    _fresh(j) = cached_sketch(T, y[j], block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
+    _fresh(j) = cached_sketch(T, y[j], block_rks, block_rks, ℓ_min_max+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
     caches = caches === nothing ? [_fresh(j) for j=1:m] :
                                   [caches[j] === nothing ? _fresh(j) : caches[j] for j=1:m]
     # All terms are combined at a COMMON per-bond sample count `p_target` (a prefix of each cache),
@@ -366,7 +379,7 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
     # stay consistent — otherwise their 1/√count normalizations would not match. p_target starts at
     # the initial heuristic, which every cache has at least, and grows with the adaptive loop.
     brv = caches[1].groups[1].brv
-    p_target = _heuristic_p(ℓ_min+n_samples, brv, N)
+    p_target = _heuristic_p(ℓ_min_max+n_samples, brv, N)
     sketch_rks = brv .* p_target
     # Working sketch: only the active bond's right-neighbour W[j][k+1] is materialized at a time
     # (re-derived from the cache at each bond and after each growth, as the common prefix). W[j][1]
@@ -388,7 +401,8 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
     @timeit timer "orthogonalization" begin
       Yₖ = [α[j].*reshape(y[j].ttv_vec[1], 1, dims[1], y[j].ttv_rks[2]) for j=1:m]
       @inbounds for k in 1:N-1
-        max_basis = bond_rank_cap(dims, k, ℓ_max)
+        ℓ_min_k = ℓ_min_vec[k+1]
+        max_basis = bond_rank_cap(dims, k, ℓ_max_vec[k+1])
         # Materialize the active bond's right-neighbour from the cache at the common prefix
         # p_target[k+1] (it may have grown while earlier bonds were processed). This is the only
         # W[j] bond read at bond k; into a reused capacity buffer (consumers index within sketch_rks).
@@ -398,12 +412,12 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
         sketch_rks[k+1] = brv[k+1]*p_target[k+1]
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
-            Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
+            Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min_k)
             for j = 1:m
-              Wⱼₖ₊₁ = W[j][k+1][:, 1:ℓ_min]
+              Wⱼₖ₊₁ = W[j][k+1][:, 1:ℓ_min_k]
               @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[ρₖ,iₖ,ρₖ₊₁] += Yₖ[j][ρₖ,iₖ,αₖ₊₁]*Wⱼₖ₊₁[αₖ₊₁,ρₖ₊₁]
             end
-            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min)
+            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min_k)
           end
           @timeit timer "QR" begin
             Q_factor, _ = qr!(Zₖ)
@@ -419,7 +433,7 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
             Q_storage = Matrix{T}(undef, out_rks[k]*dims[k], buf_cols)
             @views Q_storage[:, 1:current_cols] .= Q_init
             Q = view(Q_storage, :, 1:current_cols)
-            ℓ = ℓ_min
+            ℓ = ℓ_min_k
           end
 
           # S_full holds only the active window: cols ℓ+1..ℓ+n_samples of Σⱼ Yₖ[j]·W[j][k+1].
@@ -427,7 +441,7 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
             S_full = zeros(T, out_rks[k]*dims[k], n_samples)
             let S_full_3d = reshape(S_full, out_rks[k], dims[k], n_samples)
               for j = 1:m
-                Wⱼ_view = view(W[j][k+1], :, ℓ_min+1:ℓ_min+n_samples)
+                Wⱼ_view = view(W[j][k+1], :, ℓ_min_k+1:ℓ_min_k+n_samples)
                 @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[ρₖ,iₖ,ρₖ₊₁] += Yₖ[j][ρₖ,iₖ,αₖ₊₁]*Wⱼ_view[αₖ₊₁,ρₖ₊₁]
               end
             end
@@ -546,10 +560,10 @@ calls: `caches[1]` an `OperatorCachedSketch` for `A·y[1]`, `caches[j≥2]` a `C
 a `nothing` entry (or `caches=nothing`) builds a throwaway for that term. All must share `seed`/`block_rks`.
 """
 function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T,N}}, ε::Real;
-                                   ℓ_min::Int=4,
+                                   ℓ_min::Union{Int,AbstractVector{Int}}=4,
                                    ℓ_inc::Int=4,
                                    n_samples::Int=max(N÷2, ℓ_inc),
-                                   ℓ_max::Int=maximum(A.tto_rks .* y[1].ttv_rks) + sum((maximum(y[j].ttv_rks) for j=2:length(y)); init=0),
+                                   ℓ_max::Union{Int,AbstractVector{Int}}=maximum(A.tto_rks .* y[1].ttv_rks) + sum((maximum(y[j].ttv_rks) for j=2:length(y)); init=0),
                                    orthogonal::Bool=true,
                                    block_rks::Int=N,
                                    seed::Int=1234,
@@ -562,13 +576,14 @@ function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{T
     @assert length(y) == m
     dims = y[1].ttv_dims
     @assert all(y[j].ttv_dims == dims for j=2:m)
+    ℓ_min_vec = _bond_vec(ℓ_min, N); ℓ_max_vec = _bond_vec(ℓ_max, N); ℓ_min_max = maximum(ℓ_min_vec)
 
     vec = Vector{Array{T,3}}(undef, N)
     # Term 1 → operator cache of A·y[1] (3-D columns); terms j≥2 → vector caches (2-D columns).
     # Uniform block_rks (single group each), shared seed → blocks coincide so the combination is
     # linear in α and per-bond column counts stay aligned. Caller caches reused, else throwaways.
-    _fresh_op()    = cached_operator_sketch(T, A, y[1], block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
-    _fresh_vec(j)  = cached_sketch(T, y[j], block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
+    _fresh_op()    = cached_operator_sketch(T, A, y[1], block_rks, block_rks, ℓ_min_max+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
+    _fresh_vec(j)  = cached_sketch(T, y[j], block_rks, block_rks, ℓ_min_max+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
     op_cache = (caches === nothing || caches[1] === nothing) ? _fresh_op() : caches[1]
     vcaches  = Vector{Any}(undef, m)
     for j = 2:m
@@ -616,7 +631,8 @@ function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{T
       end
 
       @inbounds for k in 1:N-1
-        max_basis = bond_rank_cap(dims, k, ℓ_max)
+        ℓ_min_k = ℓ_min_vec[k+1]
+        max_basis = bond_rank_cap(dims, k, ℓ_max_vec[k+1])
         # Materialize the active bond's right-neighbour per term from the caches (may have grown).
         @timeit timer "reverse_sketch" begin
           remat_into_operator!(WAy, k+1, op_cache, y[1].ttv_rks[k+1], A.tto_rks[k+1]; weighting=weighting)
@@ -627,14 +643,14 @@ function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{T
         end
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
-            Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
-            WAyₖ₊₁ = WAy[k+1][:, :, 1:ℓ_min]
+            Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min_k)
+            WAyₖ₊₁ = WAy[k+1][:, :, 1:ℓ_min_k]
             @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[ρₖ,iₖ,ρₖ₊₁] += Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*WAyₖ₊₁[αₖ₊₁,βₖ₊₁,ρₖ₊₁]
             for j = 2:m
-              Wⱼₖ₊₁ = W[j][k+1][:, 1:ℓ_min]
+              Wⱼₖ₊₁ = W[j][k+1][:, 1:ℓ_min_k]
               @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[ρₖ,iₖ,ρₖ₊₁] += Yₖ[j][ρₖ,iₖ,αₖ₊₁]*Wⱼₖ₊₁[αₖ₊₁,ρₖ₊₁]
             end
-            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min)
+            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min_k)
           end
           @timeit timer "QR" begin
             Q_factor, _ = qr!(Zₖ)
@@ -644,16 +660,16 @@ function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{T
             Q_storage = Matrix{T}(undef, out_rks[k]*dims[k], buf_cols)
             @views Q_storage[:, 1:current_cols] .= Q_init
             Q = view(Q_storage, :, 1:current_cols)
-            ℓ = ℓ_min
+            ℓ = ℓ_min_k
           end
 
           @timeit timer "Initial residual sketch" begin
             S_full = zeros(T, out_rks[k]*dims[k], n_samples)
             let S_full_3d = reshape(S_full, out_rks[k], dims[k], n_samples)
-              WAy_view = view(WAy[k+1], :, :, ℓ_min+1:ℓ_min+n_samples)
+              WAy_view = view(WAy[k+1], :, :, ℓ_min_k+1:ℓ_min_k+n_samples)
               @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[ρₖ,iₖ,ρₖ₊₁] += Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*WAy_view[αₖ₊₁,βₖ₊₁,ρₖ₊₁]
               for j = 2:m
-                Wⱼ_view = view(W[j][k+1], :, ℓ_min+1:ℓ_min+n_samples)
+                Wⱼ_view = view(W[j][k+1], :, ℓ_min_k+1:ℓ_min_k+n_samples)
                 @tensoropt (αₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[ρₖ,iₖ,ρₖ₊₁] += Yₖ[j][ρₖ,iₖ,αₖ₊₁]*Wⱼ_view[αₖ₊₁,ρₖ₊₁]
               end
             end
@@ -763,10 +779,10 @@ Both sketches share the seed so `WAy[1] - Wb[1]` is itself the boundary sketch o
 target `Atto·y - b`, giving an unbiased norm estimate `‖WAy[1] - Wb[1]‖ ≈ ‖Atto·y - b‖`.
 """
 function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TTvector{T,N}, ε::Real;
-                                   ℓ_min::Int=4,
+                                   ℓ_min::Union{Int,AbstractVector{Int}}=4,
                                    ℓ_inc::Int=4,
                                    n_samples::Int=max(N÷2, ℓ_inc),
-                                   ℓ_max::Int=maximum(Atto.tto_rks .* y.ttv_rks) + maximum(b.ttv_rks),
+                                   ℓ_max::Union{Int,AbstractVector{Int}}=maximum(Atto.tto_rks .* y.ttv_rks) + maximum(b.ttv_rks),
                                    orthogonal::Bool=true,
                                    block_rks::Int=N,
                                    seed::Int=1234,
@@ -776,6 +792,7 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
   @assert n_samples >= ℓ_inc "n_samples ($n_samples) must be ≥ ℓ_inc ($ℓ_inc)"
   @timeit timer "ttrand_rounding_adaptive" begin
     dims = y.ttv_dims
+    ℓ_min_vec = _bond_vec(ℓ_min, N); ℓ_max_vec = _bond_vec(ℓ_max, N); ℓ_min_max = maximum(ℓ_min_vec)
     vec = Vector{Array{T,3}}(undef, N)
 
     # Two reusable caches sharing seed/block_rks so their blocks coincide and S(A·y) − S(b) is the
@@ -784,8 +801,8 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
     # caller caches, else throwaways are built. Columns stay aligned because both grow to the same
     # per-bond counts (identical brv).
     if caches === nothing
-      op_cache = cached_operator_sketch(T, Atto, y, block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
-      b_cache  = cached_sketch(T, b, block_rks, block_rks, ℓ_min+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
+      op_cache = cached_operator_sketch(T, Atto, y, block_rks, block_rks, ℓ_min_max+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
+      b_cache  = cached_sketch(T, b, block_rks, block_rks, ℓ_min_max+n_samples; seed=seed, orthogonal=orthogonal, timer=timer)
     else
       op_cache, b_cache = caches
     end
@@ -817,7 +834,8 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
       bₖ = reshape(b.ttv_vec[1], 1, dims[1], b.ttv_rks[2])
 
       @inbounds for k in 1:N-1
-        max_basis = bond_rank_cap(dims, k, ℓ_max)
+        ℓ_min_k = ℓ_min_vec[k+1]
+        max_basis = bond_rank_cap(dims, k, ℓ_max_vec[k+1])
         # Materialize the active bond's right-neighbour from the caches (they may have grown earlier).
         @timeit timer "reverse_sketch" begin
           remat_into_operator!(WAy, k+1, op_cache, y.ttv_rks[k+1], Atto.tto_rks[k+1]; weighting=weighting)
@@ -826,11 +844,11 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
         end
         @timeit timer "Randomized adaptive QR decomposition" begin
           @timeit timer "Sketch" begin
-            Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min)
-            WAyₖ₊₁ = WAy[k+1][:, :, 1:ℓ_min]
-            Wbₖ₊₁  = Wb[k+1][:, 1:ℓ_min]
+            Zₖ = zeros(T, out_rks[k], dims[k], ℓ_min_k)
+            WAyₖ₊₁ = WAy[k+1][:, :, 1:ℓ_min_k]
+            Wbₖ₊₁  = Wb[k+1][:, 1:ℓ_min_k]
             @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) Zₖ[ρₖ,iₖ,ρₖ₊₁] = Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*WAyₖ₊₁[αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[ρₖ,iₖ,αₖ₊₁]*Wbₖ₊₁[αₖ₊₁,ρₖ₊₁]
-            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min)
+            Zₖ = reshape(Zₖ, out_rks[k]*dims[k], ℓ_min_k)
           end
           @timeit timer "QR" begin
             Q_factor, _ = qr!(Zₖ)
@@ -846,15 +864,15 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
             Q_storage = Matrix{T}(undef, out_rks[k]*dims[k], buf_cols)
             @views Q_storage[:, 1:current_cols] .= Q_init
             Q = view(Q_storage, :, 1:current_cols)
-            ℓ = ℓ_min
+            ℓ = ℓ_min_k
           end
 
           # S_full holds only the active window: cols ℓ+1..ℓ+n_samples.
           @timeit timer "Initial residual sketch" begin
             S_full = zeros(T, out_rks[k]*dims[k], n_samples)
             let S_full_3d = reshape(S_full, out_rks[k], dims[k], n_samples),
-                WAy_view = view(WAy[k+1], :, :, ℓ_min+1:ℓ_min+n_samples),
-                Wb_view  = view(Wb[k+1],  :,    ℓ_min+1:ℓ_min+n_samples)
+                WAy_view = view(WAy[k+1], :, :, ℓ_min_k+1:ℓ_min_k+n_samples),
+                Wb_view  = view(Wb[k+1],  :,    ℓ_min_k+1:ℓ_min_k+n_samples)
               @tensoropt (αₖ₊₁,βₖ₊₁,ρₖ,ρₖ₊₁) S_full_3d[ρₖ,iₖ,ρₖ₊₁] = Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*WAy_view[αₖ₊₁,βₖ₊₁,ρₖ₊₁] - bₖ[ρₖ,iₖ,αₖ₊₁]*Wb_view[αₖ₊₁,ρₖ₊₁]
             end
           end
@@ -987,11 +1005,11 @@ through `N` sites has heavy-tailed variance even at large `block_rks`
 (see `dev_tests/y_norm_vs_err_distribution.jl`).
 """
 function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
-                                   ℓ_min::Int=4,
+                                   ℓ_min::Union{Int,AbstractVector{Int}}=4,
                                    ℓ_inc::Int=4,
-                                   ℓ_max::Int=prod(maximum(y[i].ttv_rks) for i=1:M),
+                                   ℓ_max::Union{Int,AbstractVector{Int}}=prod(maximum(y[i].ttv_rks) for i=1:M),
                                    init_f::Real=0.0,
-                                   n_samples::Int=max(N÷2, ℓ_inc, ceil(Int, 0.1 * ℓ_max)),
+                                   n_samples::Int=max(N÷2, ℓ_inc, ceil(Int, 0.1 * _scalar_max(ℓ_max))),
                                    orthogonal::Bool=true,
                                    block_rks::Int=N,
                                    block_rks_inc::Int=max(1, N÷4),
@@ -1007,6 +1025,7 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
   @timeit timer "ttrand_rounding_adaptive" begin
     dims = y[1].ttv_dims
     vec  = Vector{Array{T,3}}(undef, N)
+    ℓ_min_vec = _bond_vec(ℓ_min, N); ℓ_max_vec = _bond_vec(ℓ_max, N)
 
     # Per-bond Init_b_k = max(ℓ_min, ceil(init_f · max_cols_k)), where
     # max_cols_k bounds the bond's rank capacity. For the Hadamard product
@@ -1015,9 +1034,9 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
     rks_prod = ntuple(k -> prod(y[i].ttv_rks[k] for i=1:M), N+1)
     function initb_k(k::Int)
         max_cols_k = min(rks_prod[k] * dims[k], rks_prod[k+1])
-        init_f > 0 ? max(ℓ_min, ceil(Int, init_f * max_cols_k)) : ℓ_min
+        init_f > 0 ? max(ℓ_min_vec[k+1], ceil(Int, init_f * max_cols_k)) : ℓ_min_vec[k+1]
     end
-    ℓ_min_global = init_f > 0 ? maximum(initb_k(k) for k in 1:N-1) : ℓ_min
+    ℓ_min_global = init_f > 0 ? maximum(initb_k(k) for k in 1:N-1) : maximum(ℓ_min_vec)
 
     # Two-group reusable Kronecker cache (frozen init group block_rks + growable ext group
     # block_rks_inc); throwaway when `cache===nothing`. Groups combine by `weighting` (:column matches
@@ -1048,9 +1067,9 @@ function ttrand_rounding_adaptive(y::NTuple{M,TTvector{T,N}}, ε::Real;
       yₖ = reshape(yₖ, 1, dims[1], prod(y[i].ttv_rks[2] for i=1:M))
 
       @inbounds for k in 1:N-1
-        max_basis = bond_rank_cap(dims, k, ℓ_max)
+        max_basis = bond_rank_cap(dims, k, ℓ_max_vec[k+1])
         # Per-bond Init_b_k for the Hadamard case (MATLAB-style).
-        ℓ_min_k = init_f > 0 ? max(ℓ_min, ceil(Int, init_f * min(out_rks[k]*dims[k], rks_prod[k+1]))) : ℓ_min
+        ℓ_min_k = init_f > 0 ? max(ℓ_min_vec[k+1], ceil(Int, init_f * min(out_rks[k]*dims[k], rks_prod[k+1]))) : ℓ_min_vec[k+1]
         # Materialize the active bond's right-neighbour from the cache (it may have grown earlier).
         @timeit timer "reverse_sketch" remat_into!(W, k+1, cache, rks_prod[k+1]; weighting=weighting)
         sketch_rks[k+1] = _scols(k+1)
