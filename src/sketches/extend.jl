@@ -144,20 +144,25 @@ Combine the groups' raw partials at bond `l` into the normalized sketch columns
 (a prefix), so several caches grown to different sizes can be combined at a common size.
 """
 function finalize_cols(groups::AbstractVector{<:SketchGroup{T}}, l::Int, rks_l::Int;
-                       weighting::Symbol=:equal, nsamp=nothing) where {T}
+                       weighting::Symbol=:equal, nsamp=nothing, out=nothing) where {T}
   cnt = nsamp === nothing ? [g.counts[l] for g in groups] : nsamp
   @assert all(cnt[gi] <= groups[gi].counts[l] for gi in eachindex(groups)) "finalize_cols: nsamp exceeds available samples"
   ws = _group_weights(groups, l, cnt, weighting)
-  blocks = Matrix{T}[]
+  total = sum(cnt[gi]*groups[gi].brv[l] for gi in eachindex(groups))
+  # Write into the caller's buffer when given (no allocation), else a fresh matrix.
+  dest = out === nothing ? Matrix{T}(undef, rks_l, total) : out
+  coff = 0
   for (gi, g) in enumerate(groups)
     cnt[gi] == 0 && continue
+    bc = g.brv[l]*cnt[gi]
     # View the leading cnt[gi] slabs (g.W[l] may carry more samples and/or spare capacity).
-    M = reshape(view(g.W[l], :, :, 1:cnt[gi]), rks_l, g.brv[l]*cnt[gi])
+    M = reshape(view(g.W[l], :, :, 1:cnt[gi]), rks_l, bc)
     # Divide (not multiply-by-reciprocal) so the single-group :equal case is bit-identical to
-    # tt_recursive_sketch's `W ./= sqrt(count)`.
-    push!(blocks, M ./ sqrt(cnt[gi] / ws[gi]))
+    # tt_recursive_sketch's `W ./= sqrt(count)`; fused broadcast write, no temporary.
+    @views dest[:, coff+1:coff+bc] .= M ./ sqrt(cnt[gi] / ws[gi])
+    coff += bc
   end
-  return reduce(hcat, blocks)
+  return dest
 end
 
 # ── Per-vector cache: one block-rks group (uniform) or two (mixed block_rks/block_rks_inc) ──────
@@ -226,5 +231,24 @@ Normalized sketch columns at bond `l` (combines all groups via `finalize_cols`).
 optionally caps each group to its leading samples so caches grown to different sizes combine at a
 common size.
 """
-sketch_matrix(cache::CachedSketch, l::Int, rks_l::Int; weighting::Symbol=:equal, nsamp=nothing) =
-  finalize_cols(cache.groups, l, rks_l; weighting=weighting, nsamp=nsamp)
+sketch_matrix(cache::CachedSketch, l::Int, rks_l::Int; weighting::Symbol=:equal, nsamp=nothing, out=nothing) =
+  finalize_cols(cache.groups, l, rks_l; weighting=weighting, nsamp=nsamp, out=out)
+
+"""
+    remat_into!(Wj, l, cache, rks_l, nsamp; weighting) -> Wj[l]
+
+Materialize bond `l` of `cache` (prefix `nsamp`) into a **reused capacity buffer** `Wj[l]`,
+geometric-growing it only when the needed width exceeds capacity — avoids reallocating the sketch
+matrix on every extension. Consumers must index columns within the materialized width (the spare
+capacity past it holds stale data).
+"""
+function remat_into!(Wj::Vector{Matrix{T}}, l::Int, cache::CachedSketch, rks_l::Int,
+                     nsamp::Vector{Int}; weighting::Symbol=:equal) where {T}
+  cols = sum(nsamp[gi]*cache.groups[gi].brv[l] for gi in eachindex(cache.groups))
+  if !isassigned(Wj, l) || size(Wj[l], 1) != rks_l || size(Wj[l], 2) < cols
+    newcap = (isassigned(Wj, l) && size(Wj[l], 1) == rks_l) ? max(2*size(Wj[l], 2), cols) : cols
+    Wj[l] = Matrix{T}(undef, rks_l, newcap)
+  end
+  finalize_cols(cache.groups, l, rks_l; weighting=weighting, nsamp=nsamp, out=view(Wj[l], :, 1:cols))
+  return Wj[l]
+end

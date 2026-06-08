@@ -384,9 +384,9 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
         max_basis = bond_rank_cap(dims, k, ℓ_max)
         # Materialize the active bond's right-neighbour from the cache at the common prefix
         # p_target[k+1] (it may have grown while earlier bonds were processed). This is the only
-        # W[j] bond read at bond k.
+        # W[j] bond read at bond k; into a reused capacity buffer (consumers index within sketch_rks).
         @timeit timer "reverse_sketch" for j = 1:m
-          W[j][k+1] = sketch_matrix(caches[j], k+1, y[j].ttv_rks[k+1]; nsamp=[p_target[k+1]])
+          remat_into!(W[j], k+1, caches[j], y[j].ttv_rks[k+1], [p_target[k+1]])
         end
         sketch_rks[k+1] = brv[k+1]*p_target[k+1]
         @timeit timer "Randomized adaptive QR decomposition" begin
@@ -471,7 +471,7 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
                   want = brv .* p_target
                   for j = 1:m
                     ensure_columns!(caches[j], y[j], want; seed=seed, orthogonal=orthogonal, timer=timer)
-                    W[j][k+1] = sketch_matrix(caches[j], k+1, y[j].ttv_rks[k+1]; nsamp=[p_target[k+1]])
+                    remat_into!(W[j], k+1, caches[j], y[j].ttv_rks[k+1], [p_target[k+1]])
                   end
                   for l = k+1:N
                     sketch_rks[l] = brv[l]*p_target[l]
