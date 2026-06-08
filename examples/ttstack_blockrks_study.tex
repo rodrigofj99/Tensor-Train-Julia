@@ -98,41 +98,45 @@ oblivious-embedding guarantee made visible.
 
 \section{Single-TT rounding (synthetic and Mat\'ern)}
 
+Randomized rounding beats deterministic when the \emph{QR/SVD sweep} is the bottleneck: the
+deterministic sweep costs $O(d\,r^3)$ per bond \emph{regardless of the target rank}, while the
+sketched sweep costs $O(d\,r^2\,\ell)$ with $\ell$ the sketch (target) rank --- a ratio $\ell/r$. (An
+earlier implementation of the randomized left-update used a 3-factor \texttt{@tensoropt} that
+materialised an $O(d^2 r)$ intermediate, which masked this advantage entirely; rewriting it as two
+explicit gemms restored the expected scaling, and the figures below reflect that.)
+
 \paragraph{Synthetic, fixed target rank} (paper \S4.1). Fixed-rank randomized rounding of a
 rank-50 + $10^{-5}$ tensor (effective rank $\approx$ TT rank), sweeping the maximum target rank. The
 error collapses once the target rank reaches the signal rank; the randomized methods track the
-deterministic baseline's accuracy, with TTStack matching KRP and no accuracy penalty for the larger
-block rank. Here the measured speedup is below~$1$ --- the effective rank is close to the TT rank, so
-the sketch must process essentially the full cores and its construction overhead dominates the
-already sub-second deterministic SVD.
+deterministic baseline's accuracy. Even here, where $\ell$ approaches $r$, the randomized rounding is
+faster than the deterministic SVD throughout --- $\sim$20$\times$ at the smallest target and decaying
+toward $\sim$2.5$\times$ as $\mathrm{rmax}\to r$ (less of the $O(d r^3)$ sweep left to save).
 \fig{../out/synthetic_blockrks_sweep/synthetic_blockrks_sweep_signal50.pdf}{synthetic\_blockrks\_sweep.jl}
 
-\paragraph{The rank-gap regime: where randomized rounding wins.} Randomized rounding beats
-deterministic precisely when the \emph{QR/SVD sweep} is the bottleneck, which requires the sketch
-(target) rank $\ell$ to be much smaller than the TT rank $r$: the deterministic sweep costs
-$O(d\,r^3)$ per bond \emph{regardless of the target}, while the sketch costs only $O(d\,r^2\,\ell)$,
-a ratio $\ell/r$. We construct this regime with a low-effective-rank tensor inside a high TT rank: a
-rank-4 signal plus a rank-100, amplitude-$10^{-6}$ perturbation (TT rank $\approx 104$). Rounding at
-the natural target $\mathrm{rmax}=4$ then gives a large speedup, and it is simultaneously KRP's worst
-accuracy case (a low-rank signal):
+\paragraph{The rank-gap regime: where the speedup is largest.} The advantage grows with the gap
+$r/\ell$. We make it large with a low-effective-rank tensor inside a high TT rank: a rank-4 signal
+plus a rank-100, amplitude-$10^{-6}$ perturbation (TT rank $\approx 104$). At the natural target
+$\mathrm{rmax}=4$ this is also KRP's worst accuracy case (a low-rank signal):
 \begin{center}
 \begin{tabular}{@{}lcc@{}}
 \toprule
 method (at rmax $=4$, TT rank $\approx 104$) & speedup vs.\ det & relative error \\
 \midrule
 deterministic & $1\times$ & $1.0\times10^{-6}$ \\
-strict-KRP    & $6.7\times$ & $1.9\times10^{-5}$ \\
-TTStack-$N$   & $\mathbf{9.2\times}$ & $\mathbf{3.2\times10^{-6}}$ \\
-TTStack-$2N$  & $7.5\times$ & $2.6\times10^{-6}$ \\
+strict-KRP    & $36\times$ & $3.2\times10^{-5}$ \\
+TTStack-$N$   & $29\times$ & $\mathbf{3.3\times10^{-6}}$ \\
+TTStack-$2N$  & $17\times$ & $3.1\times10^{-6}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
-TTStack is both $\sim$9$\times$ faster than deterministic and $\sim$6$\times$ more accurate than KRP.
-As $\mathrm{rmax}$ grows past the effective rank one over-resolves (the sketch rank approaches the TT
-rank and captures only perturbation noise), so the advantage fades --- the figure shows this crossover.
+All variants are now an order of magnitude faster than deterministic; the cheaper KRP sketch is
+marginally faster than TTStack, but TTStack is $\sim$10$\times$ \emph{more accurate} at this low-rank
+signal --- so the block-rank cost buys accuracy, not speed, exactly where KRP is weakest. As
+$\mathrm{rmax}$ grows past the effective rank one over-resolves (the sketch rank approaches the TT
+rank), so the speedup fades from $\sim$37$\times$ to $\sim$2.5$\times$ --- the figure shows this crossover.
 \fig{../out/synthetic_blockrks_sweep/synthetic_blockrks_sweep_rankgap.pdf}{synthetic\_blockrks\_sweep.jl}
-The speedup grows with the rank gap $r/\ell$; the large-rank Mat\'ern tensor (\S4 below) and the cookie
-solves (\S5, large deterministic baseline) are the same effect at scale.
+The same $r/\ell$ effect appears at scale on the Mat\'ern tensor (\S4 below) and the cookie solves
+(\S5, large deterministic baseline).
 
 \paragraph{Mat\'ern, tolerance sweep} (paper \S4.2 / Fig.~5). Adaptive rounding of the rank-621
 Mat\'ern tensor across tolerances. The four-panel figure reports achieved rank, achieved error, the
@@ -144,13 +148,16 @@ pass recovers the minimal rank while preserving accuracy.
 
 \section{Linear systems (cookie, both solvers)}
 
-\paragraph{Block-rank study at fixed $n$} (paper \S4.3 / Figs.~7--8). The cookie linear system is
-solved with both the faithful Sum+Round TT-GMRES (the paper's method) and the package's sketched
-GMRES (with window-sketch caching), for each named method. The left panel shows the intermediate
-Arnoldi-basis rank per GMRES iteration: strict-KRP balloons the basis ranks (a symptom of its
-high-variance norm estimate), while TTStack keeps them near the deterministic profile. The right
-panel compares wall time across the two solvers; a computed deterministic baseline (cached) sets the
-speedup reference.
+\paragraph{Block-rank study at fixed $n$} (paper \S4.3 / Figs.~7--8). The cookie linear system
+($n{=}8$ parameter samples, 8 TT modes) is solved with both the faithful Sum+Round TT-GMRES (the
+paper's method) and the package's sketched GMRES (with window-sketch caching), for each named method,
+against a computed deterministic baseline ($\approx$2370\,s). All randomized variants converge to the
+same $\sim$$10^{-7}$ true residual in 15--16 (Sum+Round) iterations: Sum+Round runs in 73--91\,s
+(\textbf{26--32$\times$} faster than deterministic) and the sketched GMRES in 21--26\,s
+(\textbf{92--112$\times$}). The left panel shows the intermediate Arnoldi-basis rank per GMRES
+iteration: all sketch variants stay near the deterministic profile (peak $\approx$720--750 vs.\ the
+deterministic 720), with strict-KRP the loosest (a symptom of its higher-variance norm estimate). The
+right panel compares wall time across the two solvers.
 \fig{../out/cookie_blockrks_study/cookie_blockrks_study.pdf}{cookie\_blockrks\_study.jl}
 
 \paragraph{Parameter-sample sweep} (paper Fig.~6/8). Varying the number of parameter samples $n$:
