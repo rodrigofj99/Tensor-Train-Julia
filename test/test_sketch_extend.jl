@@ -88,4 +88,16 @@ end
             @test all(size(sketch_matrix(c1, l, rks[l]), 2) >= want2[l] for l in 1:N)
         end
     end
+
+    @testset "single-TT overload: cache on/off bit-identical (two-group mixed block_rks)" begin
+        y = rand_tt(Float64, dims, 10; seed=42)
+        ε = 1e-2; brk = 7; brk_inc = 2
+        r0 = ttrand_rounding_adaptive(y, ε; seed=seed, block_rks=brk, block_rks_inc=brk_inc)
+        c  = cached_sketch(Float64, y, brk, brk_inc, 4+max(N÷2,4); seed=seed)
+        r1 = ttrand_rounding_adaptive(y, ε; seed=seed, block_rks=brk, block_rks_inc=brk_inc, cache=c)
+        r2 = ttrand_rounding_adaptive(y, ε; seed=seed, block_rks=brk, block_rks_inc=brk_inc, cache=c)  # reuse grown
+        @test norm(r1 - r0) / norm(r0) < 1e-12     # cache-on == cache-off
+        @test norm(r2 - r0) / norm(r0) < 1e-12     # reusing the grown cache == fresh
+        @test norm(r0 - y) / norm(y) < 1e-10       # rank captures y here
+    end
 end

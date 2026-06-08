@@ -243,8 +243,9 @@ matrix on every extension. Consumers must index columns within the materialized 
 capacity past it holds stale data).
 """
 function remat_into!(Wj::Vector{Matrix{T}}, l::Int, cache::CachedSketch, rks_l::Int,
-                     nsamp::Vector{Int}; weighting::Symbol=:equal) where {T}
-  cols = sum(nsamp[gi]*cache.groups[gi].brv[l] for gi in eachindex(cache.groups))
+                     nsamp=nothing; weighting::Symbol=:equal) where {T}
+  cnt = nsamp === nothing ? [g.counts[l] for g in cache.groups] : nsamp
+  cols = sum(cnt[gi]*cache.groups[gi].brv[l] for gi in eachindex(cache.groups))
   if !isassigned(Wj, l) || size(Wj[l], 1) != rks_l || size(Wj[l], 2) < cols
     newcap = (isassigned(Wj, l) && size(Wj[l], 1) == rks_l) ? max(2*size(Wj[l], 2), cols) : cols
     Wj[l] = Matrix{T}(undef, rks_l, newcap)
