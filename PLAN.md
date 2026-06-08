@@ -101,9 +101,14 @@ optimization (`e36a426`,`6983e04`). All cache-on==cache-off bit-identical.
 NOTE: in this sandbox `julialauncher` intermittently hangs without spawning a worker; invoke the real
 binary directly: `/Users/cazeaux/.julia/juliaup/julia-1.12.6+0.aarch64.apple.darwin14/Julia-1.12.app/Contents/Resources/julia/bin/julia`.
 
-## Stage 5 — Wire cache into `sketched_gmres`  (`src/tt_solvers.jl`)
+## Stage 5 — Wire cache into `sketched_gmres`  (`src/tt_solvers.jl`)  — DONE
 `CachedSketch` per window vector, parallel to `B_window` (push/`popfirst!`), passed into `_sg_round`
-(summands uncached); keep `reuse_sketches::Bool=true`.
+(leading non-window terms uncached); `reuse_sketches::Bool=true`.
+- Summand path: `c2cedf6` (validated bit-identical on cookie).
+- **Operator path** (`_sg_round(op::TToperator, …)`): now passes `caches=[nothing; win_caches]` to the
+  mixed-operator overload (the `A·pv` term changes each step → `nothing`; window terms cached).
+  `test/test_solvers.jl` covers both paths on a small synthetic operator: `reuse_sketches` true vs
+  false bit-identical end-to-end (‖xT−xF‖/‖xF‖≈2e-16), same iterations, converges.
 **Verify (single-thread):** `reuse_sketches` true vs false bit-identical end-to-end; cookie sketched
 GMRES same iterations/accuracy, faster.
 

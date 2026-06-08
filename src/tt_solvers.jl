@@ -720,10 +720,14 @@ function _sg_embed(op, pv, s, orthogonal, seed, block_rks; timer::TimerOutput=Ti
     return S
 end
 # win_caches: per-window-vector CachedSketch (aligned with `window`), reused/extended across
-# iterations so a window vector is sketched once. Summands change every step (pv changes) → nothing
-# caches. Only the summand path supports it (the TToperator overload ignores win_caches).
-_sg_round(op::TToperator{T,N}, pv, h, window, ε, orthogonal, block_rks, seed; win_caches=nothing, timer::TimerOutput=TimerOutput()) where {T,N} =
-    ttrand_rounding_adaptive(vcat(one(T), -h), op, vcat([pv], window), ε; orthogonal=orthogonal, block_rks=block_rks, seed=seed, timer=timer)
+# iterations so a window vector is sketched once. The leading non-window terms change every step
+# (the operator term A·pv / each summand depends on pv) → nothing caches; only the trailing window
+# terms are cached. Both paths support it.
+function _sg_round(op::TToperator{T,N}, pv, h, window, ε, orthogonal, block_rks, seed; win_caches=nothing, timer::TimerOutput=TimerOutput()) where {T,N}
+    # y = [pv; window…] → caches = [nothing (A·pv, changes each step); win_caches (window)].
+    caches = win_caches === nothing ? nothing : vcat(Any[nothing], win_caches)
+    ttrand_rounding_adaptive(vcat(one(T), -h), op, vcat([pv], window), ε; orthogonal=orthogonal, block_rks=block_rks, seed=seed, caches=caches, timer=timer)
+end
 function _sg_round(op, pv, h, window, ε, orthogonal, block_rks, seed; win_caches=nothing, timer::TimerOutput=TimerOutput())
     summ = op(pv); TT = eltype(summ[1])
     caches = win_caches === nothing ? nothing : vcat(fill(nothing, length(summ)), win_caches)
