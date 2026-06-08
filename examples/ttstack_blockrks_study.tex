@@ -103,6 +103,12 @@ rank-50 + $10^{-5}$ tensor, sweeping the maximum target rank. The error collapse
 rank reaches the signal rank; the randomized methods track the deterministic baseline's accuracy,
 with TTStack matching KRP and no accuracy penalty for the larger block rank.
 \fig{../out/synthetic_blockrks_sweep/synthetic_blockrks_sweep.pdf}{synthetic\_blockrks\_sweep.jl}
+On this small single tensor the measured speedup is below~$1$: the deterministic thin SVD is already
+sub-second, so the sketch-construction overhead dominates. Randomized rounding is a \emph{large-scale}
+win --- it pays off when the deterministic SVD ($O(r^3)$ per bond) is the bottleneck or when many
+summands are combined. The synthetic panel therefore demonstrates \emph{accuracy parity} (and, with
+Study~E, variance control); the speedups appear on the Mat\'ern tensor (large rank, \S4 below) and on
+the cookie solves (large deterministic baseline, \S5).
 
 \paragraph{Mat\'ern, tolerance sweep} (paper \S4.2 / Fig.~5). Adaptive rounding of the rank-621
 Mat\'ern tensor across tolerances. The four-panel figure reports achieved rank, achieved error, the
