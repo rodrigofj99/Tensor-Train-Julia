@@ -525,9 +525,14 @@ function ttrand_rounding_adaptive(α::Vector{T}, y::Vector{TTvector{T,N}}, ε::R
           end
         end
         @timeit timer "Update Yₖ" begin
-          Yₖ₊₁ = [zeros(T, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2]) for j=1:m]
+          # Explicit (vec[k]·Yₖ[j])→T1, then T1·ttv_vec[k+1] ordering — avoids the large
+          # (ρₖ,iₖ,iₖ₊₁,αₖ₊₂) intermediate the naive @tensoropt materialises (the single-TT-path fix).
+          Yₖ₊₁ = Vector{Array{T,3}}(undef, m)
+          Vk = reshape(vec[k], out_rks[k]*dims[k], out_rks[k+1])
           for j = 1:m
-            @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁) Yₖ₊₁[j][ρₖ₊₁,iₖ₊₁,αₖ₊₂] = Yₖ[j][ρₖ,iₖ,αₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
+            T1 = Vk' * reshape(Yₖ[j], out_rks[k]*dims[k], y[j].ttv_rks[k+1])
+            Yⱼ = T1 * reshape(y[j].ttv_vec[k+1], y[j].ttv_rks[k+1], dims[k+1]*y[j].ttv_rks[k+2])
+            Yₖ₊₁[j] = reshape(Yⱼ, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2])
           end
           Yₖ = Yₖ₊₁
         end
@@ -747,11 +752,14 @@ function ttrand_rounding_adaptive(α::Vector{T}, A::TToperator{T,N}, y::Vector{T
           Ayₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], y[1].ttv_rks[k+2], A.tto_rks[k+2])
           @tensoropt (αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂,ρₖ₊₁) Ayₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂,βₖ₊₂] = Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y[1].ttv_vec[k+1][αₖ₊₁,jₖ₊₁,αₖ₊₂]*A.tto_vec[k+1][βₖ₊₁,iₖ₊₁,jₖ₊₁,βₖ₊₂]
           Ayₖ = Ayₖ₊₁
-          # Terms j≥2 vector updates.
+          # Terms j≥2 vector updates: explicit (vec[k]·Yₖ[j])→T1, then T1·ttv_vec[k+1] ordering
+          # (avoids the (ρₖ,iₖ,iₖ₊₁,αₖ₊₂) intermediate the naive @tensoropt materialises).
           Yₖ₊₁ = Vector{Array{T,3}}(undef, m)
+          Vk = reshape(vec[k], out_rks[k]*dims[k], out_rks[k+1])
           for j = 2:m
-            Yₖ₊₁[j] = zeros(T, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2])
-            @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁) Yₖ₊₁[j][ρₖ₊₁,iₖ₊₁,αₖ₊₂] = Yₖ[j][ρₖ,iₖ,αₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
+            T1 = Vk' * reshape(Yₖ[j], out_rks[k]*dims[k], y[j].ttv_rks[k+1])
+            Yⱼ = T1 * reshape(y[j].ttv_vec[k+1], y[j].ttv_rks[k+1], dims[k+1]*y[j].ttv_rks[k+2])
+            Yₖ₊₁[j] = reshape(Yⱼ, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2])
           end
           Yₖ = Yₖ₊₁
         end
@@ -950,9 +958,13 @@ function ttrand_rounding_adaptive(Atto::TToperator{T,N}, y::TTvector{T,N}, b::TT
         end
         @timeit timer "Update Ayₖ, bₖ" begin
           Ayₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], y.ttv_rks[k+2], Atto.tto_rks[k+2])
-          bₖ₊₁  = zeros(T, out_rks[k+1], dims[k+1], b.ttv_rks[k+2])
           @tensoropt (αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂,ρₖ₊₁) Ayₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂,βₖ₊₂] = Ayₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y.ttv_vec[k+1][αₖ₊₁,jₖ₊₁,αₖ₊₂]*Atto.tto_vec[k+1][βₖ₊₁,iₖ₊₁,jₖ₊₁,βₖ₊₂]
-          @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁) bₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂] = bₖ[ρₖ,iₖ,αₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*b.ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
+          # b is a plain vector term: explicit (vec[k]·bₖ)→T1, then T1·ttv_vec[k+1] (avoids the
+          # (ρₖ,iₖ,iₖ₊₁,αₖ₊₂) intermediate the naive @tensoropt materialises).
+          Vk = reshape(vec[k], out_rks[k]*dims[k], out_rks[k+1])
+          T1b = Vk' * reshape(bₖ, out_rks[k]*dims[k], b.ttv_rks[k+1])
+          bₖ₊₁ = reshape(T1b * reshape(b.ttv_vec[k+1], b.ttv_rks[k+1], dims[k+1]*b.ttv_rks[k+2]),
+                         out_rks[k+1], dims[k+1], b.ttv_rks[k+2])
           Ayₖ = Ayₖ₊₁
           bₖ  = bₖ₊₁
         end
