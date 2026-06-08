@@ -1,0 +1,144 @@
+% Compile with pdflatex (run from examples/): pdflatex ttstack_blockrks_study.tex
+% Figures are produced by the companion experiment scripts and land in ../out/<study>/*.pdf:
+%   julia --project=. examples/embedding_distortion.jl        -> out/embedding_distortion/{E1,E2}_*.pdf
+%   julia --project=. examples/synthetic_blockrks_sweep.jl    -> out/synthetic_blockrks_sweep/*.pdf
+%   julia --project=. examples/matern_blockrks_sweep.jl       -> out/matern_blockrks_sweep/*.pdf
+%   julia --project=. examples/cookie_blockrks_study.jl       -> out/cookie_blockrks_study/*.pdf
+%   julia --project=. examples/cookie_nsweep.jl               -> out/cookie_nsweep/*.pdf
+\documentclass[10pt,a4paper]{article}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{hyperref}
+
+\newcommand{\fig}[2]{%
+  \begin{center}\IfFileExists{#1}{\includegraphics[width=\linewidth]{#1}}%
+  {\fbox{\parbox{0.9\linewidth}{\centering\ttfamily\detokenize{#1}\\[2pt]\rmfamily\itshape
+   (figure not yet generated --- run the companion script #2)}}}\end{center}}
+
+\title{TTStack vs.\ Khatri--Rao block-rank study on the cookie and Mat\'ern problems}
+\author{Adaptive randomized TT rounding with an oblivious recursive sketch}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+This report studies adaptive randomized tensor-train (TT) rounding as a function of the
+\emph{block-rank parameters} of the sketch, on the two driver problems of Al~Daas et al.\
+(arXiv:2511.03598): the parametric ``cookie'' PDE and the Mat\'ern kernel tensor. We reproduce that
+paper's experiments but replace its pure \emph{Khatri--Rao product} (KRP) sketch with this package's
+\emph{TTStack} recursive sketch.
+
+The thesis is a structural one. The TTStack sketch (block rank $\chi\!=\!N$, with within-block
+orthogonalization) is an \emph{oblivious subspace embedding}: its distortion is controlled by the
+embedding dimension and the dimension of the subspace being embedded, and is \emph{independent of the
+internal TT rank} of the vectors it sketches. The KRP sketch is the degenerate special case
+$\texttt{block\_rks}=1$ with raw Gaussian blocks; it carries no oblivious guarantee and, as we
+confirm, is \emph{worst for low-rank inputs}. The practical claim we demonstrate: raising the block
+rank from $1$ (KRP) to $N$ (TTStack) buys provable, rank-independent distortion control at a
+\emph{modest} extra cost, and tames the intermediate-rank blow-up that KRP suffers inside iterative
+solvers.
+
+\paragraph{Named methods.} Throughout, a method is fixed by the block ranks of the two sketch
+groups (an initial frozen group of rank \texttt{block\_rks} and an extension group of rank
+\texttt{block\_rks\_inc}) and by whether the per-block vectors are orthogonalized:
+\begin{center}
+\begin{tabular}{@{}lccl@{}}
+\toprule
+method & \texttt{block\_rks} & \texttt{orthogonal} & description \\
+\midrule
+strict-KRP  & $1$   & false & raw Khatri--Rao (the paper's sketch) \\
+orth-KRP    & $1$   & true  & orthogonalized rank-1 blocks \\
+TTStack-$N$ & $N$   & true  & oblivious embedding \\
+TTStack-$2N$& $2N$  & true  & wider embedding (cost/accuracy headroom) \\
+Adap-R      & $N$   & true  & TTStack-$N$ + a final deterministic rounding pass \\
+\bottomrule
+\end{tabular}
+\end{center}
+The group-combination weighting is fixed at \texttt{:column} (the empirically chosen default; the
+inverse-variance \texttt{:precision} weighting was found biased at small sample counts).
+
+\section{Background: the recursive TTStack sketch}
+
+A recursive sketch contracts each TT core against a chain of small random ``blocks''
+$B_k\in\mathbb{R}^{\chi\times n_k\times\chi}$, accumulating a boundary contraction $S\,y$ whose
+Frobenius norm is an unbiased estimate of $\|y\|_F$ (Al~Daas et al., Remark~3.1). The block rank
+$\chi=\texttt{block\_rks}$ interpolates between a Khatri--Rao product ($\chi=1$) and a full TTStack
+embedding ($\chi=N$). The adaptive rounding loop grows each bond's basis until a sketch-based
+residual estimate falls below the per-bond budget $\tau = \varepsilon\,\|y\|_F/\sqrt{N-1}$; an
+\emph{extension} group of rank \texttt{block\_rks\_inc} supplies additional sketch columns when the
+sliding window is exhausted, and the two groups are combined into one unbiased isometry at finalize
+time. The single-TT and Hadamard rounding overloads expose both block ranks; the
+linear-combination overload used by Sum+Round GMRES exposes \texttt{block\_rks} only.
+
+\section{Provable embedding: distortion vs.\ block rank}
+
+We measure the distortion of the boundary norm estimate $\mathrm{est}=\|S\,y\|_F/\|y\|_F$ (the
+quantity that sets $\tau$) over many independent sketches. All methods are unbiased
+($\mathbb{E}[\mathrm{est}^2]=1$); the discriminator is the variance/coefficient of variation (CoV)
+at a fixed embedding dimension.
+
+\paragraph{E1 --- estimate vs.\ embedding dimension} (mirror of \texttt{NormEstimation.m}). On the
+synthetic rank-50 tensor, the Mat\'ern tensor, and a cookie vector, the estimate concentrates on
+$1$ as the number of sketch columns grows; TTStack's band is tighter than KRP's at every embedding
+size.
+\fig{../out/embedding_distortion/E1_synthetic_N10.pdf}{embedding\_distortion.jl}
+\fig{../out/embedding_distortion/E1_matern.pdf}{embedding\_distortion.jl}
+
+\paragraph{E2 --- the rank-independence figure.} Fixing the embedding dimension and sweeping
+\texttt{block\_rks} from $1$ (KRP) to $N$ (TTStack), overlaid for a rank-1 and a high-rank input:
+KRP's distortion is large \emph{and rank-dependent} (worst at rank 1, where the estimate is even
+biased), whereas raising the block rank collapses the CoV onto a rank-independent band. This is the
+oblivious-embedding guarantee made visible.
+\fig{../out/embedding_distortion/E2_matern_rankcontrast.pdf}{embedding\_distortion.jl}
+\fig{../out/embedding_distortion/E2_synthetic.pdf}{embedding\_distortion.jl}
+
+\section{Single-TT rounding (synthetic and Mat\'ern)}
+
+\paragraph{Synthetic, fixed target rank} (paper \S4.1). Fixed-rank randomized rounding of a
+rank-50 + $10^{-5}$ tensor, sweeping the maximum target rank. The error collapses once the target
+rank reaches the signal rank; the randomized methods track the deterministic baseline's accuracy,
+with TTStack matching KRP and no accuracy penalty for the larger block rank.
+\fig{../out/synthetic_blockrks_sweep/synthetic_blockrks_sweep.pdf}{synthetic\_blockrks\_sweep.jl}
+
+\paragraph{Mat\'ern, tolerance sweep} (paper \S4.2 / Fig.~5). Adaptive rounding of the rank-621
+Mat\'ern tensor across tolerances. The four-panel figure reports achieved rank, achieved error, the
+per-bond rank profile, and wall time; the three-panel figure reports accuracy, speedup over the
+deterministic baseline, and rank compression. The Adap-R column shows that a final deterministic
+pass recovers the minimal rank while preserving accuracy.
+\fig{../out/matern_blockrks_sweep/matern_blockrks_ext_sweep.pdf}{matern\_blockrks\_sweep.jl}
+\fig{../out/matern_blockrks_sweep/matern_speedup_compression.pdf}{matern\_blockrks\_sweep.jl}
+
+\section{Linear systems (cookie, both solvers)}
+
+\paragraph{Block-rank study at fixed $n$} (paper \S4.3 / Figs.~7--8). The cookie linear system is
+solved with both the faithful Sum+Round TT-GMRES (the paper's method) and the package's sketched
+GMRES (with window-sketch caching), for each named method. The left panel shows the intermediate
+Arnoldi-basis rank per GMRES iteration: strict-KRP balloons the basis ranks (a symptom of its
+high-variance norm estimate), while TTStack keeps them near the deterministic profile. The right
+panel compares wall time across the two solvers; a computed deterministic baseline (cached) sets the
+speedup reference.
+\fig{../out/cookie_blockrks_study/cookie_blockrks_study.pdf}{cookie\_blockrks\_study.jl}
+
+\paragraph{Parameter-sample sweep} (paper Fig.~6/8). Varying the number of parameter samples $n$:
+the randomized solves are essentially $n$-independent in iteration count and solution rank (set by
+the cookie geometry, not $n$), so their cost grows only with the parameter-mode core size, while the
+deterministic baseline is infeasible beyond small $n$. The speedup panel uses the $n{=}8$
+deterministic wall as the fixed reference.
+\fig{../out/cookie_nsweep/cookie_nsweep.pdf}{cookie\_nsweep.jl}
+
+\section{Discussion}
+
+Across all three regimes --- norm estimation, single-TT rounding, and linear-system solves --- the
+TTStack sketch delivers the same or better accuracy than the Khatri--Rao product at a modest extra
+block-rank cost, and crucially with a distortion that is provably controlled and independent of the
+input TT rank. The benefit is largest exactly where KRP is weakest: low-rank inputs (where KRP is
+both noisy and biased) and the intermediate iterates of a Krylov solver (where KRP's high-variance
+rank estimates inflate the basis ranks). KRP remains adequate for high-rank inputs sketched with
+ample samples; TTStack is the safe default when robustness, low rank, or a provable guarantee
+matters.
+
+\end{document}
