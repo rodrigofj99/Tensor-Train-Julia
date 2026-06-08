@@ -146,10 +146,16 @@ function ttrand_rounding(y::TTvector{T,N}, rks=default_rank_heuristic(y); orthog
       end
       end
       @timeit timer "Update yₖ" begin
-        #update left parts. y core (L, I, R).
-        yₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], y.ttv_rks[k+2])
-        @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁)  yₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂] = yₖ[ρₖ,iₖ,αₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y.ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
-        yₖ = yₖ₊₁
+        # Explicit ordering: contract (vec[k], yₖ) → T1 first, then T1 × ttv_vec[k+1]. The naive
+        # @tensoropt ordering materialises a (ρₖ, iₖ, iₖ₊₁, αₖ₊₂) intermediate (~200 MB/bond at the
+        # widest bonds here), which dominated the sweep; the order below keeps the intermediate at
+        # (ρₖ₊₁, αₖ₊₁) — a few tens of KB. Mirrors the fix in ttrand_rounding_adaptive.
+        # T1[ρₖ₊₁, αₖ₊₁] = Σ_{ρₖ, iₖ} vec[k][ρₖ, iₖ, ρₖ₊₁] * yₖ[ρₖ, iₖ, αₖ₊₁]
+        T1 = reshape(vec[k], out_rks[k]*dims[k], out_rks[k+1])' *
+             reshape(yₖ, out_rks[k]*dims[k], y.ttv_rks[k+1])
+        # yₖ₊₁[ρₖ₊₁, iₖ₊₁, αₖ₊₂] = Σ_{αₖ₊₁} T1[ρₖ₊₁, αₖ₊₁] * ttv_vec[k+1][αₖ₊₁, iₖ₊₁, αₖ₊₂]
+        yₖ₊₁_mat = T1 * reshape(y.ttv_vec[k+1], y.ttv_rks[k+1], dims[k+1]*y.ttv_rks[k+2])
+        yₖ = reshape(yₖ₊₁_mat, out_rks[k+1], dims[k+1], y.ttv_rks[k+2])
       end
       end
       vec[N] = reshape(yₖ, out_rks[N], dims[N], out_rks[N+1])
@@ -277,10 +283,14 @@ function ttrand_rounding(α::Vector{T}, y::Vector{TTvector{T,N}}, rks=default_ra
         ot[k] = 1
       end
       @timeit timer "Update left contraction" begin
-        #update left parts
-        Yₖ₊₁ = [ zeros(T, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2]) for j=1:m ]
+        # Explicit (vec[k]·Yₖ[j]) → T1, then T1·ttv_vec[k+1] ordering — avoids the large
+        # (ρₖ,iₖ,iₖ₊₁,αₖ₊₂) intermediate the naive @tensoropt materialises (see the single-TT path).
+        Yₖ₊₁ = Vector{Array{T,3}}(undef, m)
+        Vk = reshape(vec[k], out_rks[k]*dims[k], out_rks[k+1])
         for j=1:m
-          @tensoropt (αₖ₊₁,αₖ₊₂,ρₖ₊₁)  Yₖ₊₁[j][ρₖ₊₁,iₖ₊₁,αₖ₊₂] = Yₖ[j][ρₖ,iₖ,αₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
+          T1 = Vk' * reshape(Yₖ[j], out_rks[k]*dims[k], y[j].ttv_rks[k+1])
+          Yⱼ = T1 * reshape(y[j].ttv_vec[k+1], y[j].ttv_rks[k+1], dims[k+1]*y[j].ttv_rks[k+2])
+          Yₖ₊₁[j] = reshape(Yⱼ, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2])
         end
         Yₖ = Yₖ₊₁
       end
@@ -359,9 +369,12 @@ function ttrand_rounding(α::Vector{T}, A::TToperator{T,N}, y::Vector{TTvector{T
             Ay₁ₖ₊₁ = zeros(T, out_rks[k+1], dims[k+1], y[1].ttv_rks[k+2], A.tto_rks[k+2])
             @tensoropt (ρₖ,ρₖ₊₁,αₖ₊₁,βₖ₊₁,αₖ₊₂,βₖ₊₂) Ay₁ₖ₊₁[ρₖ₊₁,iₖ₊₁,αₖ₊₂,βₖ₊₂] = y₁ₖ[ρₖ,iₖ,αₖ₊₁,βₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y[1].ttv_vec[k+1][αₖ₊₁,jₖ₊₁,αₖ₊₂]*A.tto_vec[k+1][βₖ₊₁,iₖ₊₁,jₖ₊₁,βₖ₊₂]
             Yₖ₊₁[1] = reshape(Ay₁ₖ₊₁, out_rks[k+1], dims[k+1], y[1].ttv_rks[k+2]*A.tto_rks[k+2])
+            Vk = reshape(vec[k], out_rks[k]*dims[k], out_rks[k+1])
             for j=2:m
-              Yₖ₊₁[j] = zeros(T, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2])
-              @tensoropt (ρₖ₊₁,αₖ₊₁,αₖ₊₂)  Yₖ₊₁[j][ρₖ₊₁,iₖ₊₁,αₖ₊₂] = Yₖ[j][ρₖ,iₖ,αₖ₊₁]*vec[k][ρₖ,iₖ,ρₖ₊₁]*y[j].ttv_vec[k+1][αₖ₊₁,iₖ₊₁,αₖ₊₂]
+              # Explicit (vec[k]·Yₖ[j])→T1, then T1·ttv_vec[k+1] ordering (see the single-TT path).
+              T1 = Vk' * reshape(Yₖ[j], out_rks[k]*dims[k], y[j].ttv_rks[k+1])
+              Yⱼ = T1 * reshape(y[j].ttv_vec[k+1], y[j].ttv_rks[k+1], dims[k+1]*y[j].ttv_rks[k+2])
+              Yₖ₊₁[j] = reshape(Yⱼ, out_rks[k+1], dims[k+1], y[j].ttv_rks[k+2])
             end
             Yₖ = Yₖ₊₁
           end
